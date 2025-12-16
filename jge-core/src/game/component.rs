@@ -14,19 +14,7 @@ use parking_lot::{
     Mutex, RawRwLock, RwLock, RwLockUpgradableReadGuard,
     lock_api::{RwLockReadGuard, RwLockWriteGuard},
 };
-use std::{
-    any::{TypeId, type_name},
-    collections::HashMap,
-    fmt, mem,
-    sync::{Arc, OnceLock},
-};
-
-pub struct ComponentDefaultDescriptor {
-    pub type_id: TypeId,
-    pub ensure: fn(Entity) -> Result<(), ComponentDependencyError>,
-}
-
-inventory::collect!(ComponentDefaultDescriptor);
+use std::{any::type_name, collections::HashMap, fmt, mem, sync::Arc};
 
 use crate::game::entity::Entity;
 
@@ -36,13 +24,13 @@ const CHUNK_SIZE: usize = 64;
 pub trait Component: Sized + 'static {
     fn storage() -> &'static ComponentStorage<Self>;
 
-    fn ensure_dependencies(_entity: Entity) -> Result<(), ComponentDependencyError> {
+    fn register_dependencies(_entity: Entity) -> Result<(), ComponentDependencyError> {
         Ok(())
     }
 
+    fn unregister_dependencies(_entity: Entity) {}
+
     fn insert(entity: Entity, component: Self) -> Result<Option<Self>, ComponentDependencyError> {
-        ensure_component_defaults::<Self>(entity)?;
-        Self::ensure_dependencies(entity)?;
         Ok(Self::storage().insert(entity.id(), component))
     }
 
@@ -59,34 +47,39 @@ pub trait Component: Sized + 'static {
     }
 }
 
-fn ensure_component_defaults<C: Component>(entity: Entity) -> Result<(), ComponentDependencyError> {
-    static REGISTRY: OnceLock<HashMap<TypeId, fn(Entity) -> Result<(), ComponentDependencyError>>> =
-        OnceLock::new();
-
-    let registry = REGISTRY.get_or_init(|| {
-        let mut map = HashMap::new();
-        for descriptor in inventory::iter::<ComponentDefaultDescriptor> {
-            map.insert(descriptor.type_id, descriptor.ensure);
-        }
-        map
-    });
-
-    if let Some(ensure) = registry.get(&TypeId::of::<C>()) {
-        ensure(entity)
-    } else {
-        Ok(())
-    }
-}
-
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct ComponentDependencyError {
     entity: Entity,
     required: &'static str,
+    source: Option<Box<dyn std::error::Error + Send + Sync + 'static>>,
 }
+
+impl PartialEq for ComponentDependencyError {
+    fn eq(&self, other: &Self) -> bool {
+        self.entity == other.entity && self.required == other.required
+    }
+}
+
+impl Eq for ComponentDependencyError {}
 
 impl ComponentDependencyError {
     pub fn new(entity: Entity, required: &'static str) -> Self {
-        Self { entity, required }
+        Self {
+            entity,
+            required,
+            source: None,
+        }
+    }
+
+    pub fn with_source<E>(entity: Entity, required: &'static str, source: E) -> Self
+    where
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        Self {
+            entity,
+            required,
+            source: Some(Box::new(source)),
+        }
     }
 
     pub fn entity(&self) -> Entity {
@@ -105,11 +98,21 @@ impl fmt::Display for ComponentDependencyError {
             "实体 {} 缺少依赖组件 {}",
             self.entity.id(),
             self.required
-        )
+        )?;
+        if let Some(source) = &self.source {
+            write!(f, ": {}", source)?;
+        }
+        Ok(())
     }
 }
 
-impl std::error::Error for ComponentDependencyError {}
+impl std::error::Error for ComponentDependencyError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.source
+            .as_ref()
+            .map(|error| error.as_ref() as &(dyn std::error::Error + 'static))
+    }
+}
 
 struct ComponentStorageInner<C> {
     chunks: Vec<Arc<ComponentChunk<C>>>,
@@ -387,8 +390,9 @@ pub fn require_component<C: Component>(entity: Entity) -> Result<(), ComponentDe
 
 #[cfg(test)]
 mod tests {
-    use super::component;
-    use super::*;
+    use super::{component, component_impl, *};
+    use std::error::Error as StdError;
+    use std::io::{Error as IoError, ErrorKind};
 
     #[component]
     #[derive(Debug, PartialEq)]
@@ -396,9 +400,39 @@ mod tests {
         value: i32,
     }
 
+    #[component_impl(TestComponent)]
     impl TestComponent {
+        #[default(0)]
         fn new(value: i32) -> Self {
             Self { value }
+        }
+    }
+
+    #[component]
+    #[derive(Debug, PartialEq)]
+    struct AlternateDefaultComponent {
+        created_by: &'static str,
+    }
+
+    #[component_impl(AlternateDefaultComponent)]
+    impl AlternateDefaultComponent {
+        #[default()]
+        fn build() -> Self {
+            Self {
+                created_by: "build",
+            }
+        }
+    }
+
+    #[component]
+    #[derive(Debug)]
+    struct FailingDefaultComponent;
+
+    #[component_impl(FailingDefaultComponent)]
+    impl FailingDefaultComponent {
+        #[default()]
+        fn create() -> Result<Self, IoError> {
+            Err(IoError::new(ErrorKind::Other, "default failure"))
         }
     }
 
@@ -489,23 +523,81 @@ mod tests {
     #[derive(Debug, Default)]
     struct NeedsTestComponent;
 
+    #[component(AlternateDefaultComponent)]
+    #[derive(Debug, Default)]
+    struct NeedsAlternateDefault;
+
+    #[component(FailingDefaultComponent)]
+    #[derive(Debug, Default)]
+    struct NeedsFailingDefault;
+
     #[test]
     fn component_dependency_checks_for_required_components() {
         let entity = Entity::new().expect("应能创建实体");
 
-        let missing = entity.register_component(NeedsTestComponent::default());
-        let err = missing.expect_err("缺少依赖时应返回错误");
-        assert_eq!(err.entity(), entity);
-
-        entity
-            .register_component(TestComponent::new(3))
-            .expect("插入组件不应触发依赖错误");
         let inserted = entity
             .register_component(NeedsTestComponent::default())
-            .expect("依赖满足时应当可以注册组件");
+            .expect("依赖应能通过默认构造自动满足");
         assert!(inserted.is_none());
+
+        let dependency = entity
+            .get_component::<TestComponent>()
+            .expect("应自动注册缺失的依赖组件");
+        assert_eq!(dependency.value, 0);
+        drop(dependency);
+
+        let previous = entity
+            .register_component(TestComponent::new(3))
+            .expect("更新依赖组件不应触发错误")
+            .expect("应当获取到默认注册的依赖组件");
+        assert_eq!(previous.value, 0);
+
+        let previous_needs = entity
+            .register_component(NeedsTestComponent::default())
+            .expect("依赖已满足时仍应允许注册组件");
+        assert!(previous_needs.is_some());
 
         let _ = entity.unregister_component::<NeedsTestComponent>();
         let _ = entity.unregister_component::<TestComponent>();
+    }
+
+    #[test]
+    fn dependency_supports_non_new_default_methods() {
+        let entity = Entity::new().expect("应能创建实体");
+
+        let inserted = entity
+            .register_component(NeedsAlternateDefault::default())
+            .expect("依赖应能通过默认方法自动满足");
+        assert!(inserted.is_none());
+
+        let dependency = entity
+            .get_component::<AlternateDefaultComponent>()
+            .expect("依赖组件应被默认方法创建");
+        assert_eq!(dependency.created_by, "build");
+        drop(dependency);
+
+        let _ = entity.unregister_component::<NeedsAlternateDefault>();
+        let _ = entity.unregister_component::<AlternateDefaultComponent>();
+    }
+
+    #[test]
+    fn dependency_default_errors_propagate_sources() {
+        let entity = Entity::new().expect("应能创建实体");
+
+        let err = entity
+            .register_component(NeedsFailingDefault::default())
+            .expect_err("失败的默认方法应向上传播错误");
+        assert_eq!(err.entity(), entity);
+        assert_eq!(err.required(), type_name::<FailingDefaultComponent>());
+
+        let source = StdError::source(&err).expect("错误源应被保留");
+        let source = source
+            .downcast_ref::<IoError>()
+            .expect("错误源应是 std::io::Error");
+        assert_eq!(source.kind(), ErrorKind::Other);
+        assert_eq!(source.to_string(), "default failure");
+
+        assert!(entity.get_component::<FailingDefaultComponent>().is_none());
+        assert!(entity.get_component::<NeedsFailingDefault>().is_none());
     }
 }

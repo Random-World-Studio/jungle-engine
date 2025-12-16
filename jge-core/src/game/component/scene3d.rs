@@ -26,9 +26,8 @@ const FRUSTUM_MARGIN: f32 = 1.0_f32.to_radians();
 const DEFAULT_REFERENCE_FRAMEBUFFER_HEIGHT: u32 = 1080;
 
 #[component(Layer, Renderable, Transform)]
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Scene3D {
-    name: String,
     vertical_fov: f32,
     near_plane: f32,
     view_distance: f32,
@@ -36,29 +35,11 @@ pub struct Scene3D {
     reference_framebuffer_height: u32,
 }
 
-impl Clone for Scene3D {
-    fn clone(&self) -> Self {
-        Self {
-            name: self.name.clone(),
-            vertical_fov: self.vertical_fov,
-            near_plane: self.near_plane,
-            view_distance: self.view_distance,
-            attached_camera: self.attached_camera,
-            reference_framebuffer_height: self.reference_framebuffer_height,
-        }
-    }
-}
-
 #[component_impl]
 impl Scene3D {
-    #[allow(dead_code)]
-    #[default(Layer::new(), Renderable::new(), Transform::new())]
-    fn ensure_defaults(_layer: Layer, _renderable: Renderable, _transform: Transform) -> Self {
-        Self::new("auto_scene3d")
-    }
-    pub fn new(name: impl Into<String>) -> Self {
+    #[default()]
+    pub fn new() -> Self {
         Self {
-            name: name.into(),
             vertical_fov: DEFAULT_VERTICAL_FOV,
             near_plane: DEFAULT_NEAR_PLANE,
             view_distance: DEFAULT_VIEW_DISTANCE,
@@ -93,10 +74,6 @@ impl Scene3D {
                 );
             }
         }
-    }
-
-    pub fn name(&self) -> &str {
-        &self.name
     }
 
     pub fn vertical_fov(&self) -> f32 {
@@ -704,20 +681,23 @@ mod tests {
         let _ = Node::detach(entity);
         let _ = entity.unregister_component::<Node>();
 
-        let missing = Scene3D::insert(entity, Scene3D::new("scene3d"));
-        assert!(matches!(
-            missing,
-            Err(crate::game::component::ComponentDependencyError { .. })
-        ));
-
-        prepare_scene_entity(&entity, "scene3d_root");
         let inserted =
-            Scene3D::insert(entity, Scene3D::new("scene3d")).expect("依赖满足后应能插入");
+            Scene3D::insert(entity, Scene3D::new()).expect("缺少 Layer 时应自动注册依赖");
         assert!(inserted.is_none());
 
-        let stored = entity.get_component::<Scene3D>().expect("应能读取 Scene3D");
-        assert_eq!(stored.name(), "scene3d");
-
+        assert!(
+            entity.get_component::<Layer>().is_some(),
+            "Layer 应被自动注册"
+        );
+        assert!(
+            entity.get_component::<Renderable>().is_some(),
+            "Renderable 应被注册"
+        );
+        assert!(entity.get_component::<Node>().is_some(), "Node 应被注册");
+        assert!(
+            entity.get_component::<Transform>().is_some(),
+            "Transform 应被注册"
+        );
         let layer = entity.get_component::<Layer>().expect("应能读取 Layer");
         assert!(
             layer.shader(RenderPipelineStage::Vertex).is_some(),
@@ -735,7 +715,6 @@ mod tests {
             ShaderLanguage::Wgsl
         );
         drop(layer);
-        drop(stored);
 
         let _ = entity.unregister_component::<Scene3D>();
         let _ = entity.unregister_component::<Layer>();
@@ -749,7 +728,7 @@ mod tests {
     fn scene3d_view_property_constraints() {
         let entity = Entity::new().expect("应能创建实体");
         prepare_scene_entity(&entity, "scene3d_props");
-        Scene3D::insert(entity, Scene3D::new("scene_props")).expect("应能插入 Scene3D");
+        Scene3D::insert(entity, Scene3D::new()).expect("应能插入 Scene3D");
 
         {
             let mut scene = Scene3D::write(entity).expect("应能写入 Scene3D");
@@ -776,7 +755,7 @@ mod tests {
     fn scene3d_vertical_fov_depends_on_aspect() {
         let entity = Entity::new().expect("应能创建实体");
         prepare_scene_entity(&entity, "scene3d_fov");
-        Scene3D::insert(entity, Scene3D::new("scene_fov")).expect("应能插入 Scene3D");
+        Scene3D::insert(entity, Scene3D::new()).expect("应能插入 Scene3D");
 
         let scene = entity.get_component::<Scene3D>().expect("应能读取 Scene3D");
         let tall = scene
@@ -801,7 +780,7 @@ mod tests {
     fn scene3d_visible_renderables_culls_geometry() {
         let scene = Entity::new().expect("应能创建实体");
         prepare_scene_entity(&scene, "scene3d_cull_root");
-        Scene3D::insert(scene, Scene3D::new("scene3d_cull")).expect("应能插入 Scene3D");
+        Scene3D::insert(scene, Scene3D::new()).expect("应能插入 Scene3D");
 
         let inside = Entity::new().expect("应能创建实体");
         prepare_child(&inside, "inside", scene);
@@ -846,7 +825,7 @@ mod tests {
         let camera = Entity::new().expect("应能创建实体");
         prepare_scene_entity(&camera, "camera_node");
         camera
-            .register_component(Camera::new("player"))
+            .register_component(Camera::new())
             .expect("应能插入 Camera");
 
         let visible =
@@ -904,8 +883,7 @@ mod tests {
         ));
 
         prepare_scene_entity(&entity, "scene3d_spatial");
-        Scene3D::insert(entity, Scene3D::new("scene3d_spatial"))
-            .expect("依赖满足后应能插入 Scene3D");
+        Scene3D::insert(entity, Scene3D::new()).expect("依赖满足后应能插入 Scene3D");
         assert_eq!(Scene3D::chunk_count(entity).unwrap(), 0);
 
         let target = OctVec::root();
@@ -943,13 +921,13 @@ mod tests {
     fn scene3d_attaches_and_syncs_camera_transform() {
         let scene = Entity::new().expect("应能创建实体");
         prepare_scene_entity(&scene, "scene3d_attach_root");
-        Scene3D::insert(scene, Scene3D::new("scene3d_attach")).expect("应能插入 Scene3D");
+        Scene3D::insert(scene, Scene3D::new()).expect("应能插入 Scene3D");
 
         let camera = Entity::new().expect("应能创建实体");
         prepare_camera_entity(&camera, "camera_attach");
         Node::attach(camera, scene).expect("应能将摄像机挂载到场景");
         let _ = camera
-            .register_component(Camera::new("main_camera"))
+            .register_component(Camera::new())
             .expect("应能插入 Camera");
 
         if let Some(mut transform) = camera.get_component_mut::<Transform>() {
@@ -1005,13 +983,13 @@ mod tests {
     fn scene3d_detach_camera_clears_attachment() {
         let scene = Entity::new().expect("应能创建实体");
         prepare_scene_entity(&scene, "scene3d_detach_root");
-        Scene3D::insert(scene, Scene3D::new("scene3d_detach")).expect("应能插入 Scene3D");
+        Scene3D::insert(scene, Scene3D::new()).expect("应能插入 Scene3D");
 
         let camera = Entity::new().expect("应能创建实体");
         prepare_camera_entity(&camera, "camera_detach");
         Node::attach(camera, scene).expect("应能将摄像机挂载到场景");
         let _ = camera
-            .register_component(Camera::new("detachable"))
+            .register_component(Camera::new())
             .expect("应能插入 Camera");
 
         Scene3D::attach_camera(scene, camera).expect("应能绑定摄像机");

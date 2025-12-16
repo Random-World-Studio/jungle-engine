@@ -1,9 +1,9 @@
 use heck::ToShoutySnakeCase;
 use proc_macro::TokenStream;
-use quote::{format_ident, quote};
+use quote::{ToTokens, format_ident, quote};
 use syn::{
-    Attribute, DeriveInput, Expr, FnArg, ImplItem, ItemImpl, Pat, PatIdent, Path, ReturnType,
-    Token, Type, parse::Parser, parse_macro_input, punctuated::Punctuated,
+    Attribute, DeriveInput, Expr, GenericArgument, ImplItem, ItemImpl, Path, PathArguments,
+    ReturnType, Token, Type, parse::Parser, parse_macro_input, punctuated::Punctuated,
 };
 
 #[proc_macro_attribute]
@@ -22,9 +22,13 @@ pub fn component(args: TokenStream, input: TokenStream) -> TokenStream {
     let struct_item = derive_input.clone();
 
     if !derive_input.generics.params.is_empty() {
+        let generics = derive_input.generics.to_token_stream().to_string();
         return syn::Error::new_spanned(
             derive_input.generics,
-            "#[component] does not yet support generic component types",
+            format!(
+                "#[component] 目前不支持带泛型参数的组件类型，检测到泛型参数：{}",
+                generics
+            ),
         )
         .to_compile_error()
         .into();
@@ -38,7 +42,10 @@ pub fn component(args: TokenStream, input: TokenStream) -> TokenStream {
 
     let dependency_checks = dependencies.iter().map(|dep| {
         quote! {
-            ::jge_core::game::component::require_component::<#dep>(entity)?;
+            if <#dep as ::jge_core::game::component::Component>::read(entity).is_none() {
+                let component = #dep::__jge_component_default(entity)?;
+                let _ = entity.register_component(component)?;
+            }
         }
     });
 
@@ -46,7 +53,7 @@ pub fn component(args: TokenStream, input: TokenStream) -> TokenStream {
         quote! {}
     } else {
         quote! {
-            fn ensure_dependencies(entity: ::jge_core::game::entity::Entity) -> Result<(), ::jge_core::game::component::ComponentDependencyError> {
+            fn register_dependencies(entity: ::jge_core::game::entity::Entity) -> Result<(), ::jge_core::game::component::ComponentDependencyError> {
                 #(#dependency_checks)*
                 Ok(())
             }
@@ -86,17 +93,13 @@ pub fn component_impl(_args: TokenStream, input: TokenStream) -> TokenStream {
             .into();
     }
 
-    let self_ty = (*item.self_ty).clone();
-    let type_path = match self_ty {
-        Type::Path(ref path) => path.path.clone(),
-        _ => {
-            return syn::Error::new_spanned(item.self_ty, "#[component_impl] 仅支持简单路径类型")
-                .to_compile_error()
-                .into();
-        }
-    };
+    if !matches!(&*item.self_ty, Type::Path(_)) {
+        return syn::Error::new_spanned(item.self_ty, "#[component_impl] 仅支持简单路径类型")
+            .to_compile_error()
+            .into();
+    }
 
-    let mut default_info: Option<(Vec<(PatIdent, Type)>, Vec<Expr>)> = None;
+    let mut default_info: Option<(syn::Ident, Vec<Expr>, DefaultReturnKind)> = None;
 
     for impl_item in item.items.iter_mut() {
         if let ImplItem::Fn(method) = impl_item {
@@ -113,34 +116,33 @@ pub fn component_impl(_args: TokenStream, input: TokenStream) -> TokenStream {
                 method.attrs.remove(index);
 
                 if method.sig.receiver().is_some() {
+                    let signature = method.sig.to_token_stream().to_string();
                     return syn::Error::new_spanned(
                         method.sig.clone(),
-                        "#[default] 不能用于带 self 参数的方法",
+                        format!("#[default] 不能用于带 self 参数的方法：{}", signature),
                     )
                     .to_compile_error()
                     .into();
                 }
 
-                match &method.sig.output {
-                    ReturnType::Type(_, ty) => {
-                        if !matches!(**ty, Type::Path(ref p) if p.path.is_ident("Self")) {
-                            return syn::Error::new_spanned(
-                                ty,
-                                "#[default] 仅支持返回 Self 的函数",
-                            )
-                            .to_compile_error()
-                            .into();
-                        }
-                    }
+                let return_kind = match &method.sig.output {
+                    ReturnType::Type(_, ty) => match analyze_default_return_type(ty) {
+                        Ok(kind) => kind,
+                        Err(err) => return err.to_compile_error().into(),
+                    },
                     ReturnType::Default => {
+                        let signature = method.sig.to_token_stream().to_string();
                         return syn::Error::new_spanned(
                             method.sig.clone(),
-                            "#[default] 仅支持显式返回 Self 的函数",
+                            format!(
+                                "#[default] 所在函数必须显式返回 Self 或 Result<Self, E>：{}",
+                                signature
+                            ),
                         )
                         .to_compile_error()
                         .into();
                     }
-                }
+                };
 
                 let defaults: Punctuated<Expr, Token![,]> =
                     match attr.parse_args_with(Punctuated::<Expr, Token![,]>::parse_terminated) {
@@ -148,105 +150,61 @@ pub fn component_impl(_args: TokenStream, input: TokenStream) -> TokenStream {
                         Err(err) => return err.to_compile_error().into(),
                     };
 
-                let mut params = Vec::new();
-                for input in &method.sig.inputs {
-                    match input {
-                        FnArg::Receiver(receiver) => {
-                            return syn::Error::new_spanned(
-                                receiver,
-                                "#[default] 函数不能拥有 self 参数",
-                            )
-                            .to_compile_error()
-                            .into();
-                        }
-                        FnArg::Typed(pat_type) => {
-                            let pat = match &*pat_type.pat {
-                                Pat::Ident(ident) => ident.clone(),
-                                other => {
-                                    return syn::Error::new_spanned(
-                                        other,
-                                        "#[default] 函数的参数必须是标识符模式",
-                                    )
-                                    .to_compile_error()
-                                    .into();
-                                }
-                            };
-                            params.push((pat, (*pat_type.ty).clone()));
-                        }
-                    }
-                }
-
-                if params.len() != defaults.len() {
+                if method.sig.inputs.len() != defaults.len() {
+                    let expected = method.sig.inputs.len();
+                    let provided = defaults.len();
                     return syn::Error::new_spanned(
                         method.sig.clone(),
-                        "#[default] 的实参数量必须与函数参数一致",
+                        format!(
+                            "#[default] 参数数量不匹配：函数需要 {} 个参数，但属性提供了 {} 个默认值",
+                            expected, provided
+                        ),
                     )
                     .to_compile_error()
                     .into();
                 }
 
-                default_info = Some((params, defaults.into_iter().collect()));
+                default_info = Some((
+                    method.sig.ident.clone(),
+                    defaults.into_iter().collect(),
+                    return_kind,
+                ));
             }
         }
     }
 
-    let registration = if let Some((params, defaults)) = default_info {
-        let ensure_ident = format_ident!(
-            "__jge_component_default_ensure_{}",
-            type_path
-                .segments
-                .last()
-                .map(|seg| seg.ident.to_string())
-                .unwrap_or_else(|| "component".into())
-        );
-        let module_ident = format_ident!(
-            "__jge_component_defaults_module_{}",
-            type_path
-                .segments
-                .last()
-                .map(|seg| seg.ident.to_string())
-                .unwrap_or_else(|| "component".into())
-        );
-
-        let ensure_statements =
-            params
-                .into_iter()
-                .zip(defaults.into_iter())
-                .map(|((pat, ty), expr)| {
-                    let ident = &pat.ident;
-                    quote! {
-                        if <#ty as ::jge_core::game::component::Component>::read(entity).is_none() {
-                            let #pat: #ty = #expr;
-                            let _ = entity.register_component(#ident)?;
-                        }
-                    }
-                });
-
-        quote! {
-            #[allow(non_snake_case)]
-            mod #module_ident {
-                use super::*;
-
-                pub(super) fn #ensure_ident(entity: ::jge_core::game::entity::Entity) -> ::std::result::Result<(), ::jge_core::game::component::ComponentDependencyError> {
-                    #(#ensure_statements)*
-                    Ok(())
+    if let Some((method_ident, defaults, return_kind)) = default_info {
+        let helper_tokens = match return_kind {
+            DefaultReturnKind::Direct => quote! {
+                #[doc(hidden)]
+                pub(crate) fn __jge_component_default(entity: ::jge_core::game::entity::Entity) -> ::std::result::Result<Self, ::jge_core::game::component::ComponentDependencyError> {
+                    Ok(Self::#method_ident(#(#defaults),*))
                 }
-
-                ::inventory::submit! {
-                    ::jge_core::game::component::ComponentDefaultDescriptor {
-                        type_id: ::std::any::TypeId::of::<#type_path>(),
-                        ensure: |entity| #ensure_ident(entity),
-                    }
+            },
+            DefaultReturnKind::Result => quote! {
+                #[doc(hidden)]
+                pub(crate) fn __jge_component_default(entity: ::jge_core::game::entity::Entity) -> ::std::result::Result<Self, ::jge_core::game::component::ComponentDependencyError> {
+                    let component = Self::#method_ident(#(#defaults),*)
+                        .map_err(|error| ::jge_core::game::component::ComponentDependencyError::with_source(
+                            entity,
+                            ::core::any::type_name::<Self>(),
+                            error,
+                        ))?;
+                    Ok(component)
                 }
-            }
-        }
-    } else {
-        quote! {}
-    };
+            },
+        };
+
+        let helper_fn: ImplItem = match syn::parse2(helper_tokens) {
+            Ok(item) => item,
+            Err(err) => return err.to_compile_error().into(),
+        };
+
+        item.items.push(helper_fn);
+    }
 
     TokenStream::from(quote! {
         #item
-        #registration
     })
 }
 
@@ -256,4 +214,52 @@ fn extract_default_attribute(attrs: &[Attribute]) -> Option<(Attribute, usize)> 
         .enumerate()
         .find(|(_, attr)| attr.path().is_ident("default"))
         .map(|(index, attr)| (attr.clone(), index))
+}
+
+enum DefaultReturnKind {
+    Direct,
+    Result,
+}
+
+fn analyze_default_return_type(ty: &Type) -> Result<DefaultReturnKind, syn::Error> {
+    if is_self_type(ty) {
+        return Ok(DefaultReturnKind::Direct);
+    }
+
+    if is_result_of_self(ty) {
+        return Ok(DefaultReturnKind::Result);
+    }
+
+    let ty_tokens = ty.to_token_stream().to_string();
+    Err(syn::Error::new_spanned(
+        ty,
+        format!(
+            "#[default] 所在函数必须返回 Self 或 Result<Self, E>，当前返回类型为 {}",
+            ty_tokens
+        ),
+    ))
+}
+
+fn is_self_type(ty: &Type) -> bool {
+    matches!(ty, Type::Path(type_path) if type_path.qself.is_none() && type_path.path.is_ident("Self"))
+}
+
+fn is_result_of_self(ty: &Type) -> bool {
+    match ty {
+        Type::Path(type_path) => {
+            if let Some(segment) = type_path.path.segments.last() {
+                if segment.ident == "Result" {
+                    if let PathArguments::AngleBracketed(args) = &segment.arguments {
+                        if let Some(first) = args.args.first() {
+                            if let GenericArgument::Type(first_type) = first {
+                                return is_self_type(first_type);
+                            }
+                        }
+                    }
+                }
+            }
+            false
+        }
+        _ => false,
+    }
 }

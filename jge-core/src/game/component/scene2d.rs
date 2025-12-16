@@ -21,36 +21,20 @@ use crate::game::{
 use crate::resource::ResourcePath;
 
 #[component(Layer)]
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 /// 二维场景默认按照 Renderable 的 z 值进行遮挡，高 z 表示位于前方。
 pub struct Scene2D {
-    name: String,
     offset: Vector2<f32>,
     pixels_per_unit: f32,
-}
-
-impl Clone for Scene2D {
-    fn clone(&self) -> Self {
-        Self {
-            name: self.name.clone(),
-            offset: self.offset,
-            pixels_per_unit: self.pixels_per_unit,
-        }
-    }
 }
 
 const DEFAULT_PIXELS_PER_UNIT: f32 = 100.0;
 
 #[component_impl]
 impl Scene2D {
-    #[allow(dead_code)]
-    #[default(Layer::new())]
-    fn ensure_defaults(_layer: Layer) -> Self {
-        Self::new("auto_scene2d")
-    }
-    pub fn new(name: impl Into<String>) -> Self {
+    #[default()]
+    pub fn new() -> Self {
         Self {
-            name: name.into(),
             offset: Vector2::zeros(),
             pixels_per_unit: DEFAULT_PIXELS_PER_UNIT,
         }
@@ -124,10 +108,6 @@ impl Scene2D {
                 );
             }
         }
-    }
-
-    pub fn name(&self) -> &str {
-        &self.name
     }
 
     /// 基于 Layer 的八叉树推进 LOD。
@@ -418,24 +398,19 @@ mod tests {
         let _ = Node::detach(entity);
         let _ = entity.unregister_component::<Node>();
 
-        let missing = Scene2D::insert(entity, Scene2D::new("scene2d"));
-        assert!(matches!(
-            missing,
-            Err(crate::game::component::ComponentDependencyError { .. })
-        ));
-
-        let _ = entity
-            .register_component(Node::new("scene2d_root").expect("应能创建节点"))
-            .expect("应能插入 Node");
-        let _ = entity
-            .register_component(Renderable::new())
-            .expect("应能插入 Renderable");
-        let _ = entity
-            .register_component(Layer::new())
-            .expect("应能插入 Layer");
         let inserted =
-            Scene2D::insert(entity, Scene2D::new("scene2d")).expect("依赖满足后应能插入");
+            Scene2D::insert(entity, Scene2D::new()).expect("缺少 Layer 时应自动注册依赖");
         assert!(inserted.is_none());
+
+        assert!(
+            entity.get_component::<Layer>().is_some(),
+            "Layer 应被自动注册"
+        );
+        assert!(
+            entity.get_component::<Renderable>().is_some(),
+            "Renderable 应被注册"
+        );
+        assert!(entity.get_component::<Node>().is_some(), "Node 应被注册");
         let layer = entity.get_component::<Layer>().expect("应能读取 Layer");
         assert!(
             layer.shader(RenderPipelineStage::Vertex).is_some(),
@@ -470,7 +445,7 @@ mod tests {
 
     #[test]
     fn scene2d_offset_and_scale_configuration() {
-        let mut scene = Scene2D::new("scene2d_scale");
+        let mut scene = Scene2D::new();
         scene.set_offset(Vector2::new(3.0, -2.0));
         scene.set_pixels_per_unit(64.0);
 
@@ -482,7 +457,7 @@ mod tests {
         assert!((scene.pixels_per_unit() - 64.0).abs() < f32::EPSILON);
     }
 
-    fn register_layer_scene(entity: Entity, name: &str) {
+    fn register_layer_scene(entity: Entity) {
         let _ = Scene2D::remove(entity);
         let _ = Layer::remove(entity);
         let _ = Renderable::remove(entity);
@@ -495,8 +470,7 @@ mod tests {
             .register_component(Layer::new())
             .expect("应能插入 Layer");
 
-        let inserted =
-            Scene2D::insert(entity, Scene2D::new(name)).expect("满足依赖后应能插入 Scene2D");
+        let inserted = Scene2D::insert(entity, Scene2D::new()).expect("满足依赖后应能插入 Scene2D");
         assert!(inserted.is_none());
     }
 
@@ -531,7 +505,7 @@ mod tests {
     #[test]
     fn visible_faces_excludes_fully_occluded_triangles() {
         let root = Entity::new().expect("应能创建根实体");
-        register_layer_scene(root, "scene2d_visible");
+        register_layer_scene(root);
         activate_root_chunk(root);
 
         let back = Entity::new().expect("应能创建后景实体");
@@ -576,7 +550,7 @@ mod tests {
     #[test]
     fn visible_faces_keep_partially_occluded_triangles() {
         let root = Entity::new().expect("应能创建根实体");
-        register_layer_scene(root, "scene2d_partial");
+        register_layer_scene(root);
         activate_root_chunk(root);
 
         let partial = Entity::new().expect("应能创建部分遮挡实体");
@@ -623,7 +597,7 @@ mod tests {
     #[test]
     fn visible_faces_ignores_disabled_renderables() {
         let root = Entity::new().expect("应能创建根实体");
-        register_layer_scene(root, "scene2d_disabled");
+        register_layer_scene(root);
         activate_root_chunk(root);
 
         let visible_entity = Entity::new().expect("应能创建可见实体");

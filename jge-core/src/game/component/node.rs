@@ -33,6 +33,7 @@ impl fmt::Debug for Node {
 #[component_impl]
 impl Node {
     /// 构造节点组件并校验名称规则。
+    #[default(format!("entity_{}", entity.id()))]
     pub fn new(name: impl Into<String>) -> Result<Self, NodeNameError> {
         let name = name.into();
         Self::validate_name(&name)?;

@@ -15,11 +15,7 @@ pub struct Material {
 
 #[component_impl]
 impl Material {
-    #[allow(dead_code)]
-    #[default(Shape::from_triangles(Vec::new()))]
-    fn ensure_defaults(_shape: Shape) -> Self {
-        Self::new(Self::placeholder_resource(), Vec::new())
-    }
+    #[default(Self::placeholder_resource(), Vec::new())]
     pub fn new(resource: ResourceHandle, regions: Vec<MaterialPatch>) -> Self {
         Self { resource, regions }
     }
@@ -96,8 +92,24 @@ mod tests {
     fn material_requires_shape_dependency() {
         let entity = Entity::new().expect("应能创建实体");
         let resource = mock_resource();
-        let missing = entity.register_component(Material::new(resource.clone(), Vec::new()));
-        assert!(missing.is_err(), "缺少 Shape 依赖应当失败");
+        let inserted = entity
+            .register_component(Material::new(resource.clone(), Vec::new()))
+            .expect("缺少 Shape 时应自动注册依赖");
+        assert!(inserted.is_none());
+
+        assert!(
+            entity.get_component::<Shape>().is_some(),
+            "Shape 应被自动注册"
+        );
+        assert!(
+            entity.get_component::<Transform>().is_some(),
+            "Transform 应作为 Shape 依赖被注册"
+        );
+        assert!(
+            entity.get_component::<Renderable>().is_some(),
+            "Renderable 应被注册"
+        );
+        assert!(entity.get_component::<Node>().is_some(), "Node 应被注册");
 
         let entity = prepare_entity("material_dependency");
         let resource = mock_resource();

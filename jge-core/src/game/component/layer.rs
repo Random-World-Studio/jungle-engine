@@ -32,12 +32,8 @@ pub struct Layer {
 
 #[component_impl]
 impl Layer {
-    #[allow(dead_code)]
-    #[default(Renderable::new())]
-    fn ensure_defaults(_renderable: Renderable) -> Self {
-        Self::new()
-    }
     /// 创建一个 Layer。
+    #[default()]
     pub fn new() -> Self {
         Self {
             shaders: HashMap::new(),
@@ -1228,7 +1224,6 @@ impl Layer {
     }
 }
 
-#[allow(dead_code)]
 #[derive(Clone)]
 struct Scene2DMaterialInstance {
     texture: wgpu::Texture,
@@ -1630,7 +1625,6 @@ impl LayerTriangle {
         &self.vertices
     }
 
-    #[allow(dead_code)]
     pub fn into_vertices(self) -> [Vector3<f32>; 3] {
         self.vertices
     }
@@ -1968,7 +1962,6 @@ struct Scene3DDraw {
     bind_group: wgpu::BindGroup,
 }
 
-#[allow(dead_code)]
 #[derive(Clone)]
 struct Scene3DMaterialInstance {
     texture: wgpu::Texture,
@@ -2696,21 +2689,34 @@ mod tests {
     #[test]
     fn layer_requires_renderable_dependency() {
         let entity = Entity::new().expect("应能创建实体");
-        let missing = entity.register_component(Layer::new());
-        assert!(matches!(
-            missing,
-            Err(crate::game::component::ComponentDependencyError { .. })
-        ));
+        let inserted = entity
+            .register_component(Layer::new())
+            .expect("缺少 Renderable 时应自动注册依赖");
+        assert!(inserted.is_none());
+
+        assert!(
+            entity.get_component::<Renderable>().is_some(),
+            "依赖的 Renderable 应已注册"
+        );
+        assert!(
+            entity.get_component::<Node>().is_some(),
+            "Renderable 的依赖 Node 应已注册"
+        );
+
+        let previous_auto = entity
+            .register_component(Layer::new())
+            .expect("重复插入应返回旧的 Layer");
+        assert!(previous_auto.is_some());
 
         prepare_node(&entity, "layer_root");
         let _ = entity
             .register_component(Renderable::new())
             .expect("应能插入 Renderable");
 
-        let inserted = entity
+        let reinserted = entity
             .register_component(Layer::new())
             .expect("满足依赖后应能插入 Layer");
-        assert!(inserted.is_none());
+        assert!(reinserted.is_none());
 
         cleanup(&entity);
     }

@@ -8,11 +8,7 @@ pub struct Light {
 
 #[component_impl]
 impl Light {
-    #[allow(dead_code)]
-    #[default(Transform::new())]
-    fn ensure_defaults(_transform: Transform) -> Self {
-        Self::new(1.0)
-    }
+    #[default(1.0)]
     pub fn new(lightness: f32) -> Self {
         let mut instance = Self { lightness: 1.0 };
         instance.set_lightness(lightness);
@@ -38,11 +34,7 @@ pub struct PointLight {
 
 #[component_impl]
 impl PointLight {
-    #[allow(dead_code)]
-    #[default(Light::new(1.0))]
-    fn ensure_defaults(_light: Light) -> Self {
-        Self::new(1.0)
-    }
+    #[default(1.0)]
     pub fn new(distance: f32) -> Self {
         let mut instance = Self { distance: 1.0 };
         instance.set_distance(distance);
@@ -66,11 +58,7 @@ pub struct ParallelLight;
 
 #[component_impl]
 impl ParallelLight {
-    #[allow(dead_code)]
-    #[default(Light::new(1.0))]
-    fn ensure_defaults(_light: Light) -> Self {
-        Self::new()
-    }
+    #[default()]
     pub fn new() -> Self {
         Self
     }

@@ -13,15 +13,8 @@ pub struct Transform {
 
 #[component_impl]
 impl Transform {
-    #[allow(dead_code)]
-    #[default(
-        Node::new(format!("entity_{}", entity.id())).expect("auto node name valid"),
-        Renderable::new()
-    )]
-    fn ensure_defaults(_node: Node, _renderable: Renderable) -> Self {
-        Self::new()
-    }
     /// 创建一个默认的变换组件，位置为原点、旋转为零（弧度），缩放为单位向量。
+    #[default()]
     pub fn new() -> Self {
         Self {
             position: Vector3::zeros(),
@@ -117,28 +110,24 @@ mod tests {
         let entity = Entity::new().expect("应能创建实体");
         clear_components(&entity);
 
-        let missing = entity.register_component(Transform::new());
-        assert!(matches!(
-            missing,
-            Err(crate::game::component::ComponentDependencyError { .. })
-        ));
-
-        let _ = entity
-            .register_component(Node::new("transform_node").expect("应能创建节点"))
-            .expect("应能注册 Node");
-        let missing_renderable = entity.register_component(Transform::new());
-        assert!(matches!(
-            missing_renderable,
-            Err(crate::game::component::ComponentDependencyError { .. })
-        ));
-
-        let _ = entity
-            .register_component(Renderable::new())
-            .expect("应能插入 Renderable");
         let inserted = entity
             .register_component(Transform::new())
-            .expect("满足依赖后应能插入 Transform");
+            .expect("缺少 Node/Renderable 时应自动注册依赖");
         assert!(inserted.is_none());
+
+        assert!(
+            entity.get_component::<Node>().is_some(),
+            "Node 应被自动注册"
+        );
+        assert!(
+            entity.get_component::<Renderable>().is_some(),
+            "Renderable 应被注册"
+        );
+
+        let previous = entity
+            .register_component(Transform::new())
+            .expect("重复插入应返回旧的 Transform");
+        assert!(previous.is_some());
 
         let _ = entity.unregister_component::<Transform>();
         let _ = entity.unregister_component::<Renderable>();

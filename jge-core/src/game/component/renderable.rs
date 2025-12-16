@@ -9,12 +9,8 @@ pub struct Renderable {
 
 #[component_impl]
 impl Renderable {
-    #[allow(dead_code)]
-    #[default(Node::new(format!("entity_{}", entity.id())).expect("auto node name valid"))]
-    fn ensure_defaults(_node: Node) -> Self {
-        Self::new()
-    }
     /// 创建一个默认启用的可渲染组件。
+    #[default()]
     pub fn new() -> Self {
         Self { enabled: true }
     }
@@ -46,17 +42,21 @@ mod tests {
         let entity = Entity::new().expect("应能创建实体");
         entity.unregister_component::<Node>();
 
-        let missing = entity.register_component(Renderable::new());
-        assert!(matches!(
-            missing,
-            Err(crate::game::component::ComponentDependencyError { .. })
-        ));
-
-        prepare_node(&entity, "renderable_node");
         let inserted = entity
             .register_component(Renderable::new())
-            .expect("满足依赖后应能插入 Renderable");
+            .expect("缺少 Node 时应自动注册依赖");
         assert!(inserted.is_none());
+
+        assert!(
+            entity.get_component::<Node>().is_some(),
+            "Node 应被自动注册"
+        );
+
+        prepare_node(&entity, "renderable_node");
+        let previous = entity
+            .register_component(Renderable::new())
+            .expect("重复插入应返回旧的 Renderable");
+        assert!(previous.is_some());
 
         let _ = entity.unregister_component::<Renderable>();
     }

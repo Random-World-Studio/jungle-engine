@@ -178,7 +178,6 @@ impl GameWindow {
         Ok(())
     }
 
-    #[allow(dead_code)]
     pub fn keyboard_input(&mut self, _event: &KeyEvent) -> bool {
         false
     }
@@ -238,27 +237,23 @@ impl GameWindow {
         result
     }
 
-    #[allow(dead_code)]
     pub fn mouse_click(&mut self, _state: ElementState, _button: MouseButton) -> bool {
         false
     }
 
-    #[allow(dead_code)]
     pub fn mouse_wheel(&mut self, _delta: MouseScrollDelta, _phase: TouchPhase) -> bool {
         false
     }
 
-    #[allow(dead_code)]
     pub fn cursor_move(&mut self, _position: PhysicalPosition<f64>) -> bool {
         false
     }
 
     /// 鼠标移动/触摸事件
-    #[allow(dead_code)]
+
     pub fn device_input(&mut self, _event: &DeviceEvent) -> bool {
         false
     }
 
-    #[allow(dead_code)]
     pub fn update(&mut self) {}
 }

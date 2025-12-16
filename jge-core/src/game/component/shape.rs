@@ -11,13 +11,9 @@ pub struct Shape {
 
 #[component_impl]
 impl Shape {
-    #[allow(dead_code)]
-    #[default(Transform::new())]
-    fn ensure_defaults(_transform: Transform) -> Self {
-        Self::new(Vec::<Vector3<f32>>::new(), Vec::<[usize; 3]>::new())
-    }
     /// 使用顶点及索引构造形状。顶点坐标为相对 Transform 组件的位置偏移，
     /// 三角面通过索引列表明确指定顺序，便于控制背面剔除方向。
+    #[default(Vec::<Vector3<f32>>::new(), Vec::<[usize; 3]>::new())]
     pub fn new(vertices: Vec<Vector3<f32>>, faces: Vec<[usize; 3]>) -> Self {
         debug_assert!(faces.iter().all(|[a, b, c]| {
             *a < vertices.len() && *b < vertices.len() && *c < vertices.len()
@@ -133,17 +129,25 @@ mod tests {
         let _ = Node::detach(entity);
         let _ = entity.unregister_component::<Node>();
 
-        let missing = entity.register_component(Shape::new(Vec::new(), Vec::new()));
-        assert!(matches!(
-            missing,
-            Err(crate::game::component::ComponentDependencyError { .. })
-        ));
-
-        ensure_transform(&entity, "shape_node");
         let inserted = entity
             .register_component(Shape::new(Vec::new(), Vec::new()))
-            .expect("满足依赖后应能插入 Shape");
+            .expect("缺少 Transform 时应自动注册依赖");
         assert!(inserted.is_none());
+
+        assert!(
+            entity.get_component::<Transform>().is_some(),
+            "Transform 应被自动注册"
+        );
+        assert!(
+            entity.get_component::<Renderable>().is_some(),
+            "Renderable 应被注册"
+        );
+        assert!(entity.get_component::<Node>().is_some(), "Node 应被注册");
+
+        let previous = entity
+            .register_component(Shape::new(Vec::new(), Vec::new()))
+            .expect("重复插入应返回旧的 Shape");
+        assert!(previous.is_some());
 
         let _ = entity.unregister_component::<Shape>();
     }

@@ -18,7 +18,6 @@ const DEFAULT_REFERENCE_FRAMEBUFFER_HEIGHT: u32 = 1080;
 #[component(Transform)]
 #[derive(Debug, Clone)]
 pub struct Camera {
-    name: String,
     vertical_fov: f32,
     near_plane: f32,
     far_plane: f32,
@@ -27,24 +26,15 @@ pub struct Camera {
 
 #[component_impl]
 impl Camera {
-    #[allow(dead_code)]
-    #[default(Transform::new())]
-    fn ensure_defaults(_transform: Transform) -> Self {
-        Self::new("auto_camera")
-    }
     /// 使用默认参数创建摄像机。
-    pub fn new(name: impl Into<String>) -> Self {
+    #[default()]
+    pub fn new() -> Self {
         Self {
-            name: name.into(),
             vertical_fov: DEFAULT_VERTICAL_FOV,
             near_plane: DEFAULT_NEAR_PLANE,
             far_plane: DEFAULT_FAR_PLANE,
             reference_framebuffer_height: DEFAULT_REFERENCE_FRAMEBUFFER_HEIGHT,
         }
-    }
-
-    pub fn name(&self) -> &str {
-        &self.name
     }
 
     pub fn vertical_fov(&self) -> f32 {
@@ -75,15 +65,6 @@ impl Camera {
         Ok(())
     }
 
-    pub fn near_plane(&self) -> f32 {
-        self.near_plane
-    }
-
-    pub fn far_plane(&self) -> f32 {
-        self.far_plane
-    }
-
-    /// 同时设置近、远裁剪面。
     pub fn set_clip_planes(
         &mut self,
         near_plane: f32,
@@ -101,6 +82,14 @@ impl Camera {
         self.near_plane = near_plane;
         self.far_plane = far_plane;
         Ok(())
+    }
+
+    pub fn near_plane(&self) -> f32 {
+        self.near_plane
+    }
+
+    pub fn far_plane(&self) -> f32 {
+        self.far_plane
     }
 
     /// 根据窗口尺寸计算垂直视场角。
@@ -252,17 +241,34 @@ mod tests {
         let _ = Node::detach(entity);
         let _ = entity.unregister_component::<Node>();
 
-        let missing = entity.register_component(Camera::new("primary"));
-        assert!(matches!(
-            missing,
-            Err(crate::game::component::ComponentDependencyError { .. })
-        ));
+        let inserted = entity
+            .register_component(Camera::new())
+            .expect("缺少 Transform 时应自动注册依赖");
+        assert!(inserted.is_none());
+
+        assert!(
+            entity.get_component::<Transform>().is_some(),
+            "Transform 应被自动注册"
+        );
+        assert!(
+            entity.get_component::<Renderable>().is_some(),
+            "Renderable 应被自动注册"
+        );
+        assert!(
+            entity.get_component::<Node>().is_some(),
+            "Node 应被自动注册"
+        );
+
+        let previous = entity
+            .register_component(Camera::new())
+            .expect("重复插入应返回旧的 Camera");
+        assert!(previous.is_some());
 
         prepare_entity(&entity, "camera_node");
-        let inserted = entity
-            .register_component(Camera::new("primary"))
+        let reinserted = entity
+            .register_component(Camera::new())
             .expect("满足依赖后应能插入 Camera");
-        assert!(inserted.is_none());
+        assert!(reinserted.is_none());
     }
 
     #[test]
@@ -270,7 +276,7 @@ mod tests {
         let entity = Entity::new().expect("应能创建实体");
         prepare_entity(&entity, "camera_props");
 
-        let mut camera = Camera::new("test");
+        let mut camera = Camera::new();
         assert!(camera.set_vertical_fov(MIN_VERTICAL_FOV / 2.0).is_err());
         assert!(camera.set_vertical_fov(DEFAULT_VERTICAL_FOV * 1.2).is_ok());
         assert!(camera.set_reference_framebuffer_height(0).is_err());
@@ -285,7 +291,7 @@ mod tests {
         let entity = Entity::new().expect("应能创建实体");
         prepare_entity(&entity, "camera_fov");
 
-        let camera = Camera::new("fov");
+        let camera = Camera::new();
         let vertical_base = camera
             .vertical_fov_for_height(1080)
             .expect("有效视口不应报错");

@@ -27,11 +27,16 @@ impl Entity {
         &self,
         component: C,
     ) -> Result<Option<C>, ComponentDependencyError> {
+        C::register_dependencies(*self)?;
         C::insert(*self, component)
     }
 
     pub fn unregister_component<C: Component>(&self) -> Option<C> {
-        C::remove(*self)
+        let removed = C::remove(*self);
+        if removed.is_some() {
+            C::unregister_dependencies(*self);
+        }
+        removed
     }
 
     pub fn get_component<C: Component>(&self) -> Option<ComponentRead<C>> {

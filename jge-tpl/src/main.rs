@@ -31,8 +31,7 @@ fn main() -> anyhow::Result<()> {
 fn build_demo_scene() -> anyhow::Result<Entity> {
     let root = Entity::new().context("创建根实体失败")?;
 
-    let _ = Scene3D::insert(root, Scene3D::new("tpl_scene3d"))
-        .context("为根实体注册 Scene3D 组件失败")?;
+    let _ = Scene3D::insert(root, Scene3D::new()).context("为根实体注册 Scene3D 组件失败")?;
 
     let camera = spawn_camera(root).context("创建摄像机失败")?;
     Scene3D::attach_camera(root, camera).context("绑定摄像机失败")?;
@@ -68,7 +67,7 @@ fn build_demo_scene() -> anyhow::Result<Entity> {
 fn spawn_camera(parent: Entity) -> anyhow::Result<Entity> {
     let entity = Entity::new().context("创建摄像机实体失败")?;
     let _ = entity
-        .register_component(Camera::new("main_camera"))
+        .register_component(Camera::new())
         .context("为实体注册 Camera 组件失败")?;
     Node::attach(entity, parent).context("将摄像机挂载到父节点失败")?;
 
