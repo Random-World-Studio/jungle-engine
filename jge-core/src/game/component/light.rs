@@ -1,8 +1,10 @@
 use super::{component, component_impl, transform::Transform};
+use crate::game::entity::Entity;
 
 #[component(Transform)]
 #[derive(Debug, Clone)]
 pub struct Light {
+    entity_id: Option<Entity>,
     lightness: f32,
 }
 
@@ -10,7 +12,10 @@ pub struct Light {
 impl Light {
     #[default(1.0)]
     pub fn new(lightness: f32) -> Self {
-        let mut instance = Self { lightness: 1.0 };
+        let mut instance = Self {
+            entity_id: None,
+            lightness: 1.0,
+        };
         instance.set_lightness(lightness);
         instance
     }
@@ -29,6 +34,7 @@ impl Light {
 #[component(Light)]
 #[derive(Debug, Clone)]
 pub struct PointLight {
+    entity_id: Option<Entity>,
     distance: f32,
 }
 
@@ -36,7 +42,10 @@ pub struct PointLight {
 impl PointLight {
     #[default(1.0)]
     pub fn new(distance: f32) -> Self {
-        let mut instance = Self { distance: 1.0 };
+        let mut instance = Self {
+            entity_id: None,
+            distance: 1.0,
+        };
         instance.set_distance(distance);
         instance
     }
@@ -54,13 +63,15 @@ impl PointLight {
 
 #[component(Light)]
 #[derive(Debug, Clone, Copy, Default)]
-pub struct ParallelLight;
+pub struct ParallelLight {
+    entity_id: Option<Entity>,
+}
 
 #[component_impl]
 impl ParallelLight {
     #[default()]
     pub fn new() -> Self {
-        Self
+        Self { entity_id: None }
     }
 }
 

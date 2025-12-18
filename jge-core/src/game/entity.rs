@@ -19,6 +19,10 @@ impl Entity {
         Ok(entity)
     }
 
+    pub fn from(id: u64) -> Self {
+        Self { id }
+    }
+
     pub fn id(&self) -> u64 {
         self.id
     }

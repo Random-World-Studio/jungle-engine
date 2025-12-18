@@ -3,7 +3,7 @@ pub mod entity;
 pub mod logic;
 
 use std::{sync::Arc, time::Instant};
-use tokio::runtime::Runtime;
+use tokio::{runtime::Runtime, task::JoinSet};
 use tracing::{error, info, warn};
 use winit::{
     application::ApplicationHandler,
@@ -16,7 +16,11 @@ use winit::{
 
 use crate::{
     config::{GameConfig, WindowConfig, WindowMode},
-    game::{component::node::Node, entity::Entity},
+    game::{
+        component::{Component, node::Node},
+        entity::Entity,
+        logic::GameLogicHandle,
+    },
     window::GameWindow,
 };
 
@@ -54,6 +58,8 @@ impl Game {
     }
 
     pub fn run(mut self) -> anyhow::Result<()> {
+        self.runtime.spawn(async {});
+
         let event_loop = EventLoop::new()?;
         Ok(event_loop.run_app(&mut self)?)
     }
@@ -109,21 +115,49 @@ impl ApplicationHandler for Game {
                 let delta = self.last_redraw.elapsed();
                 self.last_redraw = Instant::now();
 
-                let gwin = self.window.as_mut().unwrap();
+                {
+                    let gwin = self.window.as_mut().unwrap();
 
-                gwin.resize_surface_if_needed();
+                    gwin.resize_surface_if_needed();
 
-                gwin.window.pre_present_notify();
+                    gwin.window.pre_present_notify();
 
-                match gwin.render(&self.root, delta) {
-                    Ok(_) => {}
-                    // 当展示平面的上下文丢失，就需重新配置
-                    Err(wgpu::SurfaceError::Lost) => warn!(target: "jge-core", "Surface is lost"),
-                    // 所有其他错误（过期、超时等）应在下一帧解决
-                    Err(e) => warn!(target: "jge-core", "{:?}", e),
+                    match gwin.render(&self.root, delta) {
+                        Ok(_) => {}
+                        // 当展示平面的上下文丢失，就需重新配置
+                        Err(wgpu::SurfaceError::Lost) => {
+                            warn!(target: "jge-core", "Surface is lost")
+                        }
+                        // 所有其他错误（过期、超时等）应在下一帧解决
+                        Err(e) => warn!(target: "jge-core", "{:?}", e),
+                    }
+                    // 除非我们手动请求，RedrawRequested 将只会触发一次。
+                    gwin.window.request_redraw();
                 }
-                // 除非我们手动请求，RedrawRequested 将只会触发一次。
-                gwin.window.request_redraw();
+
+                let logic_targets = Game::collect_logic_handles();
+                let frame_delta = delta;
+                self.runtime.spawn(async move {
+                    let mut join_set = JoinSet::new();
+
+                    for (entity_id, handle) in logic_targets {
+                        let logic_delta = frame_delta;
+                        join_set.spawn(async move {
+                            let mut logic = handle.lock().await;
+                            logic.on_render(Entity::from(entity_id), logic_delta).await;
+                            entity_id
+                        });
+                    }
+
+                    while let Some(task) = join_set.join_next().await {
+                        match task {
+                            Ok(_) => {}
+                            Err(err) => {
+                            warn!(target: "jge-core", error = %err, "GameLogic on_render task panicked");
+                            }
+                        }
+                    }
+                });
             }
             _ => (),
         }
@@ -144,5 +178,10 @@ impl Game {
         }
 
         attributes
+    }
+
+    fn collect_logic_handles() -> Vec<(u64, GameLogicHandle)> {
+        Node::storage()
+            .collect_with(|entity_id, node| node.logic().cloned().map(|logic| (entity_id, logic)))
     }
 }

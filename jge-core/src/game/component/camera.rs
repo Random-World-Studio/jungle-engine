@@ -1,5 +1,6 @@
 use super::transform::Transform;
 use super::{component, component_impl};
+use crate::game::entity::Entity;
 use nalgebra::{Rotation3, Vector3};
 use std::f32::consts::PI;
 
@@ -18,6 +19,7 @@ const DEFAULT_REFERENCE_FRAMEBUFFER_HEIGHT: u32 = 1080;
 #[component(Transform)]
 #[derive(Debug, Clone)]
 pub struct Camera {
+    entity_id: Option<Entity>,
     vertical_fov: f32,
     near_plane: f32,
     far_plane: f32,
@@ -30,6 +32,7 @@ impl Camera {
     #[default()]
     pub fn new() -> Self {
         Self {
+            entity_id: None,
             vertical_fov: DEFAULT_VERTICAL_FOV,
             near_plane: DEFAULT_NEAR_PLANE,
             far_plane: DEFAULT_FAR_PLANE,
@@ -214,11 +217,17 @@ mod tests {
     use crate::game::component::{node::Node, renderable::Renderable};
     use crate::game::entity::Entity;
 
+    fn detach_node(entity: Entity) {
+        if let Some(mut node) = entity.get_component_mut::<Node>() {
+            let _ = node.detach();
+        }
+    }
+
     fn prepare_entity(entity: &Entity, node_name: &str) {
         let _ = entity.unregister_component::<Camera>();
         let _ = entity.unregister_component::<Transform>();
         let _ = entity.unregister_component::<Renderable>();
-        let _ = Node::detach(*entity);
+        detach_node(*entity);
         let _ = entity.unregister_component::<Node>();
 
         let _ = entity
@@ -238,7 +247,7 @@ mod tests {
         let _ = entity.unregister_component::<Camera>();
         let _ = entity.unregister_component::<Transform>();
         let _ = entity.unregister_component::<Renderable>();
-        let _ = Node::detach(entity);
+        detach_node(entity);
         let _ = entity.unregister_component::<Node>();
 
         let inserted = entity

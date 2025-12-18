@@ -26,6 +26,7 @@ impl Default for WindowConfig {
 pub struct GameConfig {
     pub window: WindowConfig,
     pub escape_closes: bool,
+    pub game_tick_ms: usize,
 }
 
 impl Default for GameConfig {
@@ -33,6 +34,7 @@ impl Default for GameConfig {
         Self {
             window: WindowConfig::default(),
             escape_closes: true,
+            game_tick_ms: 50,
         }
     }
 }

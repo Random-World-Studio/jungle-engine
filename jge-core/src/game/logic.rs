@@ -3,6 +3,8 @@ use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+use crate::game::entity::Entity;
+
 /// 游戏逻辑（可附加到 `Node` 上）。
 ///
 /// - `new_boxed`：异步构造函数，返回一个 `Box<dyn GameLogic>` 的实例。
@@ -13,8 +15,8 @@ use tokio::sync::Mutex;
 /// - `on_detach`：节点被卸载时调用（异步）。
 #[async_trait]
 pub trait GameLogic: Send + Sync {
-    /// 异步构造器。默认返回一个空实现。
-    async fn new_boxed(_entity_id: u64) -> Result<Box<dyn GameLogic>>
+    /// 构造器。默认返回一个空实现。
+    fn new_boxed(_e: Entity) -> Result<Box<dyn GameLogic>>
     where
         Self: Sized,
     {
@@ -22,25 +24,25 @@ pub trait GameLogic: Send + Sync {
     }
 
     /// 当刚被挂载到父节点下时调用，默认不做任何事。
-    async fn on_attach(&mut self, _entity_id: u64) -> Result<()> {
+    fn on_attach(&mut self, _e: Entity) -> Result<()> {
         Ok(())
     }
 
     /// 每个游戏刻调用一次（异步），默认不做任何事。
-    async fn update(&mut self, _delta: std::time::Duration) -> Result<()> {
+    async fn update(&mut self, _e: Entity, _delta: std::time::Duration) -> Result<()> {
         Ok(())
     }
 
-    /// 每帧调用一次（同步），提供当帧耗时，默认空实现。
-    fn on_render(&mut self, _delta: std::time::Duration) {}
+    /// 每帧调用一次（异步），提供当帧耗时，默认空实现。
+    async fn on_render(&mut self, _e: Entity, _delta: std::time::Duration) {}
 
     /// 发生事件时调用（异步），默认不做任何事。
-    async fn on_event(&mut self, _event: &str) -> Result<()> {
+    async fn on_event(&mut self, _e: Entity, _event: &str) -> Result<()> {
         Ok(())
     }
 
     /// 当节点被卸载时调用（异步），默认不做任何事。
-    async fn on_detach(&mut self, _entity_id: u64) -> Result<()> {
+    fn on_detach(&mut self, _e: Entity) -> Result<()> {
         Ok(())
     }
 }

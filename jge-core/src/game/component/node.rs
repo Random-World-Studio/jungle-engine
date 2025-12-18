@@ -1,7 +1,7 @@
 use std::fmt;
 
 use super::layer::Layer;
-use super::{Component, component, component_impl};
+use super::{Component, ComponentWrite, component, component_impl};
 use crate::game::{entity::Entity, logic::GameLogicHandle};
 use tracing::warn;
 
@@ -13,6 +13,7 @@ use tracing::warn;
 /// - 不得包含字符 `/`。
 #[component]
 pub struct Node {
+    entity_id: Option<Entity>,
     name: String,
     parent: Option<Entity>,
     children: Vec<Entity>,
@@ -26,6 +27,7 @@ impl fmt::Debug for Node {
             .field("parent", &self.parent)
             .field("children", &self.children)
             .field("logic", &self.logic.as_ref().map(|_| "GameLogicHandle"))
+            .field("entity_id", &self.entity_id)
             .finish()
     }
 }
@@ -38,11 +40,17 @@ impl Node {
         let name = name.into();
         Self::validate_name(&name)?;
         Ok(Self {
+            entity_id: None,
             name,
             parent: None,
             children: Vec::new(),
             logic: None,
         })
+    }
+
+    fn entity(&self) -> Entity {
+        self.entity_id
+            .expect("Node component must be attached to an entity before use")
     }
 
     /// 返回节点名称。
@@ -74,9 +82,9 @@ impl Node {
     }
 
     /// 构建从根节点开始的路径表示。
-    pub fn path(entity: Entity) -> Result<String, NodeHierarchyError> {
+    pub fn path(&self) -> Result<String, NodeHierarchyError> {
         let mut segments = Vec::new();
-        let mut current = Some(entity);
+        let mut current = Some(self.entity());
 
         while let Some(id) = current {
             let node_guard =
@@ -93,111 +101,70 @@ impl Node {
         Ok(segments.join("/"))
     }
 
-    /// 将 `child` 挂载到 `parent` 之下。
-    pub fn attach(child: Entity, parent: Entity) -> Result<(), NodeHierarchyError> {
-        if child == parent {
+    pub(crate) fn attach_internal(&mut self, child: Entity) -> Result<(), NodeHierarchyError> {
+        let parent_entity = self.entity();
+        if child == parent_entity {
             return Err(NodeHierarchyError::SelfAttachment(child));
         }
 
         Self::ensure_exists(child)?;
-        Self::ensure_exists(parent)?;
 
-        if Self::would_create_cycle(child, parent)? {
+        if self.has_ancestor(child)? {
             return Err(NodeHierarchyError::HierarchyCycle {
-                ancestor: parent,
+                ancestor: parent_entity,
                 descendant: child,
             });
         }
 
         if Layer::read(child).is_some() {
-            if let Some(ancestor_layer) = Self::nearest_layer_ancestor(parent)? {
+            if let Some(ancestor_layer) = Self::nearest_layer_ancestor(parent_entity)? {
                 warn!(
                     child_id = child.id(),
-                    parent_id = parent.id(),
+                    parent_id = parent_entity.id(),
                     ancestor_layer_id = ancestor_layer.id(),
                     "尝试在已有 Layer 树中挂载子 Layer，子 Layer 将在遍历时被忽略"
                 );
             }
         }
 
-        // 确保先从旧父节点移除，避免重复记录。
-        Self::detach(child)?;
+        let mut child_node = Self::storage()
+            .get_mut(child.id())
+            .ok_or(NodeHierarchyError::MissingNode(child))?;
 
-        let storage = Self::storage();
-
-        {
-            let mut child_guard = storage
-                .get_mut(child.id())
-                .ok_or(NodeHierarchyError::MissingNode(child))?;
-            child_guard.parent = Some(parent);
+        if child_node.parent == Some(parent_entity) {
+            drop(child_node);
+            if !self.children.contains(&child) {
+                self.children.push(child);
+            }
+            return Ok(());
         }
 
-        let mut parent_guard = storage
-            .get_mut(parent.id())
-            .ok_or(NodeHierarchyError::MissingNode(parent))?;
-        if !parent_guard.children.contains(&child) {
-            parent_guard.children.push(child);
+        let previous_parent = child_node.parent;
+
+        if let Some(old_parent) = previous_parent {
+            if let Some(mut old_parent_node) = Self::storage().get_mut(old_parent.id()) {
+                old_parent_node
+                    .children
+                    .retain(|existing| *existing != child);
+            } else {
+                return Err(NodeHierarchyError::MissingNode(old_parent));
+            }
         }
 
-        Ok(())
-    }
+        child_node.parent = Some(parent_entity);
+        drop(child_node);
 
-    /// 将节点从当前父节点中移除。
-    pub fn detach(entity: Entity) -> Result<(), NodeHierarchyError> {
-        let mut node_guard = Self::storage()
-            .get_mut(entity.id())
-            .ok_or(NodeHierarchyError::MissingNode(entity))?;
-        let parent = node_guard.parent.take();
-        drop(node_guard);
-
-        if let Some(parent) = parent {
-            let mut parent_guard = Self::storage()
-                .get_mut(parent.id())
-                .ok_or(NodeHierarchyError::MissingNode(parent))?;
-            parent_guard.children.retain(|child| *child != entity);
+        if !self.children.contains(&child) {
+            self.children.push(child);
         }
 
         Ok(())
     }
 
-    /// 为节点设置或替换 `GameLogic` 实例。
-    pub fn set_logic(entity: Entity, logic: GameLogicHandle) -> Result<(), NodeHierarchyError> {
-        let mut guard = Self::storage()
-            .get_mut(entity.id())
-            .ok_or(NodeHierarchyError::MissingNode(entity))?;
-        guard.logic = Some(logic);
-        Ok(())
-    }
-
-    /// 从节点移除并返回 `GameLogic`（若存在）。
-    pub fn take_logic(entity: Entity) -> Result<Option<GameLogicHandle>, NodeHierarchyError> {
-        let mut guard = Self::storage()
-            .get_mut(entity.id())
-            .ok_or(NodeHierarchyError::MissingNode(entity))?;
-        Ok(guard.logic.take())
-    }
-
-    /// 判断节点是否有 `GameLogic`。
-    pub fn has_logic(entity: Entity) -> Result<bool, NodeHierarchyError> {
-        let guard = Self::storage()
-            .get(entity.id())
-            .ok_or(NodeHierarchyError::MissingNode(entity))?;
-        Ok(guard.logic.is_some())
-    }
-
-    fn ensure_exists(entity: Entity) -> Result<(), NodeHierarchyError> {
-        if let Some(node) = <Node as Component>::read(entity) {
-            drop(node);
-            Ok(())
-        } else {
-            Err(NodeHierarchyError::MissingNode(entity))
-        }
-    }
-
-    fn would_create_cycle(child: Entity, ancestor: Entity) -> Result<bool, NodeHierarchyError> {
-        let mut current = Some(ancestor);
+    fn has_ancestor(&self, candidate: Entity) -> Result<bool, NodeHierarchyError> {
+        let mut current = self.parent;
         while let Some(id) = current {
-            if id == child {
+            if id == candidate {
                 return Ok(true);
             }
             let next = {
@@ -207,7 +174,49 @@ impl Node {
             };
             current = next;
         }
+
         Ok(false)
+    }
+
+    /// 将当前节点与父节点解除关联。
+    pub fn detach(&mut self) -> Result<(), NodeHierarchyError> {
+        self.detach_from_parent()
+    }
+
+    /// 为节点设置或替换 `GameLogic` 实例。
+    pub fn set_logic(&mut self, logic: GameLogicHandle) {
+        self.logic = Some(logic);
+    }
+
+    /// 从节点移除并返回 `GameLogic`（若存在）。
+    pub fn take_logic(&mut self) -> Option<GameLogicHandle> {
+        self.logic.take()
+    }
+
+    /// 判断节点是否有 `GameLogic`。
+    pub fn has_logic(&self) -> bool {
+        self.logic.is_some()
+    }
+
+    fn detach_from_parent(&mut self) -> Result<(), NodeHierarchyError> {
+        let entity = self.entity();
+        if let Some(parent) = self.parent.take() {
+            let mut parent_guard = Self::storage()
+                .get_mut(parent.id())
+                .ok_or(NodeHierarchyError::MissingNode(parent))?;
+            parent_guard.children.retain(|child| *child != entity);
+        }
+
+        Ok(())
+    }
+
+    fn ensure_exists(entity: Entity) -> Result<(), NodeHierarchyError> {
+        if let Some(node) = <Node as Component>::read(entity) {
+            drop(node);
+            Ok(())
+        } else {
+            Err(NodeHierarchyError::MissingNode(entity))
+        }
     }
 
     fn validate_name(name: &str) -> Result<(), NodeNameError> {
@@ -238,6 +247,12 @@ impl Node {
         }
 
         Ok(None)
+    }
+}
+
+impl ComponentWrite<Node> {
+    pub fn attach(&mut self, child: Entity) -> Result<(), NodeHierarchyError> {
+        Node::attach_internal(&mut *self, child)
     }
 }
 
@@ -319,7 +334,10 @@ mod tests {
         prepare_node(&parent, "node_parent");
         prepare_node(&child, "node_child");
 
-        Node::attach(child, parent).expect("应当可以挂载子节点");
+        {
+            let mut parent_node = parent.get_component_mut::<Node>().expect("父节点应存在");
+            parent_node.attach(child).expect("应当可以挂载子节点");
+        }
 
         let parent_node = Node::read(parent).expect("父节点应存在");
         assert_eq!(parent_node.children(), &[child]);
@@ -340,9 +358,15 @@ mod tests {
         prepare_node(&parent, "node_parent");
         prepare_node(&child, "node_child");
 
-        Node::attach(child, parent).unwrap();
+        {
+            let mut parent_node = parent.get_component_mut::<Node>().unwrap();
+            parent_node.attach(child).unwrap();
+        }
 
-        Node::detach(child).expect("应能将子节点脱离父节点");
+        {
+            let mut child_node = child.get_component_mut::<Node>().unwrap();
+            child_node.detach().expect("应能将子节点脱离父节点");
+        }
 
         let parent_node = Node::read(parent).unwrap();
         assert!(parent_node.children().is_empty());
@@ -363,9 +387,15 @@ mod tests {
         prepare_node(&parent_b, "node_b");
         prepare_node(&child, "node_child");
 
-        Node::attach(child, parent_a).unwrap();
+        {
+            let mut parent_node = parent_a.get_component_mut::<Node>().unwrap();
+            parent_node.attach(child).unwrap();
+        }
 
-        Node::attach(child, parent_b).expect("重新挂载应成功");
+        {
+            let mut parent_node = parent_b.get_component_mut::<Node>().unwrap();
+            parent_node.attach(child).expect("重新挂载应成功");
+        }
 
         let old_parent = Node::read(parent_a).unwrap();
         assert!(old_parent.children().is_empty());
@@ -388,9 +418,15 @@ mod tests {
         prepare_node(&parent, "node_parent");
         prepare_node(&child, "node_child");
 
-        Node::attach(child, parent).unwrap();
+        {
+            let mut parent_node = parent.get_component_mut::<Node>().unwrap();
+            parent_node.attach(child).unwrap();
+        }
 
-        let result = Node::attach(parent, child);
+        let result = {
+            let mut child_node = child.get_component_mut::<Node>().unwrap();
+            child_node.attach(parent)
+        };
         assert!(matches!(
             result,
             Err(NodeHierarchyError::HierarchyCycle { ancestor, descendant })
@@ -422,11 +458,22 @@ mod tests {
         prepare_node(&branch, "branch");
         prepare_node(&leaf, "leaf");
 
-        Node::attach(branch, root).unwrap();
-        Node::attach(leaf, branch).unwrap();
+        {
+            let mut root_node = root.get_component_mut::<Node>().unwrap();
+            root_node.attach(branch).unwrap();
+        }
+        {
+            let mut branch_node = branch.get_component_mut::<Node>().unwrap();
+            branch_node.attach(leaf).unwrap();
+        }
 
-        assert_eq!(Node::path(root).unwrap(), "root");
-        assert_eq!(Node::path(branch).unwrap(), "root/branch");
-        assert_eq!(Node::path(leaf).unwrap(), "root/branch/leaf");
+        let root_node = root.get_component::<Node>().unwrap();
+        assert_eq!(root_node.path().unwrap(), "root");
+        drop(root_node);
+        let branch_node = branch.get_component::<Node>().unwrap();
+        assert_eq!(branch_node.path().unwrap(), "root/branch");
+        drop(branch_node);
+        let leaf_node = leaf.get_component::<Node>().unwrap();
+        assert_eq!(leaf_node.path().unwrap(), "root/branch/leaf");
     }
 }

@@ -1,11 +1,13 @@
 use super::node::Node;
 use super::renderable::Renderable;
 use super::{component, component_impl};
+use crate::game::entity::Entity;
 use nalgebra::{Matrix4, Rotation3, Translation3, Vector3};
 
 #[component(Node, Renderable)]
 #[derive(Debug, Clone)]
 pub struct Transform {
+    entity_id: Option<Entity>,
     position: Vector3<f32>,
     rotation: Vector3<f32>,
     scale: Vector3<f32>,
@@ -17,6 +19,7 @@ impl Transform {
     #[default()]
     pub fn new() -> Self {
         Self {
+            entity_id: None,
             position: Vector3::zeros(),
             rotation: Vector3::zeros(),
             scale: Vector3::repeat(1.0),
@@ -30,6 +33,7 @@ impl Transform {
         scale: Vector3<f32>,
     ) -> Self {
         Self {
+            entity_id: None,
             position,
             rotation,
             scale,
@@ -98,10 +102,16 @@ mod tests {
     use nalgebra::{Point3, Rotation3, Translation3, Vector3, Vector4};
     use std::f32::consts::FRAC_PI_2;
 
+    fn detach_node(entity: Entity) {
+        if let Some(mut node) = entity.get_component_mut::<Node>() {
+            let _ = node.detach();
+        }
+    }
+
     fn clear_components(entity: &Entity) {
         let _ = entity.unregister_component::<Transform>();
         let _ = entity.unregister_component::<Renderable>();
-        let _ = Node::detach(*entity);
+        detach_node(*entity);
         let _ = entity.unregister_component::<Node>();
     }
 

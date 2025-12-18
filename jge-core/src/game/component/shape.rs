@@ -1,10 +1,12 @@
 use super::transform::Transform;
 use super::{component, component_impl};
+use crate::game::entity::Entity;
 use nalgebra::Vector3;
 
 #[component(Transform)]
 #[derive(Debug, Clone)]
 pub struct Shape {
+    entity_id: Option<Entity>,
     vertices: Vec<Vector3<f32>>,
     faces: Vec<[usize; 3]>,
 }
@@ -18,7 +20,11 @@ impl Shape {
         debug_assert!(faces.iter().all(|[a, b, c]| {
             *a < vertices.len() && *b < vertices.len() && *c < vertices.len()
         }));
-        Self { vertices, faces }
+        Self {
+            entity_id: None,
+            vertices,
+            faces,
+        }
     }
 
     /// 直接使用三角面顶点构造形状，每个面都会复制三份顶点数据。
@@ -102,11 +108,17 @@ mod tests {
     };
     use nalgebra::Vector3;
 
+    fn detach_node(entity: Entity) {
+        if let Some(mut node) = entity.get_component_mut::<Node>() {
+            let _ = node.detach();
+        }
+    }
+
     fn ensure_transform(entity: &Entity, name: &str) {
         let _ = entity.unregister_component::<Shape>();
         let _ = entity.unregister_component::<Transform>();
         let _ = entity.unregister_component::<Renderable>();
-        let _ = Node::detach(*entity);
+        detach_node(*entity);
         let _ = entity.unregister_component::<Node>();
 
         let _ = entity
@@ -126,7 +138,7 @@ mod tests {
         let _ = entity.unregister_component::<Shape>();
         let _ = entity.unregister_component::<Transform>();
         let _ = entity.unregister_component::<Renderable>();
-        let _ = Node::detach(entity);
+        detach_node(entity);
         let _ = entity.unregister_component::<Node>();
 
         let inserted = entity

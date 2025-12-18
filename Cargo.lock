@@ -879,8 +879,11 @@ name = "jge-tpl"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "jge-core",
  "nalgebra",
+ "tokio",
+ "tracing",
  "tracing-subscriber",
 ]
 

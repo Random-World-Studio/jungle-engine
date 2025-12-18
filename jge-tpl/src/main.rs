@@ -1,4 +1,5 @@
 use anyhow::{Context, anyhow, ensure};
+use async_trait::async_trait;
 use jge_core::{
     Game,
     config::GameConfig,
@@ -14,12 +15,15 @@ use jge_core::{
             transform::Transform,
         },
         entity::Entity,
+        logic::{GameLogic, GameLogicHandle},
     },
     logger,
     resource::{Resource, ResourceHandle, ResourcePath},
 };
 use nalgebra::{Vector2, Vector3};
-use std::f32::consts::FRAC_PI_4;
+use std::{f32::consts::FRAC_PI_4, sync::Arc, time::Duration};
+use tokio::sync::Mutex;
+use tracing::info;
 
 fn main() -> anyhow::Result<()> {
     logger::init()?;
@@ -34,7 +38,11 @@ fn build_demo_scene() -> anyhow::Result<Entity> {
     let _ = Scene3D::insert(root, Scene3D::new()).context("为根实体注册 Scene3D 组件失败")?;
 
     let camera = spawn_camera(root).context("创建摄像机失败")?;
-    Scene3D::attach_camera(root, camera).context("绑定摄像机失败")?;
+    let mut scene = root
+        .get_component_mut::<Scene3D>()
+        .context("根实体缺少 Scene3D 组件")?;
+    scene.bind_camera(camera).context("绑定摄像机失败")?;
+    drop(scene);
 
     spawn_ground(root).context("创建地面失败")?;
 
@@ -59,9 +67,25 @@ fn build_demo_scene() -> anyhow::Result<Entity> {
 
     spawn_cube(root, Vector3::new(-3.0, 0.5, 0.0)).context("创建立方体失败")?;
 
-    Scene3D::sync_attached_transform(root).context("同步 Scene3D 变换失败")?;
+    let scene = root
+        .get_component::<Scene3D>()
+        .context("根实体缺少 Scene3D 组件")?;
+    scene
+        .sync_camera_transform()
+        .context("同步 Scene3D 变换失败")?;
+    drop(scene);
 
     Ok(root)
+}
+
+fn attach_to_parent(entity: Entity, parent: Entity, message: &str) -> anyhow::Result<()> {
+    let mut parent_node = parent
+        .get_component_mut::<Node>()
+        .with_context(|| format!("{message}: 父节点缺少 Node 组件"))?;
+    parent_node
+        .attach(entity)
+        .with_context(|| message.to_owned())?;
+    Ok(())
 }
 
 fn spawn_camera(parent: Entity) -> anyhow::Result<Entity> {
@@ -69,7 +93,7 @@ fn spawn_camera(parent: Entity) -> anyhow::Result<Entity> {
     let _ = entity
         .register_component(Camera::new())
         .context("为实体注册 Camera 组件失败")?;
-    Node::attach(entity, parent).context("将摄像机挂载到父节点失败")?;
+    attach_to_parent(entity, parent, "将摄像机挂载到父节点失败")?;
 
     if let Some(mut transform) = entity.get_component_mut::<Transform>() {
         transform.set_position(Vector3::new(0.0, 6.0, 6.0));
@@ -93,14 +117,16 @@ fn spawn_ground(parent: Entity) -> anyhow::Result<()> {
         ],
     ];
 
-    spawn_shape(
+    let _ = spawn_shape(
         parent,
         Vector3::new(0.0, 0.0, 0.0),
         Vector3::new(0.0, 0.0, 0.0),
         Vector3::new(6.0, 1.0, 6.0),
         triangles,
         None,
-    )
+    )?;
+
+    Ok(())
 }
 
 fn spawn_point_light(parent: Entity) -> anyhow::Result<()> {
@@ -108,7 +134,7 @@ fn spawn_point_light(parent: Entity) -> anyhow::Result<()> {
     let _ = entity
         .register_component(PointLight::new(15.0))
         .context("为点光源注册 PointLight 组件失败")?;
-    Node::attach(entity, parent).context("将点光源挂载到父节点失败")?;
+    attach_to_parent(entity, parent, "将点光源挂载到父节点失败")?;
 
     if let Some(mut renderable) = entity.get_component_mut::<Renderable>() {
         renderable.set_enabled(false);
@@ -135,7 +161,7 @@ fn spawn_triangle(
         Vector3::new(0.5, -0.4, 0.0),
     ]];
 
-    spawn_shape(parent, position, rotation, scale, triangles, None)
+    spawn_shape(parent, position, rotation, scale, triangles, None).map(|_| ())
 }
 
 fn spawn_cube(parent: Entity, position: Vector3<f32>) -> anyhow::Result<()> {
@@ -206,14 +232,23 @@ fn spawn_cube(parent: Entity, position: Vector3<f32>) -> anyhow::Result<()> {
     let (material_handle, patches) =
         prepare_bamboo_material(&triangles).context("准备竹子材质失败")?;
 
-    spawn_shape(
+    let cube = spawn_shape(
         parent,
         position,
         Vector3::new(0.0, 0.0, 0.0),
         Vector3::new(1.0, 1.0, 1.0),
         triangles,
         Some((material_handle, patches)),
-    )
+    )?;
+
+    // Attach demo logic so each frame reports render timing for the cube entity.
+    let logic_handle: GameLogicHandle = Arc::new(Mutex::new(Box::new(CubeLogic)));
+    let mut node = cube
+        .get_component_mut::<Node>()
+        .context("为立方体注册逻辑失败: 缺少 Node 组件")?;
+    node.set_logic(logic_handle);
+
+    Ok(())
 }
 
 fn prepare_bamboo_material(
@@ -313,14 +348,14 @@ fn spawn_shape(
     scale: Vector3<f32>,
     triangles: Vec<[Vector3<f32>; 3]>,
     material: Option<(ResourceHandle, Vec<[Vector2<f32>; 3]>)>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Entity> {
     let entity = Entity::new().context("创建子实体失败")?;
     let shape = Shape::from_triangles(triangles);
     let triangle_count = shape.triangle_count();
     let _ = entity
         .register_component(shape)
         .context("为子实体注册 Shape 组件失败")?;
-    Node::attach(entity, parent).context("将子实体挂载到父节点失败")?;
+    attach_to_parent(entity, parent, "将子实体挂载到父节点失败")?;
 
     if let Some((resource, regions)) = material {
         ensure!(
@@ -338,7 +373,7 @@ fn spawn_shape(
         transform.set_scale(scale);
     }
 
-    Ok(())
+    Ok(entity)
 }
 
 fn spawn_parallel_light(parent: Entity) -> anyhow::Result<()> {
@@ -346,7 +381,7 @@ fn spawn_parallel_light(parent: Entity) -> anyhow::Result<()> {
     let _ = entity
         .register_component(ParallelLight::new())
         .context("为平行光注册 ParallelLight 组件失败")?;
-    Node::attach(entity, parent).context("将平行光挂载到父节点失败")?;
+    attach_to_parent(entity, parent, "将平行光挂载到父节点失败")?;
 
     if let Some(mut renderable) = entity.get_component_mut::<Renderable>() {
         renderable.set_enabled(false);
@@ -361,4 +396,18 @@ fn spawn_parallel_light(parent: Entity) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+struct CubeLogic;
+
+#[async_trait]
+impl GameLogic for CubeLogic {
+    async fn on_render(&mut self, entity: Entity, delta: Duration) {
+        info!(
+            target = "jge-demo",
+            entity_id = entity.id(),
+            frame_ms = delta.as_secs_f64() * 1_000.0,
+            "CubeLogic::on_render"
+        );
+    }
 }

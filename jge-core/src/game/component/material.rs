@@ -1,4 +1,5 @@
 use super::{component, component_impl, shape::Shape};
+use crate::game::entity::Entity;
 use crate::resource::{Resource, ResourceHandle};
 use nalgebra::Vector2;
 use parking_lot::RwLock;
@@ -9,6 +10,7 @@ pub type MaterialPatch = [Vector2<f32>; 3];
 #[component(Shape)]
 #[derive(Debug, Clone)]
 pub struct Material {
+    entity_id: Option<Entity>,
     resource: ResourceHandle,
     regions: Vec<MaterialPatch>,
 }
@@ -17,7 +19,11 @@ pub struct Material {
 impl Material {
     #[default(Self::placeholder_resource(), Vec::new())]
     pub fn new(resource: ResourceHandle, regions: Vec<MaterialPatch>) -> Self {
-        Self { resource, regions }
+        Self {
+            entity_id: None,
+            resource,
+            regions,
+        }
     }
 
     pub fn resource(&self) -> ResourceHandle {
@@ -57,13 +63,19 @@ mod tests {
     use parking_lot::RwLock;
     use std::sync::Arc;
 
+    fn detach_node(entity: Entity) {
+        if let Some(mut node) = entity.get_component_mut::<Node>() {
+            let _ = node.detach();
+        }
+    }
+
     fn prepare_entity(name: &str) -> Entity {
         let entity = Entity::new().expect("应能创建实体");
         let _ = entity.unregister_component::<Material>();
         let _ = entity.unregister_component::<Shape>();
         let _ = entity.unregister_component::<Transform>();
         let _ = entity.unregister_component::<Renderable>();
-        let _ = Node::detach(entity);
+        detach_node(entity);
         let _ = entity.unregister_component::<Node>();
 
         let _ = entity

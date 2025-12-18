@@ -1,11 +1,7 @@
 use std::{sync::Arc, time::Duration};
 
 use wgpu::Backends;
-use winit::{
-    dpi::{PhysicalPosition, PhysicalSize},
-    event::{DeviceEvent, ElementState, KeyEvent, MouseButton, MouseScrollDelta, TouchPhase},
-    window::Window,
-};
+use winit::{dpi::PhysicalSize, window::Window};
 
 use crate::{
     config::WindowConfig,
@@ -178,10 +174,6 @@ impl GameWindow {
         Ok(())
     }
 
-    pub fn keyboard_input(&mut self, _event: &KeyEvent) -> bool {
-        false
-    }
-
     fn render_layer(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
@@ -200,7 +192,15 @@ impl GameWindow {
             caches: &mut self.layer_caches,
         };
 
-        Layer::render(layer_entity, &mut context);
+        if let Some(layer) = Layer::read(layer_entity) {
+            layer.render(&mut context);
+        } else {
+            warn!(
+                target: "jge-core",
+                layer_id = layer_entity.id(),
+                "skip rendering for entity missing Layer component"
+            );
+        }
     }
 
     fn collect_layer_roots(root: Entity) -> Vec<Entity> {
@@ -236,24 +236,4 @@ impl GameWindow {
 
         result
     }
-
-    pub fn mouse_click(&mut self, _state: ElementState, _button: MouseButton) -> bool {
-        false
-    }
-
-    pub fn mouse_wheel(&mut self, _delta: MouseScrollDelta, _phase: TouchPhase) -> bool {
-        false
-    }
-
-    pub fn cursor_move(&mut self, _position: PhysicalPosition<f64>) -> bool {
-        false
-    }
-
-    /// 鼠标移动/触摸事件
-
-    pub fn device_input(&mut self, _event: &DeviceEvent) -> bool {
-        false
-    }
-
-    pub fn update(&mut self) {}
 }

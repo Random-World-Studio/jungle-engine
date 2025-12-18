@@ -14,7 +14,15 @@ use parking_lot::{
     Mutex, RawRwLock, RwLock, RwLockUpgradableReadGuard,
     lock_api::{RwLockReadGuard, RwLockWriteGuard},
 };
-use std::{any::type_name, collections::HashMap, fmt, mem, sync::Arc};
+use std::{
+    any::type_name,
+    collections::HashMap,
+    fmt, mem,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 
 use crate::game::entity::Entity;
 
@@ -30,8 +38,18 @@ pub trait Component: Sized + 'static {
 
     fn unregister_dependencies(_entity: Entity) {}
 
+    fn attach_entity(&mut self, _entity: Entity) {}
+
+    fn detach_entity(&mut self) {}
+
     fn insert(entity: Entity, component: Self) -> Result<Option<Self>, ComponentDependencyError> {
-        Ok(Self::storage().insert(entity.id(), component))
+        let mut component = component;
+        component.attach_entity(entity);
+        let previous = Self::storage().insert(entity.id(), component);
+        Ok(previous.map(|mut existing| {
+            existing.detach_entity();
+            existing
+        }))
     }
 
     fn read(entity: Entity) -> Option<ComponentRead<Self>> {
@@ -43,7 +61,10 @@ pub trait Component: Sized + 'static {
     }
 
     fn remove(entity: Entity) -> Option<Self> {
-        Self::storage().remove(entity.id())
+        Self::storage().remove(entity.id()).map(|mut component| {
+            component.detach_entity();
+            component
+        })
     }
 }
 
@@ -136,25 +157,35 @@ struct ComponentLocation {
     slot: usize,
 }
 
+const EMPTY_ENTITY_ID: u64 = u64::MAX;
+
 struct ComponentSlot<C> {
     value: RwLock<Option<C>>,
+    entity_id: AtomicU64,
 }
 
 impl<C> ComponentSlot<C> {
     fn new() -> Self {
         Self {
             value: RwLock::new(None),
+            entity_id: AtomicU64::new(EMPTY_ENTITY_ID),
         }
     }
 
-    fn replace(&self, value: C) -> Option<C> {
+    fn replace(&self, entity_id: u64, value: C) -> Option<C> {
         let mut guard = self.value.write();
-        guard.replace(value)
+        let previous = guard.replace(value);
+        self.entity_id.store(entity_id, Ordering::Relaxed);
+        previous
     }
 
     fn take(&self) -> Option<C> {
         let mut guard = self.value.write();
-        guard.take()
+        let removed = guard.take();
+        if removed.is_some() {
+            self.entity_id.store(EMPTY_ENTITY_ID, Ordering::Relaxed);
+        }
+        removed
     }
 
     fn try_read(&self) -> Option<RwLockReadGuard<'_, RawRwLock, Option<C>>> {
@@ -165,6 +196,10 @@ impl<C> ComponentSlot<C> {
     fn try_write(&self) -> Option<RwLockWriteGuard<'_, RawRwLock, Option<C>>> {
         let guard = self.value.write();
         if guard.is_some() { Some(guard) } else { None }
+    }
+
+    fn entity_id(&self) -> u64 {
+        self.entity_id.load(Ordering::Relaxed)
     }
 }
 
@@ -182,18 +217,18 @@ impl<C> ComponentChunk<C> {
         Self { slots, freelist }
     }
 
-    fn allocate(&self, value: C) -> (usize, Option<C>, bool) {
+    fn allocate(&self, entity_id: u64, value: C) -> (usize, Option<C>, bool) {
         let mut freelist = self.freelist.lock();
         let slot = freelist.pop().expect("尝试在已满的块中分配槽位");
         let has_more_free = !freelist.is_empty();
         drop(freelist);
-        let previous = self.slot(slot).replace(value);
+        let previous = self.slot(slot).replace(entity_id, value);
         debug_assert!(previous.is_none(), "从空闲槽位分配时不应存在旧值");
         (slot, previous, has_more_free)
     }
 
-    fn replace(&self, slot: usize, value: C) -> Option<C> {
-        self.slot(slot).replace(value)
+    fn replace(&self, slot: usize, entity_id: u64, value: C) -> Option<C> {
+        self.slot(slot).replace(entity_id, value)
     }
 
     fn release(&self, slot: usize) -> (Option<C>, bool) {
@@ -230,12 +265,35 @@ impl<C> ComponentStorage<C> {
         }
     }
 
+    pub fn collect_with<T, F>(&self, mut f: F) -> Vec<T>
+    where
+        F: FnMut(u64, &C) -> Option<T>,
+    {
+        let guard = self.inner.read();
+        let mut results = Vec::new();
+
+        for chunk in &guard.chunks {
+            for slot in &chunk.slots {
+                let value_guard = slot.value.read();
+                if let Some(component) = value_guard.as_ref() {
+                    let entity_id = slot.entity_id.load(Ordering::Relaxed);
+                    debug_assert!(entity_id != EMPTY_ENTITY_ID, "组件槽位缺少实体标识");
+                    if let Some(mapped) = f(entity_id, component) {
+                        results.push(mapped);
+                    }
+                }
+            }
+        }
+
+        results
+    }
+
     pub fn insert(&self, entity_id: u64, component: C) -> Option<C> {
         let guard = self.inner.upgradable_read();
         if let Some(location) = guard.entity_to_location.get(&entity_id).copied() {
             let chunk = guard.chunks[location.chunk].clone();
             drop(guard);
-            return chunk.replace(location.slot, component);
+            return chunk.replace(location.slot, entity_id, component);
         }
 
         let mut guard = RwLockUpgradableReadGuard::upgrade(guard);
@@ -252,7 +310,7 @@ impl<C> ComponentStorage<C> {
             }
         };
 
-        let (slot, previous, has_more_free) = chunk.allocate(component);
+        let (slot, previous, has_more_free) = chunk.allocate(entity_id, component);
         debug_assert!(previous.is_none(), "从空闲槽位分配时不应存在旧值");
         guard.entity_to_location.insert(
             entity_id,
@@ -325,6 +383,10 @@ impl<C: 'static> ComponentRead<C> {
             guard,
         })
     }
+
+    pub fn entity(&self) -> Entity {
+        Entity::from(self._slot.entity_id())
+    }
 }
 
 impl<C: 'static> ComponentWrite<C> {
@@ -337,6 +399,10 @@ impl<C: 'static> ComponentWrite<C> {
             _slot: slot,
             guard,
         })
+    }
+
+    pub fn entity(&self) -> Entity {
+        Entity::from(self._slot.entity_id())
     }
 }
 

@@ -1,9 +1,11 @@
 use super::node::Node;
 use super::{component, component_impl};
+use crate::game::entity::Entity;
 
 #[component(Node)]
 #[derive(Debug, Clone)]
 pub struct Renderable {
+    entity_id: Option<Entity>,
     enabled: bool,
 }
 
@@ -12,7 +14,10 @@ impl Renderable {
     /// 创建一个默认启用的可渲染组件。
     #[default()]
     pub fn new() -> Self {
-        Self { enabled: true }
+        Self {
+            entity_id: None,
+            enabled: true,
+        }
     }
 
     /// 返回当前组件是否参与渲染。

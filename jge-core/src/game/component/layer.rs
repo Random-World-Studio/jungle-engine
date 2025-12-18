@@ -16,7 +16,10 @@ use super::scene3d::Scene3D;
 use super::shape::Shape;
 use super::transform::Transform;
 use super::{component, component_impl};
-use crate::game::{component::Component, entity::Entity};
+use crate::game::{
+    component::{Component, ComponentRead},
+    entity::Entity,
+};
 use crate::resource::{Resource, ResourceHandle, ResourcePath};
 use nalgebra::{Matrix4, Perspective3, Point3, Rotation3, Vector2, Vector3, Vector4};
 
@@ -26,6 +29,7 @@ const MAX_SCENE3D_PARALLEL_LIGHTS: usize = 4;
 #[component(Renderable)]
 #[derive(Debug)]
 pub struct Layer {
+    entity_id: Option<Entity>,
     shaders: HashMap<RenderPipelineStage, LayerShader>,
     spatial: LayerSpatialIndex,
 }
@@ -36,6 +40,7 @@ impl Layer {
     #[default()]
     pub fn new() -> Self {
         Self {
+            entity_id: None,
             shaders: HashMap::new(),
             spatial: LayerSpatialIndex::new(),
         }
@@ -96,7 +101,7 @@ impl Layer {
     pub fn render(entity: Entity, context: &mut LayerRenderContext<'_, '_>) {
         if Scene2D::read(entity).is_some() {
             Self::render_scene2d(entity, context);
-        } else if Scene3D::read(entity).is_some() {
+        } else if entity.get_component::<Scene3D>().is_some() {
             Self::render_scene3d(entity, context);
         } else {
             debug!(
@@ -315,19 +320,15 @@ impl Layer {
     }
 
     fn render_scene3d(entity: Entity, context: &mut LayerRenderContext<'_, '_>) {
-        let (scene_near, scene_distance, attached_camera) = {
-            let scene_guard = match Scene3D::read(entity) {
-                Some(scene) => scene,
-                None => return,
-            };
-            (
-                scene_guard.near_plane(),
-                scene_guard.view_distance(),
-                scene_guard.attached_camera(),
-            )
+        let scene_guard = match entity.get_component::<Scene3D>() {
+            Some(scene) => scene,
+            None => return,
         };
+        let scene_near = scene_guard.near_plane();
+        let scene_distance = scene_guard.view_distance();
+        let attached_camera = scene_guard.attached_camera();
 
-        if let Err(error) = Scene3D::sync_attached_transform(entity) {
+        if let Err(error) = scene_guard.sync_camera_transform() {
             warn!(
                 target: "jge-core",
                 layer_id = entity.id(),
@@ -443,25 +444,15 @@ impl Layer {
             return;
         }
 
-        let scene_vertical = match Scene3D::read(entity) {
-            Some(scene) => match scene.vertical_fov_for_height(height) {
-                Ok(value) => value,
-                Err(error) => {
-                    warn!(
-                        target: "jge-core",
-                        layer_id = entity.id(),
-                        error = %error,
-                        framebuffer_height = height,
-                        "Scene3D vertical FOV computation failed"
-                    );
-                    return;
-                }
-            },
-            None => {
+        let scene_vertical = match scene_guard.vertical_fov_for_height(height) {
+            Ok(value) => value,
+            Err(error) => {
                 warn!(
                     target: "jge-core",
                     layer_id = entity.id(),
-                    "Scene3D component missing during render"
+                    error = %error,
+                    framebuffer_height = height,
+                    "Scene3D vertical FOV computation failed"
                 );
                 return;
             }
@@ -509,20 +500,20 @@ impl Layer {
         let vertical_fov = scene_vertical.min(camera_vertical);
         let aspect_ratio = width as f32 / height as f32;
 
-        let visible =
-            match Scene3D::visible_renderables(entity, camera_entity, context.framebuffer_size) {
-                Ok(collection) => collection,
-                Err(error) => {
-                    warn!(
-                        target: "jge-core",
-                        layer_id = entity.id(),
-                        camera_id = camera_entity.id(),
-                        error = %error,
-                        "Scene3D visibility query failed"
-                    );
-                    return;
-                }
-            };
+        let visible = match scene_guard.visible_renderables(camera_entity, context.framebuffer_size)
+        {
+            Ok(collection) => collection,
+            Err(error) => {
+                warn!(
+                    target: "jge-core",
+                    layer_id = entity.id(),
+                    camera_id = camera_entity.id(),
+                    error = %error,
+                    "Scene3D visibility query failed"
+                );
+                return;
+            }
+        };
 
         let transform_guard = match Transform::read(camera_entity) {
             Some(transform) => transform,
@@ -1050,8 +1041,31 @@ impl Layer {
             }
         };
 
+        let scene_guard = match Scene2D::read(entity) {
+            Some(scene) => scene,
+            None => {
+                warn!(
+                    target: "jge-core",
+                    layer_id = entity.id(),
+                    "Scene2D component disappeared before visibility query"
+                );
+                return;
+            }
+        };
+        let layer_guard = match Layer::read(entity) {
+            Some(layer) => layer,
+            None => {
+                warn!(
+                    target: "jge-core",
+                    layer_id = entity.id(),
+                    "Layer component missing during visibility query"
+                );
+                return;
+            }
+        };
+
         let face_groups =
-            match Scene2D::visible_faces_with_renderables(entity, renderables.bundles()) {
+            match scene_guard.visible_faces_with_renderables(&layer_guard, renderables.bundles()) {
                 Ok(faces) => faces,
                 Err(error) => {
                     warn!(
@@ -1063,6 +1077,8 @@ impl Layer {
                     Vec::new()
                 }
             };
+        drop(layer_guard);
+        drop(scene_guard);
 
         let mut draws = Vec::new();
         let mut total_vertices = 0usize;
@@ -1603,6 +1619,36 @@ impl LayerRenderableCollection {
 
     pub fn into_bundles(self) -> Vec<LayerRenderableBundle> {
         self.bundles
+    }
+}
+
+impl ComponentRead<Layer> {
+    pub fn render(&self, context: &mut LayerRenderContext<'_, '_>) {
+        Layer::render(self.entity(), context);
+    }
+
+    pub fn renderable_entities(&self) -> Result<Vec<Entity>, LayerTraversalError> {
+        Layer::renderable_entities(self.entity())
+    }
+
+    pub fn point_light_entities(&self) -> Result<Vec<Entity>, LayerTraversalError> {
+        Layer::point_light_entities(self.entity())
+    }
+
+    pub fn parallel_light_entities(&self) -> Result<Vec<Entity>, LayerTraversalError> {
+        Layer::parallel_light_entities(self.entity())
+    }
+
+    pub fn world_renderables(&self) -> Result<Vec<LayerRenderableBundle>, LayerTraversalError> {
+        Layer::world_renderables(self.entity())
+    }
+
+    pub fn collect_renderables(&self) -> Result<LayerRenderableCollection, LayerTraversalError> {
+        Layer::collect_renderables(self.entity())
+    }
+
+    pub fn world_triangles(&self) -> Result<Vec<LayerTriangle>, LayerTraversalError> {
+        Layer::world_triangles(self.entity())
     }
 }
 
@@ -2669,10 +2715,23 @@ mod tests {
     use lodtree::{coords::OctVec, traits::LodVec};
     use parking_lot::RwLock;
 
+    fn detach_node(entity: Entity) {
+        if let Some(mut node) = entity.get_component_mut::<Node>() {
+            let _ = node.detach();
+        }
+    }
+
+    fn attach_node(entity: Entity, parent: Entity, message: &str) {
+        let mut parent_node = parent
+            .get_component_mut::<Node>()
+            .expect("父实体应持有 Node 组件");
+        parent_node.attach(entity).expect(message);
+    }
+
     fn prepare_node(entity: &Entity, name: &str) {
         let _ = entity.unregister_component::<Layer>();
         let _ = entity.unregister_component::<Renderable>();
-        let _ = Node::detach(*entity);
+        detach_node(*entity);
         let _ = entity.unregister_component::<Node>();
         let _ = entity
             .register_component(Node::new(name).expect("应能创建节点"))
@@ -2682,7 +2741,7 @@ mod tests {
     fn cleanup(entity: &Entity) {
         let _ = entity.unregister_component::<Layer>();
         let _ = entity.unregister_component::<Renderable>();
-        let _ = Node::detach(*entity);
+        detach_node(*entity);
         let _ = entity.unregister_component::<Node>();
     }
 
@@ -2736,10 +2795,10 @@ mod tests {
         prepare_node(&nested_child, "nested_child");
 
         // 构建节点树
-        Node::attach(child_a, root).expect("应能挂载 child_a");
-        Node::attach(child_b, root).expect("应能挂载 child_b");
-        Node::attach(nested_root, child_b).expect("应能挂载 nested_root");
-        Node::attach(nested_child, nested_root).expect("应能挂载 nested_child");
+        attach_node(child_a, root, "应能挂载 child_a");
+        attach_node(child_b, root, "应能挂载 child_b");
+        attach_node(nested_root, child_b, "应能挂载 nested_root");
+        attach_node(nested_child, nested_root, "应能挂载 nested_child");
 
         // 注册可渲染组件
         let _ = root
@@ -2794,9 +2853,9 @@ mod tests {
         prepare_node(&light_a, "light_a");
         prepare_node(&light_b, "light_b");
 
-        Node::attach(light_a, root).expect("应能挂载光源 A 到根");
-        Node::attach(nested_root, root).expect("应能挂载 nested_root");
-        Node::attach(light_b, nested_root).expect("应能挂载光源 B 到嵌套 Layer");
+        attach_node(light_a, root, "应能挂载光源 A 到根");
+        attach_node(nested_root, root, "应能挂载 nested_root");
+        attach_node(light_b, nested_root, "应能挂载光源 B 到嵌套 Layer");
 
         let _ = root
             .register_component(Renderable::new())
@@ -2884,9 +2943,9 @@ mod tests {
         prepare_node(&light_a, "parallel_a");
         prepare_node(&light_b, "parallel_b");
 
-        Node::attach(light_a, root).expect("应能挂载平行光 A");
-        Node::attach(nested_root, root).expect("应能挂载 nested_root");
-        Node::attach(light_b, nested_root).expect("应能挂载平行光 B 到嵌套 Layer");
+        attach_node(light_a, root, "应能挂载平行光 A");
+        attach_node(nested_root, root, "应能挂载 nested_root");
+        attach_node(light_b, nested_root, "应能挂载平行光 B 到嵌套 Layer");
 
         let _ = root
             .register_component(Renderable::new())
@@ -3049,7 +3108,7 @@ mod tests {
 
         prepare_node(&root, "renderables_root");
         prepare_node(&child, "renderables_child");
-        Node::attach(child, root).expect("应能挂载子实体到根");
+        attach_node(child, root, "应能挂载子实体到根");
 
         let _ = root
             .register_component(Renderable::new())

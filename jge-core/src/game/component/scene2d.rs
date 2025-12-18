@@ -10,8 +10,8 @@ use lodtree::coords::OctVec;
 use super::{
     component, component_impl,
     layer::{
-        Layer, LayerLodUpdate, LayerRenderableBundle, LayerSpatialError, LayerTraversalError,
-        RenderPipelineStage, ShaderLanguage,
+        Layer, LayerLodUpdate, LayerRenderableBundle, LayerTraversalError, RenderPipelineStage,
+        ShaderLanguage,
     },
 };
 use crate::game::{
@@ -24,6 +24,7 @@ use crate::resource::ResourcePath;
 #[derive(Debug, Clone)]
 /// 二维场景默认按照 Renderable 的 z 值进行遮挡，高 z 表示位于前方。
 pub struct Scene2D {
+    entity_id: Option<Entity>,
     offset: Vector2<f32>,
     pixels_per_unit: f32,
 }
@@ -35,6 +36,7 @@ impl Scene2D {
     #[default()]
     pub fn new() -> Self {
         Self {
+            entity_id: None,
             offset: Vector2::zeros(),
             pixels_per_unit: DEFAULT_PIXELS_PER_UNIT,
         }
@@ -75,20 +77,20 @@ impl Scene2D {
     /// 预热场景的 LOD，使 Layer 至少构建出一批八叉树节点。
     ///
     /// 返回值表示是否成功生成了至少一个激活节点。
-    pub fn warmup_lod(entity: Entity) -> Result<bool, LayerSpatialError> {
+    pub fn warmup_lod(&self, layer: &mut Layer) -> bool {
         const DETAIL_LEVEL: u64 = 3;
         const MAX_ITERATIONS: usize = 32;
         let target = OctVec::new(128, 128, 128, 5);
 
         for _ in 0..MAX_ITERATIONS {
-            let update = Self::step_lod(entity, &[target], DETAIL_LEVEL)?;
+            let update = self.step_lod(layer, &[target], DETAIL_LEVEL);
             if update.is_empty() {
                 break;
             }
         }
 
-        let chunks = Self::chunk_positions(entity)?;
-        Ok(!chunks.is_empty())
+        let chunks = self.chunk_positions(layer);
+        !chunks.is_empty()
     }
 
     fn ensure_default_layer_shaders(entity: Entity) {
@@ -111,53 +113,50 @@ impl Scene2D {
     }
 
     /// 基于 Layer 的八叉树推进 LOD。
-    pub fn step_lod(
-        entity: Entity,
-        targets: &[OctVec],
-        detail: u64,
-    ) -> Result<LayerLodUpdate, LayerSpatialError> {
-        let mut layer = Layer::write(entity).ok_or(LayerSpatialError::MissingLayer(entity))?;
-        Ok(layer.step_lod(targets, detail))
+    pub fn step_lod(&self, layer: &mut Layer, targets: &[OctVec], detail: u64) -> LayerLodUpdate {
+        let _ = self;
+        layer.step_lod(targets, detail)
     }
 
     /// 当前激活节点数量。
-    pub fn chunk_count(entity: Entity) -> Result<usize, LayerSpatialError> {
-        let layer = Layer::read(entity).ok_or(LayerSpatialError::MissingLayer(entity))?;
-        Ok(layer.chunk_count())
+    pub fn chunk_count(&self, layer: &Layer) -> usize {
+        let _ = self;
+        layer.chunk_count()
     }
 
     /// 返回激活节点的位置集合。
-    pub fn chunk_positions(entity: Entity) -> Result<Vec<OctVec>, LayerSpatialError> {
-        let layer = Layer::read(entity).ok_or(LayerSpatialError::MissingLayer(entity))?;
-        Ok(layer.chunk_positions())
+    pub fn chunk_positions(&self, layer: &Layer) -> Vec<OctVec> {
+        let _ = self;
+        layer.chunk_positions()
     }
 
     /// 查找指定节点在半径范围内的邻居。
-    pub fn chunk_neighbors(
-        entity: Entity,
-        center: OctVec,
-        radius: u64,
-    ) -> Result<Vec<OctVec>, LayerSpatialError> {
-        let layer = Layer::read(entity).ok_or(LayerSpatialError::MissingLayer(entity))?;
-        Ok(layer.chunk_neighbors(center, radius))
+    pub fn chunk_neighbors(&self, layer: &Layer, center: OctVec, radius: u64) -> Vec<OctVec> {
+        let _ = self;
+        layer.chunk_neighbors(center, radius)
     }
 
     /// 收集当前 Layer 树下所有启用 Shape 的未被完全遮挡的三角面集合。
     /// 返回的数组按照 Layer 八叉树节点顺序分组，每个子数组包含同一实体的连续面。
-    pub fn visible_faces(entity: Entity) -> Result<Vec<Scene2DFaceGroup>, Scene2DVisibilityError> {
-        let renderables = Layer::world_renderables(entity).map_err(Scene2DVisibilityError::from)?;
-        Self::visible_faces_with_renderables(entity, &renderables)
+    pub fn visible_faces(&self) -> Result<Vec<Scene2DFaceGroup>, Scene2DVisibilityError> {
+        let entity = self
+            .entity_id
+            .expect("Scene2D::visible_faces requires the component to be attached to an entity");
+        let layer = entity
+            .get_component::<Layer>()
+            .expect("Scene2D::visible_faces requires Layer component");
+        let renderables = layer
+            .world_renderables()
+            .map_err(Scene2DVisibilityError::from)?;
+        self.visible_faces_with_renderables(&layer, &renderables)
     }
 
     pub fn visible_faces_with_renderables(
-        entity: Entity,
+        &self,
+        layer: &Layer,
         renderables: &[LayerRenderableBundle],
     ) -> Result<Vec<Scene2DFaceGroup>, Scene2DVisibilityError> {
-        if Scene2D::read(entity).is_none() {
-            return Err(Scene2DVisibilityError::MissingScene(entity));
-        }
-
-        let chunks = Self::chunk_positions(entity).map_err(Scene2DVisibilityError::from)?;
+        let chunks = self.chunk_positions(layer);
         if chunks.is_empty() {
             return Ok(Vec::new());
         }
@@ -345,18 +344,11 @@ impl Scene2DFaceGroup {
 pub enum Scene2DVisibilityError {
     MissingScene(Entity),
     LayerTraversal(LayerTraversalError),
-    LayerSpatial(LayerSpatialError),
 }
 
 impl From<LayerTraversalError> for Scene2DVisibilityError {
     fn from(value: LayerTraversalError) -> Self {
         Self::LayerTraversal(value)
-    }
-}
-
-impl From<LayerSpatialError> for Scene2DVisibilityError {
-    fn from(value: LayerSpatialError) -> Self {
-        Self::LayerSpatial(value)
     }
 }
 
@@ -367,7 +359,6 @@ impl fmt::Display for Scene2DVisibilityError {
                 write!(f, "实体 {} 未注册 Scene2D 组件", entity.id())
             }
             Scene2DVisibilityError::LayerTraversal(error) => write!(f, "{}", error),
-            Scene2DVisibilityError::LayerSpatial(error) => write!(f, "{}", error),
         }
     }
 }
@@ -389,13 +380,26 @@ mod tests {
     use lodtree::{coords::OctVec, traits::LodVec};
     use nalgebra::{Vector2, Vector3};
 
+    fn detach_node(entity: Entity) {
+        if let Some(mut node) = entity.get_component_mut::<Node>() {
+            let _ = node.detach();
+        }
+    }
+
+    fn attach_node(entity: Entity, parent: Entity, message: &str) {
+        let mut parent_node = parent
+            .get_component_mut::<Node>()
+            .expect("父实体应持有 Node 组件");
+        parent_node.attach(entity).expect(message);
+    }
+
     #[test]
     fn scene2d_requires_layer_dependency() {
         let entity = Entity::new().expect("应能创建实体");
         let _ = entity.unregister_component::<Scene2D>();
         let _ = entity.unregister_component::<Layer>();
         let _ = entity.unregister_component::<Renderable>();
-        let _ = Node::detach(entity);
+        detach_node(entity);
         let _ = entity.unregister_component::<Node>();
 
         let inserted =
@@ -439,7 +443,7 @@ mod tests {
         let _ = entity.unregister_component::<Scene2D>();
         let _ = entity.unregister_component::<Layer>();
         let _ = entity.unregister_component::<Renderable>();
-        let _ = Node::detach(entity);
+        detach_node(entity);
         let _ = entity.unregister_component::<Node>();
     }
 
@@ -461,7 +465,7 @@ mod tests {
         let _ = Scene2D::remove(entity);
         let _ = Layer::remove(entity);
         let _ = Renderable::remove(entity);
-        let _ = Node::detach(entity);
+        detach_node(entity);
 
         let _ = entity
             .register_component(Renderable::new())
@@ -475,19 +479,25 @@ mod tests {
     }
 
     fn activate_root_chunk(entity: Entity) {
-        let update =
-            Scene2D::step_lod(entity, &[OctVec::root()], 0).expect("应能推进 Layer 八叉树");
+        let scene = entity
+            .get_component::<Scene2D>()
+            .expect("Scene2D 组件应已注册");
+        let mut layer = entity
+            .get_component_mut::<Layer>()
+            .expect("Scene2D 应持有 Layer");
+        let update = scene.step_lod(&mut layer, &[OctVec::root()], 0);
         assert!(
             !update.added.is_empty() || !update.activated.is_empty(),
             "推进 LOD 后应至少激活根节点"
         );
+        drop(layer);
     }
 
     fn register_shape(entity: Entity, triangles: &[[Vector3<f32>; 3]], translation: Vector3<f32>) {
         let _ = Shape::remove(entity);
         let _ = Transform::remove(entity);
         let _ = Renderable::remove(entity);
-        let _ = Node::detach(entity);
+        detach_node(entity);
 
         let _ = entity
             .register_component(Renderable::new())
@@ -525,16 +535,21 @@ mod tests {
         register_shape(back, &[far_triangle], Vector3::zeros());
         register_shape(front, &[near_triangle], Vector3::zeros());
 
-        Node::attach(back, root).expect("应能挂载后景");
-        Node::attach(front, root).expect("应能挂载前景");
+        attach_node(back, root, "应能挂载后景");
+        attach_node(front, root, "应能挂载前景");
 
-        let visible = Scene2D::visible_faces(root).expect("应能收集可见面片");
+        let visible = {
+            let scene = root
+                .get_component::<Scene2D>()
+                .expect("根节点应挂载 Scene2D");
+            scene.visible_faces().expect("应能收集可见面片")
+        };
         assert_eq!(visible.len(), 1, "只有前景面的实体应可见");
         assert_eq!(visible[0].faces().len(), 1, "仅有一个三角面应可见");
         assert_eq!(visible[0].faces()[0], near_triangle);
 
-        let _ = Node::detach(front);
-        let _ = Node::detach(back);
+        detach_node(front);
+        detach_node(back);
         let _ = Scene2D::remove(root);
         let _ = Layer::remove(root);
         let _ = Renderable::remove(root);
@@ -570,18 +585,23 @@ mod tests {
         register_shape(partial, &[partial_triangle], Vector3::zeros());
         register_shape(ground, &[ground_triangle], Vector3::zeros());
 
-        Node::attach(partial, root).expect("应能挂载部分遮挡实体");
-        Node::attach(ground, root).expect("应能挂载背景实体");
+        attach_node(partial, root, "应能挂载部分遮挡实体");
+        attach_node(ground, root, "应能挂载背景实体");
 
-        let visible = Scene2D::visible_faces(root).expect("应能收集可见面片");
+        let visible = {
+            let scene = root
+                .get_component::<Scene2D>()
+                .expect("根节点应挂载 Scene2D");
+            scene.visible_faces().expect("应能收集可见面片")
+        };
         assert_eq!(visible.len(), 2, "部分遮挡情况下应保留两个面组");
         assert_eq!(visible[0].faces().len(), 1);
         assert_eq!(visible[0].faces()[0], partial_triangle);
         assert_eq!(visible[1].faces().len(), 1);
         assert_eq!(visible[1].faces()[0], ground_triangle);
 
-        let _ = Node::detach(ground);
-        let _ = Node::detach(partial);
+        detach_node(ground);
+        detach_node(partial);
         let _ = Scene2D::remove(root);
         let _ = Layer::remove(root);
         let _ = Renderable::remove(root);
@@ -617,8 +637,8 @@ mod tests {
         register_shape(visible_entity, &[visible_triangle], Vector3::zeros());
         register_shape(hidden_entity, &[hidden_triangle], Vector3::zeros());
 
-        Node::attach(visible_entity, root).expect("应能挂载可见实体");
-        Node::attach(hidden_entity, root).expect("应能挂载隐藏实体");
+        attach_node(visible_entity, root, "应能挂载可见实体");
+        attach_node(hidden_entity, root, "应能挂载隐藏实体");
 
         {
             let mut hidden_renderable = hidden_entity
@@ -627,13 +647,18 @@ mod tests {
             hidden_renderable.set_enabled(false);
         }
 
-        let visible = Scene2D::visible_faces(root).expect("应能收集可见面片");
+        let visible = {
+            let scene = root
+                .get_component::<Scene2D>()
+                .expect("根节点应挂载 Scene2D");
+            scene.visible_faces().expect("应能收集可见面片")
+        };
         assert_eq!(visible.len(), 1, "禁用 Renderable 后应仅保留可见实体");
         assert_eq!(visible[0].faces().len(), 1);
         assert_eq!(visible[0].faces()[0], visible_triangle);
 
-        let _ = Node::detach(hidden_entity);
-        let _ = Node::detach(visible_entity);
+        detach_node(hidden_entity);
+        detach_node(visible_entity);
         let _ = Scene2D::remove(root);
         let _ = Layer::remove(root);
         let _ = Renderable::remove(root);
