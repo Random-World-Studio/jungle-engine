@@ -7,7 +7,6 @@ use crate::{
     config::WindowConfig,
     game::{
         component::{
-            Component,
             layer::{Layer, LayerRenderContext, LayerRendererCache},
             node::Node,
         },
@@ -192,7 +191,7 @@ impl GameWindow {
             caches: &mut self.layer_caches,
         };
 
-        if let Some(layer) = Layer::read(layer_entity) {
+        if let Some(layer) = layer_entity.get_component::<Layer>() {
             layer.render(&mut context);
         } else {
             warn!(
@@ -209,7 +208,7 @@ impl GameWindow {
         stack.push(root);
 
         while let Some(entity) = stack.pop() {
-            let node_guard = match Node::read(entity) {
+            let node_guard = match entity.get_component::<Node>() {
                 Some(node) => node,
                 None => {
                     warn!(
@@ -224,7 +223,7 @@ impl GameWindow {
             let children: Vec<Entity> = node_guard.children().iter().copied().collect();
             drop(node_guard);
 
-            if Layer::read(entity).is_some() {
+            if entity.get_component::<Layer>().is_some() {
                 result.push(entity);
                 continue;
             }

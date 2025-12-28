@@ -37,6 +37,16 @@ struct FragmentInput {
 const EPSILON : f32 = 1.0e-5;
 const AMBIENT_LIGHT : f32 = 0.1;
 
+const LENS_DISTORTION_K1 : f32 = -0.08;
+
+fn apply_lens_distortion(uv : vec2<f32>) -> vec2<f32> {
+    let center = vec2<f32>(0.5, 0.5);
+    let delta = uv - center;
+    let r2 = dot(delta, delta);
+    let scale = 1.0 + LENS_DISTORTION_K1 * r2;
+    return clamp(center + delta * scale, vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 1.0));
+}
+
 fn normalize_or_default(value : vec3<f32>) -> vec3<f32> {
     let len_sq = dot(value, value);
     if len_sq <= EPSILON {
@@ -72,7 +82,8 @@ fn fs_main(input : FragmentInput) -> @location(0) vec4<f32> {
 
     var base_color = vec4<f32>(1.0, 1.0, 1.0, 1.0);
     if use_texture {
-        base_color = textureSample(scene_texture, scene_sampler, input.uv);
+        let distorted_uv = apply_lens_distortion(input.uv);
+        base_color = textureSample(scene_texture, scene_sampler, distorted_uv);
     }
 
     var lighting = vec3<f32>(AMBIENT_LIGHT, AMBIENT_LIGHT, AMBIENT_LIGHT);

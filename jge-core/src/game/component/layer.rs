@@ -16,10 +16,7 @@ use super::scene3d::Scene3D;
 use super::shape::Shape;
 use super::transform::Transform;
 use super::{component, component_impl};
-use crate::game::{
-    component::{Component, ComponentRead},
-    entity::Entity,
-};
+use crate::game::{component::ComponentRead, entity::Entity};
 use crate::resource::{Resource, ResourceHandle, ResourcePath};
 use nalgebra::{Matrix4, Perspective3, Point3, Rotation3, Vector2, Vector3, Vector4};
 
@@ -99,7 +96,7 @@ impl Layer {
 
     /// 根据当前场景组件类型执行渲染。
     pub fn render(entity: Entity, context: &mut LayerRenderContext<'_, '_>) {
-        if Scene2D::read(entity).is_some() {
+        if entity.get_component::<Scene2D>().is_some() {
             Self::render_scene2d(entity, context);
         } else if entity.get_component::<Scene3D>().is_some() {
             Self::render_scene3d(entity, context);
@@ -127,7 +124,7 @@ impl Layer {
         let mut renderables = Vec::new();
 
         for entity in ordered {
-            if let Some(renderable) = Renderable::read(entity) {
+            if let Some(renderable) = entity.get_component::<Renderable>() {
                 if renderable.is_enabled() {
                     renderables.push(entity);
                 }
@@ -142,7 +139,9 @@ impl Layer {
         let mut lights = Vec::new();
 
         for entity in ordered {
-            if Light::read(entity).is_some() && PointLight::read(entity).is_some() {
+            if entity.get_component::<Light>().is_some()
+                && entity.get_component::<PointLight>().is_some()
+            {
                 lights.push(entity);
             }
         }
@@ -155,7 +154,9 @@ impl Layer {
         let mut lights = Vec::new();
 
         for entity in ordered {
-            if Light::read(entity).is_some() && ParallelLight::read(entity).is_some() {
+            if entity.get_component::<Light>().is_some()
+                && entity.get_component::<ParallelLight>().is_some()
+            {
                 lights.push(entity);
             }
         }
@@ -197,7 +198,7 @@ impl Layer {
         let mut bundles = Vec::new();
 
         for entity in renderables {
-            let shape_guard = match Shape::read(entity) {
+            let shape_guard = match entity.get_component::<Shape>() {
                 Some(shape) => shape,
                 None => continue,
             };
@@ -206,7 +207,7 @@ impl Layer {
                 continue;
             }
 
-            let transform_guard = match Transform::read(entity) {
+            let transform_guard = match entity.get_component::<Transform>() {
                 Some(transform) => transform,
                 None => continue,
             };
@@ -223,7 +224,7 @@ impl Layer {
             }
             drop(shape_guard);
 
-            let material = Material::read(entity).map(|material_guard| {
+            let material = entity.get_component::<Material>().map(|material_guard| {
                 let regions: Vec<MaterialPatch> =
                     material_guard.regions().iter().copied().collect();
                 let regions_arc = Arc::<[MaterialPatch]>::from(regions);
@@ -241,11 +242,11 @@ impl Layer {
     }
 
     fn traverse_layer_entities(root: Entity) -> Result<Vec<Entity>, LayerTraversalError> {
-        if Layer::read(root).is_none() {
+        if root.get_component::<Layer>().is_none() {
             return Err(LayerTraversalError::MissingLayer(root));
         }
 
-        if Node::read(root).is_none() {
+        if root.get_component::<Node>().is_none() {
             return Err(LayerTraversalError::MissingNode(root));
         }
 
@@ -257,15 +258,16 @@ impl Layer {
         let mut ordered = Vec::new();
 
         while let Some(current) = stack.pop() {
-            if current != root && Layer::read(current).is_some() {
+            if current != root && current.get_component::<Layer>().is_some() {
                 continue;
             }
 
             ordered.push(current);
 
             let child_ids = {
-                let node_guard =
-                    Node::read(current).ok_or(LayerTraversalError::MissingNode(current))?;
+                let node_guard = current
+                    .get_component::<Node>()
+                    .ok_or(LayerTraversalError::MissingNode(current))?;
                 let mut ids: Vec<Entity> = node_guard.children().iter().copied().collect();
                 ids.reverse();
                 ids
@@ -281,17 +283,21 @@ impl Layer {
 
     fn has_layer_ancestor(entity: Entity) -> Result<bool, LayerTraversalError> {
         let mut current_parent = {
-            let node_guard = Node::read(entity).ok_or(LayerTraversalError::MissingNode(entity))?;
+            let node_guard = entity
+                .get_component::<Node>()
+                .ok_or(LayerTraversalError::MissingNode(entity))?;
             node_guard.parent()
         };
 
         while let Some(id) = current_parent {
-            if Layer::read(id).is_some() {
+            if id.get_component::<Layer>().is_some() {
                 return Ok(true);
             }
 
             let parent = {
-                let node_guard = Node::read(id).ok_or(LayerTraversalError::MissingNode(id))?;
+                let node_guard = id
+                    .get_component::<Node>()
+                    .ok_or(LayerTraversalError::MissingNode(id))?;
                 node_guard.parent()
             };
             current_parent = parent;
@@ -305,14 +311,18 @@ impl Layer {
         preferred: Option<Entity>,
     ) -> Result<Option<Entity>, LayerTraversalError> {
         if let Some(candidate) = preferred {
-            if Camera::read(candidate).is_some() && Transform::read(candidate).is_some() {
+            if candidate.get_component::<Camera>().is_some()
+                && candidate.get_component::<Transform>().is_some()
+            {
                 return Ok(Some(candidate));
             }
         }
 
         let ordered = Self::traverse_layer_entities(root)?;
         for entity in ordered {
-            if Camera::read(entity).is_some() && Transform::read(entity).is_some() {
+            if entity.get_component::<Camera>().is_some()
+                && entity.get_component::<Transform>().is_some()
+            {
                 return Ok(Some(entity));
             }
         }
@@ -328,17 +338,8 @@ impl Layer {
         let scene_distance = scene_guard.view_distance();
         let attached_camera = scene_guard.attached_camera();
 
-        if let Err(error) = scene_guard.sync_camera_transform() {
-            warn!(
-                target: "jge-core",
-                layer_id = entity.id(),
-                error = %error,
-                "Scene3D transform sync failed"
-            );
-        }
-
         let (vertex_shader, fragment_shader) = {
-            let layer_guard = match Layer::read(entity) {
+            let layer_guard = match entity.get_component::<Layer>() {
                 Some(layer) => layer,
                 None => {
                     warn!(
@@ -417,7 +418,7 @@ impl Layer {
         };
 
         let (camera_near, camera_far) = {
-            let camera_guard = match Camera::read(camera_entity) {
+            let camera_guard = match camera_entity.get_component::<Camera>() {
                 Some(camera) => camera,
                 None => {
                     warn!(
@@ -458,7 +459,7 @@ impl Layer {
             }
         };
 
-        let camera_vertical = match Camera::read(camera_entity) {
+        let camera_vertical = match camera_entity.get_component::<Camera>() {
             Some(camera) => match camera.vertical_fov_for_height(height) {
                 Ok(value) => value,
                 Err(error) => {
@@ -515,7 +516,7 @@ impl Layer {
             }
         };
 
-        let transform_guard = match Transform::read(camera_entity) {
+        let transform_guard = match camera_entity.get_component::<Transform>() {
             Some(transform) => transform,
             None => {
                 warn!(
@@ -571,9 +572,9 @@ impl Layer {
         let mut point_lights: Vec<ScenePointLight> = point_light_entities
             .into_iter()
             .filter_map(|light_entity| {
-                let light = Light::read(light_entity)?;
-                let point = PointLight::read(light_entity)?;
-                let transform = Transform::read(light_entity)?;
+                let light = light_entity.get_component::<Light>()?;
+                let point = light_entity.get_component::<PointLight>()?;
+                let transform = light_entity.get_component::<Transform>()?;
                 let radius = point.distance();
                 let intensity = light.lightness();
                 let position = transform.position();
@@ -594,9 +595,9 @@ impl Layer {
         let mut parallel_lights: Vec<SceneParallelLight> = parallel_light_entities
             .into_iter()
             .filter_map(|light_entity| {
-                let light = Light::read(light_entity)?;
-                let parallel = ParallelLight::read(light_entity)?;
-                let transform = Transform::read(light_entity)?;
+                let light = light_entity.get_component::<Light>()?;
+                let parallel = light_entity.get_component::<ParallelLight>()?;
+                let transform = light_entity.get_component::<Transform>()?;
                 let rotation = transform.rotation();
                 let intensity = light.lightness();
                 drop(transform);
@@ -750,6 +751,9 @@ impl Layer {
             return;
         }
 
+        // 坐标系约定（世界/物理意义）：右手系，+X 向右，+Y 向上，-Z 为“前”。
+        // nalgebra 的 look_at_rh + Perspective3 组合会生成 OpenGL 风格的裁剪空间：NDC Z 范围为 [-1, 1]。
+        // wgpu/WebGPU 的裁剪空间 Z 范围为 [0, 1]，因此下面会额外乘一个转换矩阵做 Z 区间映射。
         let view = Matrix4::look_at_rh(
             &Point3::new(camera_position.x, camera_position.y, camera_position.z),
             &Point3::new(
@@ -870,7 +874,7 @@ impl Layer {
     }
 
     fn render_scene2d(entity: Entity, context: &mut LayerRenderContext<'_, '_>) {
-        let scene_guard = match Scene2D::read(entity) {
+        let scene_guard = match entity.get_component::<Scene2D>() {
             Some(scene) => scene,
             None => return,
         };
@@ -878,7 +882,7 @@ impl Layer {
         let pixels_per_unit = scene_guard.pixels_per_unit();
         drop(scene_guard);
 
-        let layer_guard = match Layer::read(entity) {
+        let layer_guard = match entity.get_component::<Layer>() {
             Some(layer) => layer,
             None => {
                 warn!(
@@ -961,7 +965,7 @@ impl Layer {
             Ok(lights) => lights
                 .into_iter()
                 .filter_map(|light_entity| {
-                    let light = Light::read(light_entity)?;
+                    let light = light_entity.get_component::<Light>()?;
                     let value = light.lightness();
                     drop(light);
                     if value <= 0.0 { None } else { Some(value) }
@@ -987,9 +991,9 @@ impl Layer {
         let point_lights: Vec<ScenePointLight> = point_light_entities
             .into_iter()
             .filter_map(|light_entity| {
-                let light = Light::read(light_entity)?;
-                let point = PointLight::read(light_entity)?;
-                let transform = Transform::read(light_entity)?;
+                let light = light_entity.get_component::<Light>()?;
+                let point = light_entity.get_component::<PointLight>()?;
+                let transform = light_entity.get_component::<Transform>()?;
                 let radius = point.distance();
                 let lightness = light.lightness();
                 let position = transform.position();
@@ -1041,7 +1045,7 @@ impl Layer {
             }
         };
 
-        let scene_guard = match Scene2D::read(entity) {
+        let scene_guard = match entity.get_component::<Scene2D>() {
             Some(scene) => scene,
             None => {
                 warn!(
@@ -1052,7 +1056,7 @@ impl Layer {
                 return;
             }
         };
-        let layer_guard = match Layer::read(entity) {
+        let layer_guard = match entity.get_component::<Layer>() {
             Some(layer) => layer,
             None => {
                 warn!(
@@ -1844,7 +1848,7 @@ impl Scene3DPipeline {
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
                 strip_index_format: None,
-                front_face: wgpu::FrontFace::Cw,
+                front_face: wgpu::FrontFace::Ccw,
                 cull_mode: Some(wgpu::Face::Back),
                 unclipped_depth: false,
                 polygon_mode: wgpu::PolygonMode::Fill,
@@ -2036,9 +2040,9 @@ impl Scene3DMaterialCache {
         if self.sampler.is_none() {
             let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
                 label: Some("Scene3D Material Sampler"),
-                address_mode_u: wgpu::AddressMode::Repeat,
-                address_mode_v: wgpu::AddressMode::Repeat,
-                address_mode_w: wgpu::AddressMode::Repeat,
+                address_mode_u: wgpu::AddressMode::ClampToEdge,
+                address_mode_v: wgpu::AddressMode::ClampToEdge,
+                address_mode_w: wgpu::AddressMode::ClampToEdge,
                 mag_filter: wgpu::FilterMode::Nearest,
                 min_filter: wgpu::FilterMode::Nearest,
                 mipmap_filter: wgpu::FilterMode::Nearest,
@@ -2443,9 +2447,15 @@ fn pad_rgba_data(data: Vec<u8>, width: u32, height: u32) -> anyhow::Result<(Vec<
     Ok((padded, padded_bytes_per_row as u32))
 }
 
+/// 将 OpenGL 风格裁剪空间转换为 wgpu/WebGPU 风格裁剪空间。
+///
+/// - 将 NDC Z 从 [-1, 1] 映射到 [0, 1]
+///
+/// 说明：这一步让我们可以继续使用 nalgebra 的 `Perspective3`（OpenGL 语义）生成投影矩阵，
+/// 只做 Z 区间差异的修正。
 fn opengl_to_wgpu_matrix() -> Matrix4<f32> {
     Matrix4::new(
-        1.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.5, 0.5, 0.0, 0.0, 0.0, 1.0,
+        1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.5, 0.5, 0.0, 0.0, 0.0, 1.0,
     )
 }
 
@@ -2909,9 +2919,12 @@ mod tests {
             .register_component(PointLight::new(2.0))
             .expect("应能插入嵌套 PointLight 组件");
 
-        assert!(Light::read(light_a).is_some(), "光源 A 应具备 Light 组件");
         assert!(
-            PointLight::read(light_a).is_some(),
+            light_a.get_component::<Light>().is_some(),
+            "光源 A 应具备 Light 组件"
+        );
+        assert!(
+            light_a.get_component::<PointLight>().is_some(),
             "光源 A 应具备 PointLight 组件"
         );
 

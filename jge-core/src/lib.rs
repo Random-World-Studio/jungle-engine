@@ -1,6 +1,7 @@
 extern crate self as jge_core;
 
 pub mod config;
+pub mod event;
 pub mod game;
 pub mod logger;
 pub mod resource;

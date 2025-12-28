@@ -13,6 +13,7 @@ pub fn init() -> anyhow::Result<()> {
                 EnvFilter::builder()
                     .with_default_directive(LevelFilter::TRACE.into())
                     .from_env()?
+                    .add_directive("jge-core=info".parse()?)
                     .add_directive("calloop=info".parse()?)
                     .add_directive("winit=warn".parse()?)
                     .add_directive("naga=warn".parse()?)

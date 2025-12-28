@@ -3,6 +3,7 @@ use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+use crate::event::Event;
 use crate::game::entity::Entity;
 
 /// 游戏逻辑（可附加到 `Node` 上）。
@@ -34,10 +35,12 @@ pub trait GameLogic: Send + Sync {
     }
 
     /// 每帧调用一次（异步），提供当帧耗时，默认空实现。
-    async fn on_render(&mut self, _e: Entity, _delta: std::time::Duration) {}
+    async fn on_render(&mut self, _e: Entity, _delta: std::time::Duration) -> Result<()> {
+        Ok(())
+    }
 
-    /// 发生事件时调用（异步），默认不做任何事。
-    async fn on_event(&mut self, _e: Entity, _event: &str) -> Result<()> {
+    /// 信号触发时调用（异步），默认不做任何事。
+    async fn on_event(&mut self, _e: Entity, _event: &Event) -> Result<()> {
         Ok(())
     }
 

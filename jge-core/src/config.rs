@@ -26,7 +26,7 @@ impl Default for WindowConfig {
 pub struct GameConfig {
     pub window: WindowConfig,
     pub escape_closes: bool,
-    pub game_tick_ms: usize,
+    pub game_tick_ms: u64,
 }
 
 impl Default for GameConfig {

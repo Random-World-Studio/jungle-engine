@@ -11,13 +11,12 @@ pub mod transform;
 pub use jge_macros::{component, component_impl};
 
 use parking_lot::{
-    Mutex, RawRwLock, RwLock, RwLockUpgradableReadGuard,
-    lock_api::{RwLockReadGuard, RwLockWriteGuard},
+    ArcRwLockReadGuard, ArcRwLockWriteGuard, Mutex, RawRwLock, RwLock, RwLockUpgradableReadGuard,
 };
 use std::{
     any::type_name,
     collections::HashMap,
-    fmt, mem,
+    fmt,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -160,14 +159,14 @@ struct ComponentLocation {
 const EMPTY_ENTITY_ID: u64 = u64::MAX;
 
 struct ComponentSlot<C> {
-    value: RwLock<Option<C>>,
+    value: Arc<RwLock<Option<C>>>,
     entity_id: AtomicU64,
 }
 
 impl<C> ComponentSlot<C> {
     fn new() -> Self {
         Self {
-            value: RwLock::new(None),
+            value: Arc::new(RwLock::new(None)),
             entity_id: AtomicU64::new(EMPTY_ENTITY_ID),
         }
     }
@@ -188,13 +187,13 @@ impl<C> ComponentSlot<C> {
         removed
     }
 
-    fn try_read(&self) -> Option<RwLockReadGuard<'_, RawRwLock, Option<C>>> {
-        let guard = self.value.read();
+    fn try_read(&self) -> Option<ArcRwLockReadGuard<RawRwLock, Option<C>>> {
+        let guard = self.value.try_read_arc()?;
         if guard.is_some() { Some(guard) } else { None }
     }
 
-    fn try_write(&self) -> Option<RwLockWriteGuard<'_, RawRwLock, Option<C>>> {
-        let guard = self.value.write();
+    fn try_write(&self) -> Option<ArcRwLockWriteGuard<RawRwLock, Option<C>>> {
+        let guard = self.value.try_write_arc()?;
         if guard.is_some() { Some(guard) } else { None }
     }
 
@@ -363,20 +362,19 @@ impl<C> ComponentStorage<C> {
 pub struct ComponentRead<C: 'static> {
     _chunk: Arc<ComponentChunk<C>>,
     _slot: Arc<ComponentSlot<C>>,
-    guard: RwLockReadGuard<'static, RawRwLock, Option<C>>,
+    guard: ArcRwLockReadGuard<RawRwLock, Option<C>>,
 }
 
 pub struct ComponentWrite<C: 'static> {
     _chunk: Arc<ComponentChunk<C>>,
     _slot: Arc<ComponentSlot<C>>,
-    guard: RwLockWriteGuard<'static, RawRwLock, Option<C>>,
+    guard: ArcRwLockWriteGuard<RawRwLock, Option<C>>,
 }
 
 impl<C: 'static> ComponentRead<C> {
     fn new(chunk: Arc<ComponentChunk<C>>, index: usize) -> Option<Self> {
         let slot = chunk.slot(index);
         let guard = slot.try_read()?;
-        let guard = unsafe { extend_slot_read_guard(guard) };
         Some(Self {
             _chunk: chunk,
             _slot: slot,
@@ -393,7 +391,6 @@ impl<C: 'static> ComponentWrite<C> {
     fn new(chunk: Arc<ComponentChunk<C>>, index: usize) -> Option<Self> {
         let slot = chunk.slot(index);
         let guard = slot.try_write()?;
-        let guard = unsafe { extend_slot_write_guard(guard) };
         Some(Self {
             _chunk: chunk,
             _slot: slot,
@@ -434,20 +431,8 @@ impl<C: 'static> std::ops::DerefMut for ComponentWrite<C> {
     }
 }
 
-unsafe fn extend_slot_read_guard<'a, C>(
-    guard: RwLockReadGuard<'a, RawRwLock, Option<C>>,
-) -> RwLockReadGuard<'static, RawRwLock, Option<C>> {
-    unsafe { mem::transmute(guard) }
-}
-
-unsafe fn extend_slot_write_guard<'a, C>(
-    guard: RwLockWriteGuard<'a, RawRwLock, Option<C>>,
-) -> RwLockWriteGuard<'static, RawRwLock, Option<C>> {
-    unsafe { mem::transmute(guard) }
-}
-
 pub fn require_component<C: Component>(entity: Entity) -> Result<(), ComponentDependencyError> {
-    if C::read(entity).is_some() {
+    if entity.get_component::<C>().is_some() {
         Ok(())
     } else {
         Err(ComponentDependencyError::new(entity, type_name::<C>()))

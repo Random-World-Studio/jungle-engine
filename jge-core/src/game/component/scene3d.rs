@@ -1,6 +1,6 @@
 use super::{
     camera::{Camera, CameraBasis, CameraViewportError},
-    component, component_impl,
+    component_impl,
     layer::{
         Layer, LayerLodUpdate, LayerRenderableBundle, LayerRenderableCollection,
         LayerTraversalError, RenderPipelineStage, ShaderLanguage,
@@ -9,12 +9,12 @@ use super::{
 use crate::resource::ResourcePath;
 use lodtree::coords::OctVec;
 use nalgebra::Vector3;
-use std::f32::consts::PI;
+use std::{f32::consts::PI, sync::OnceLock};
 
 use crate::game::{
     component::{
-        Component, ComponentDependencyError, ComponentRead, ComponentWrite, renderable::Renderable,
-        transform::Transform,
+        Component, ComponentDependencyError, ComponentRead, ComponentStorage, ComponentWrite,
+        renderable::Renderable, transform::Transform,
     },
     entity::Entity,
 };
@@ -27,7 +27,8 @@ const DEFAULT_VIEW_DISTANCE: f32 = 1024.0;
 const FRUSTUM_MARGIN: f32 = 1.0_f32.to_radians();
 const DEFAULT_REFERENCE_FRAMEBUFFER_HEIGHT: u32 = 1080;
 
-#[component(Layer, Renderable, Transform)]
+static SCENE3D_STORAGE: OnceLock<ComponentStorage<Scene3D>> = OnceLock::new();
+
 #[derive(Debug, Clone)]
 pub struct Scene3D {
     entity_id: Option<Entity>,
@@ -52,22 +53,13 @@ impl Scene3D {
         }
     }
 
-    pub fn insert(
-        entity: Entity,
-        scene: Scene3D,
-    ) -> Result<Option<Scene3D>, ComponentDependencyError> {
-        let previous = entity.register_component(scene)?;
-        Self::ensure_default_layer_shaders(entity);
-        Ok(previous)
-    }
-
     fn entity(&self) -> Entity {
         self.entity_id
             .expect("Scene3D component must be attached to an entity before use")
     }
 
     fn ensure_default_layer_shaders(entity: Entity) {
-        if let Some(mut layer) = Layer::write(entity) {
+        if let Some(mut layer) = entity.get_component_mut::<Layer>() {
             if layer.shader(RenderPipelineStage::Vertex).is_none() {
                 let _ = layer.attach_shader_from_path(
                     RenderPipelineStage::Vertex,
@@ -172,12 +164,13 @@ impl Scene3D {
     ) -> Result<(), Scene3DAttachError> {
         let scene_entity = self.entity();
 
-        if Camera::read(camera_entity).is_none() {
+        if camera_entity.get_component::<Camera>().is_none() {
             return Err(Scene3DAttachError::MissingCamera(camera_entity));
         }
 
         let camera_transform_values = {
-            let transform = Transform::read(camera_entity)
+            let transform = camera_entity
+                .get_component::<Transform>()
                 .ok_or(Scene3DAttachError::MissingCameraTransform(camera_entity))?;
             (
                 transform.position(),
@@ -187,7 +180,8 @@ impl Scene3D {
         };
 
         {
-            let mut scene_transform = Transform::write(scene_entity)
+            let mut scene_transform = scene_entity
+                .get_component_mut::<Transform>()
                 .ok_or(Scene3DAttachError::MissingSceneTransform(scene_entity))?;
             scene_transform.set_position(camera_transform_values.0);
             scene_transform.set_rotation(camera_transform_values.1);
@@ -210,12 +204,13 @@ impl Scene3D {
 
         let scene_entity = self.entity();
 
-        if Camera::read(camera_entity).is_none() {
+        if camera_entity.get_component::<Camera>().is_none() {
             return Err(Scene3DAttachError::MissingCamera(camera_entity));
         }
 
         let (position, rotation, scale) = {
-            let transform = Transform::read(camera_entity)
+            let transform = camera_entity
+                .get_component::<Transform>()
                 .ok_or(Scene3DAttachError::MissingCameraTransform(camera_entity))?;
             (
                 transform.position(),
@@ -224,7 +219,39 @@ impl Scene3D {
             )
         };
 
-        let mut scene_transform = Transform::write(scene_entity)
+        let mut scene_transform = scene_entity
+            .get_component_mut::<Transform>()
+            .ok_or(Scene3DAttachError::MissingSceneTransform(scene_entity))?;
+        scene_transform.set_position(position);
+        scene_transform.set_rotation(rotation);
+        scene_transform.set_scale(scale);
+
+        Ok(())
+    }
+
+    fn sync_camera_transform_for_entity(
+        &self,
+        camera_entity: Entity,
+    ) -> Result<(), Scene3DAttachError> {
+        let scene_entity = self.entity();
+
+        if camera_entity.get_component::<Camera>().is_none() {
+            return Err(Scene3DAttachError::MissingCamera(camera_entity));
+        }
+
+        let (position, rotation, scale) = {
+            let transform = camera_entity
+                .get_component::<Transform>()
+                .ok_or(Scene3DAttachError::MissingCameraTransform(camera_entity))?;
+            (
+                transform.position(),
+                transform.rotation(),
+                transform.scale(),
+            )
+        };
+
+        let mut scene_transform = scene_entity
+            .get_component_mut::<Transform>()
             .ok_or(Scene3DAttachError::MissingSceneTransform(scene_entity))?;
         scene_transform.set_position(position);
         scene_transform.set_rotation(rotation);
@@ -251,7 +278,7 @@ impl Scene3D {
         camera_entity: Entity,
         framebuffer_size: (u32, u32),
     ) -> Result<LayerRenderableCollection, Scene3DVisibilityError> {
-        self.sync_camera_transform_internal()
+        self.sync_camera_transform_for_entity(camera_entity)
             .map_err(Scene3DVisibilityError::from)?;
 
         let scene_entity = self.entity();
@@ -311,7 +338,7 @@ impl Scene3D {
         let basis = Camera::orientation_basis(&camera_transform).normalize();
         drop(camera_transform);
 
-        let layer = Layer::read(scene_entity).ok_or_else(|| {
+        let layer = scene_entity.get_component::<Layer>().ok_or_else(|| {
             Scene3DVisibilityError::LayerTraversal(LayerTraversalError::MissingLayer(scene_entity))
         })?;
         let collection = layer
@@ -320,6 +347,8 @@ impl Scene3D {
 
         let horizontal_limit = 0.5 * horizontal_fov;
         let vertical_limit = 0.5 * vertical_fov;
+        let horizontal_tan = (horizontal_limit + FRUSTUM_MARGIN).tan();
+        let vertical_tan = (vertical_limit + FRUSTUM_MARGIN).tan();
         let mut visible = Vec::new();
 
         for bundle in collection.iter() {
@@ -329,8 +358,8 @@ impl Scene3D {
                     triangle,
                     camera_position,
                     &basis,
-                    horizontal_limit,
-                    vertical_limit,
+                    horizontal_tan,
+                    vertical_tan,
                     near_plane,
                     far_plane,
                 ) {
@@ -408,68 +437,66 @@ fn triangle_visible(
     triangle: &[Vector3<f32>; 3],
     camera_position: Vector3<f32>,
     basis: &CameraBasis,
-    horizontal_limit: f32,
-    vertical_limit: f32,
+    horizontal_tan: f32,
+    vertical_tan: f32,
     near_plane: f32,
     far_plane: f32,
 ) -> bool {
-    for vertex in triangle.iter() {
-        if vertex_visible(
-            *vertex,
-            camera_position,
-            basis,
-            horizontal_limit,
-            vertical_limit,
-            near_plane,
-            far_plane,
-        ) {
-            return true;
-        }
-    }
-
-    let centroid = (triangle[0] + triangle[1] + triangle[2]) / 3.0;
-    vertex_visible(
-        centroid,
-        camera_position,
-        basis,
-        horizontal_limit,
-        vertical_limit,
+    let v0 = world_to_camera_space(triangle[0] - camera_position, basis);
+    let v1 = world_to_camera_space(triangle[1] - camera_position, basis);
+    let v2 = world_to_camera_space(triangle[2] - camera_position, basis);
+    triangle_intersects_frustum(
+        [v0, v1, v2],
+        horizontal_tan,
+        vertical_tan,
         near_plane,
         far_plane,
     )
 }
 
-fn vertex_visible(
-    vertex: Vector3<f32>,
-    camera_position: Vector3<f32>,
-    basis: &CameraBasis,
-    horizontal_limit: f32,
-    vertical_limit: f32,
+fn world_to_camera_space(offset: Vector3<f32>, basis: &CameraBasis) -> Vector3<f32> {
+    Vector3::new(
+        offset.dot(&basis.right),
+        offset.dot(&basis.up),
+        offset.dot(&basis.forward),
+    )
+}
+
+fn triangle_intersects_frustum(
+    vertices: [Vector3<f32>; 3],
+    horizontal_tan: f32,
+    vertical_tan: f32,
     near_plane: f32,
     far_plane: f32,
 ) -> bool {
-    let offset = vertex - camera_position;
-    let distance = offset.norm();
-    if distance < near_plane || distance > far_plane {
+    // 只要三角形没有被任何一个视锥平面“完全排除”，就认为它可能可见。
+    // 这样可以避免“所有顶点都在窗口外，但边/面仍穿过窗口”的误剔除。
+
+    // Near/Far：使用摄像机前向轴上的距离（Z），而不是欧氏距离。
+    if vertices.iter().all(|v| v.z < near_plane) {
+        return false;
+    }
+    if vertices.iter().all(|v| v.z > far_plane) {
         return false;
     }
 
-    let direction = offset / distance;
-    let forward_component = direction.dot(&basis.forward);
-    if forward_component <= 0.0 {
+    // Left/Right：|x| <= z * tan(fov/2)
+    if vertices.iter().all(|v| v.x > v.z * horizontal_tan) {
+        return false;
+    }
+    if vertices.iter().all(|v| v.x < -v.z * horizontal_tan) {
         return false;
     }
 
-    let horizontal_component = direction.dot(&basis.right).abs();
-    let vertical_component = direction.dot(&basis.up).abs();
-
-    let horizontal_angle = horizontal_component.atan2(forward_component);
-    if horizontal_angle > horizontal_limit + FRUSTUM_MARGIN {
+    // Top/Bottom：|y| <= z * tan(fov/2)
+    if vertices.iter().all(|v| v.y > v.z * vertical_tan) {
+        return false;
+    }
+    if vertices.iter().all(|v| v.y < -v.z * vertical_tan) {
         return false;
     }
 
-    let vertical_angle = vertical_component.atan2(forward_component);
-    vertical_angle <= vertical_limit + FRUSTUM_MARGIN
+    true
 }
 
 #[derive(Debug, PartialEq)]
@@ -623,6 +650,37 @@ impl std::fmt::Display for Scene3DAttachError {
 
 impl std::error::Error for Scene3DAttachError {}
 
+impl Component for Scene3D {
+    fn storage() -> &'static ComponentStorage<Self> {
+        SCENE3D_STORAGE.get_or_init(ComponentStorage::new)
+    }
+
+    fn register_dependencies(entity: Entity) -> Result<(), ComponentDependencyError> {
+        if entity.get_component::<Layer>().is_none() {
+            let component = Layer::__jge_component_default(entity)?;
+            let _ = entity.register_component(component)?;
+        }
+        if entity.get_component::<Renderable>().is_none() {
+            let component = Renderable::__jge_component_default(entity)?;
+            let _ = entity.register_component(component)?;
+        }
+        if entity.get_component::<Transform>().is_none() {
+            let component = Transform::__jge_component_default(entity)?;
+            let _ = entity.register_component(component)?;
+        }
+        Ok(())
+    }
+
+    fn attach_entity(&mut self, entity: Entity) {
+        self.entity_id = Some(entity);
+        Self::ensure_default_layer_shaders(entity);
+    }
+
+    fn detach_entity(&mut self) {
+        self.entity_id = None;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -706,8 +764,9 @@ mod tests {
         detach_node(entity);
         let _ = entity.unregister_component::<Node>();
 
-        let inserted =
-            Scene3D::insert(entity, Scene3D::new()).expect("缺少 Layer 时应自动注册依赖");
+        let inserted = entity
+            .register_component(Scene3D::new())
+            .expect("缺少 Layer 时应自动注册依赖");
         assert!(inserted.is_none());
 
         assert!(
@@ -756,10 +815,14 @@ mod tests {
     fn scene3d_view_property_constraints() {
         let entity = Entity::new().expect("应能创建实体");
         prepare_scene_entity(&entity, "scene3d_props");
-        Scene3D::insert(entity, Scene3D::new()).expect("应能插入 Scene3D");
+        entity
+            .register_component(Scene3D::new())
+            .expect("应能插入 Scene3D");
 
         {
-            let mut scene = Scene3D::write(entity).expect("应能写入 Scene3D");
+            let mut scene = entity
+                .get_component_mut::<Scene3D>()
+                .expect("应能写入 Scene3D");
             assert!(scene.set_vertical_fov(MIN_VERTICAL_FOV / 2.0).is_err());
             assert!(scene.set_vertical_fov(DEFAULT_VERTICAL_FOV * 1.1).is_ok());
             assert!(scene.set_reference_framebuffer_height(0).is_err());
@@ -783,7 +846,9 @@ mod tests {
     fn scene3d_vertical_fov_depends_on_aspect() {
         let entity = Entity::new().expect("应能创建实体");
         prepare_scene_entity(&entity, "scene3d_fov");
-        Scene3D::insert(entity, Scene3D::new()).expect("应能插入 Scene3D");
+        entity
+            .register_component(Scene3D::new())
+            .expect("应能插入 Scene3D");
 
         let scene = entity.get_component::<Scene3D>().expect("应能读取 Scene3D");
         let tall = scene
@@ -811,15 +876,18 @@ mod tests {
     fn scene3d_visible_renderables_culls_geometry() {
         let scene = Entity::new().expect("应能创建实体");
         prepare_scene_entity(&scene, "scene3d_cull_root");
-        Scene3D::insert(scene, Scene3D::new()).expect("应能插入 Scene3D");
+        scene
+            .register_component(Scene3D::new())
+            .expect("应能插入 Scene3D");
 
         let inside = Entity::new().expect("应能创建实体");
         prepare_child(&inside, "inside", scene);
         inside
             .register_component(Shape::from_triangles(vec![[
-                Vector3::new(-1.0, -5.0, 0.0),
-                Vector3::new(1.0, -5.0, 0.0),
-                Vector3::new(0.0, -5.0, 2.0),
+                // Camera 默认朝向为 -Z，因此 z<0 在视野前方。
+                Vector3::new(-1.0, -1.0, -5.0),
+                Vector3::new(1.0, -1.0, -5.0),
+                Vector3::new(0.0, 1.0, -5.0),
             ]]))
             .expect("应能插入 Shape");
 
@@ -827,9 +895,10 @@ mod tests {
         prepare_child(&outside, "outside", scene);
         outside
             .register_component(Shape::from_triangles(vec![[
-                Vector3::new(-1.0, 5.0, 0.0),
-                Vector3::new(1.0, 5.0, 0.0),
-                Vector3::new(0.0, 5.0, 2.0),
+                // z>0 在相机后方，应被剔除。
+                Vector3::new(-1.0, -1.0, 5.0),
+                Vector3::new(1.0, -1.0, 5.0),
+                Vector3::new(0.0, 1.0, 5.0),
             ]]))
             .expect("应能插入 Shape");
 
@@ -905,7 +974,9 @@ mod tests {
     fn scene3d_accesses_layer_spatial_index() {
         let entity = Entity::new().expect("应能创建实体");
         prepare_scene_entity(&entity, "scene3d_spatial");
-        Scene3D::insert(entity, Scene3D::new()).expect("依赖满足后应能插入 Scene3D");
+        entity
+            .register_component(Scene3D::new())
+            .expect("依赖满足后应能插入 Scene3D");
         let scene = entity
             .get_component::<Scene3D>()
             .expect("Scene3D 组件应已注册");
@@ -951,7 +1022,9 @@ mod tests {
     fn scene3d_attaches_and_syncs_camera_transform() {
         let scene = Entity::new().expect("应能创建实体");
         prepare_scene_entity(&scene, "scene3d_attach_root");
-        Scene3D::insert(scene, Scene3D::new()).expect("应能插入 Scene3D");
+        scene
+            .register_component(Scene3D::new())
+            .expect("应能插入 Scene3D");
 
         let camera = Entity::new().expect("应能创建实体");
         prepare_camera_entity(&camera, "camera_attach");
@@ -1026,7 +1099,9 @@ mod tests {
     fn scene3d_detach_camera_clears_attachment() {
         let scene = Entity::new().expect("应能创建实体");
         prepare_scene_entity(&scene, "scene3d_detach_root");
-        Scene3D::insert(scene, Scene3D::new()).expect("应能插入 Scene3D");
+        scene
+            .register_component(Scene3D::new())
+            .expect("应能插入 Scene3D");
 
         let camera = Entity::new().expect("应能创建实体");
         prepare_camera_entity(&camera, "camera_detach");

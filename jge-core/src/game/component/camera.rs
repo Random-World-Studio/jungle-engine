@@ -128,8 +128,9 @@ impl Camera {
         let rotation = transform.rotation();
         let rotation_matrix = Rotation3::from_euler_angles(rotation.x, rotation.y, rotation.z);
 
-        let forward = rotation_matrix * Vector3::new(0.0, -1.0, 0.0);
-        let up = rotation_matrix * Vector3::new(0.0, 0.0, 1.0);
+        // 坐标系约定：+Y 向上；默认朝向为 -Z（场景中 z 越小越“前”）。
+        let forward = rotation_matrix * Vector3::new(0.0, 0.0, -1.0);
+        let up = rotation_matrix * Vector3::new(0.0, 1.0, 0.0);
         let right = rotation_matrix * Vector3::new(1.0, 0.0, 0.0);
 
         CameraBasis { forward, up, right }

@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
+    sync::OnceLock,
 };
 
 use nalgebra::{Vector2, Vector3};
@@ -8,19 +9,18 @@ use nalgebra::{Vector2, Vector3};
 use lodtree::coords::OctVec;
 
 use super::{
-    component, component_impl,
+    component_impl,
     layer::{
         Layer, LayerLodUpdate, LayerRenderableBundle, LayerTraversalError, RenderPipelineStage,
         ShaderLanguage,
     },
 };
 use crate::game::{
-    component::{Component, ComponentDependencyError},
+    component::{Component, ComponentDependencyError, ComponentStorage},
     entity::Entity,
 };
 use crate::resource::ResourcePath;
 
-#[component(Layer)]
 #[derive(Debug, Clone)]
 /// 二维场景默认按照 Renderable 的 z 值进行遮挡，高 z 表示位于前方。
 pub struct Scene2D {
@@ -31,6 +31,8 @@ pub struct Scene2D {
 
 const DEFAULT_PIXELS_PER_UNIT: f32 = 100.0;
 
+static SCENE2D_STORAGE: OnceLock<ComponentStorage<Scene2D>> = OnceLock::new();
+
 #[component_impl]
 impl Scene2D {
     #[default()]
@@ -40,16 +42,6 @@ impl Scene2D {
             offset: Vector2::zeros(),
             pixels_per_unit: DEFAULT_PIXELS_PER_UNIT,
         }
-    }
-
-    /// 插入组件并自动为依赖的 Layer 挂载默认的 2D 着色器。
-    pub fn insert(
-        entity: Entity,
-        scene: Scene2D,
-    ) -> Result<Option<Scene2D>, ComponentDependencyError> {
-        let previous = entity.register_component(scene)?;
-        Self::ensure_default_layer_shaders(entity);
-        Ok(previous)
     }
 
     /// 设置坐标原点的偏移量（世界单位）。
@@ -94,7 +86,7 @@ impl Scene2D {
     }
 
     fn ensure_default_layer_shaders(entity: Entity) {
-        if let Some(mut layer) = Layer::write(entity) {
+        if let Some(mut layer) = entity.get_component_mut::<Layer>() {
             if layer.shader(RenderPipelineStage::Vertex).is_none() {
                 let _ = layer.attach_shader_from_path(
                     RenderPipelineStage::Vertex,
@@ -365,6 +357,29 @@ impl fmt::Display for Scene2DVisibilityError {
 
 impl std::error::Error for Scene2DVisibilityError {}
 
+impl Component for Scene2D {
+    fn storage() -> &'static ComponentStorage<Self> {
+        SCENE2D_STORAGE.get_or_init(ComponentStorage::new)
+    }
+
+    fn register_dependencies(entity: Entity) -> Result<(), ComponentDependencyError> {
+        if entity.get_component::<Layer>().is_none() {
+            let component = Layer::__jge_component_default(entity)?;
+            let _ = entity.register_component(component)?;
+        }
+        Ok(())
+    }
+
+    fn attach_entity(&mut self, entity: Entity) {
+        self.entity_id = Some(entity);
+        Self::ensure_default_layer_shaders(entity);
+    }
+
+    fn detach_entity(&mut self) {
+        self.entity_id = None;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::Scene2D;
@@ -402,8 +417,9 @@ mod tests {
         detach_node(entity);
         let _ = entity.unregister_component::<Node>();
 
-        let inserted =
-            Scene2D::insert(entity, Scene2D::new()).expect("缺少 Layer 时应自动注册依赖");
+        let inserted = entity
+            .register_component(Scene2D::new())
+            .expect("缺少 Layer 时应自动注册依赖");
         assert!(inserted.is_none());
 
         assert!(
@@ -474,7 +490,9 @@ mod tests {
             .register_component(Layer::new())
             .expect("应能插入 Layer");
 
-        let inserted = Scene2D::insert(entity, Scene2D::new()).expect("满足依赖后应能插入 Scene2D");
+        let inserted = entity
+            .register_component(Scene2D::new())
+            .expect("满足依赖后应能插入 Scene2D");
         assert!(inserted.is_none());
     }
 

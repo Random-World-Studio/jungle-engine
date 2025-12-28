@@ -42,7 +42,7 @@ pub fn component(args: TokenStream, input: TokenStream) -> TokenStream {
 
     let dependency_checks = dependencies.iter().map(|dep| {
         quote! {
-            if <#dep as ::jge_core::game::component::Component>::read(entity).is_none() {
+            if entity.get_component::<#dep>().is_none() {
                 let component = #dep::__jge_component_default(entity)?;
                 let _ = entity.register_component(component)?;
             }
