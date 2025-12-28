@@ -6,15 +6,21 @@ use winit::{dpi::PhysicalSize, window::Window};
 use crate::{
     config::WindowConfig,
     game::{
-        component::{
-            layer::{Layer, LayerRenderContext, LayerRendererCache},
-            node::Node,
-        },
+        component::{layer::Layer, node::Node},
         entity::Entity,
+        system::render::RenderSystem,
     },
 };
 use tracing::{debug, warn};
 
+/// 窗口与渲染上下文。
+///
+/// `GameWindow` 封装了：
+/// - `winit::Window`（以 `Arc` 形式共享）
+/// - wgpu 的 `Surface/Device/Queue` 以及表面配置
+/// - 引擎渲染系统 [`RenderSystem`]
+///
+/// 通常由 [`crate::Game`] 在窗口创建后内部构造并持有。
 pub struct GameWindow {
     pub(crate) window: Arc<Window>,
 
@@ -24,10 +30,13 @@ pub struct GameWindow {
     surf_config: wgpu::SurfaceConfiguration,
     size: PhysicalSize<u32>,
     size_changed: bool,
-    layer_caches: LayerRendererCache,
+    renderer: RenderSystem,
 }
 
 impl GameWindow {
+    /// 创建一个 `GameWindow`。
+    ///
+    /// 会初始化 wgpu 实例/适配器/设备，并根据 [`WindowConfig`] 配置表面（例如 vsync）。
     pub async fn new(window: Arc<Window>, window_config: &WindowConfig) -> anyhow::Result<Self> {
         let mut backends = Backends::all();
         backends.remove(Backends::GL);
@@ -94,10 +103,13 @@ impl GameWindow {
             surf_config,
             size,
             size_changed: false,
-            layer_caches: LayerRendererCache::new(),
+            renderer: RenderSystem::new(),
         })
     }
 
+    /// 标记窗口尺寸发生变化。
+    ///
+    /// 实际的 surface 重配发生在 [`Self::resize_surface_if_needed`]。
     pub fn set_window_resized(&mut self, new_size: PhysicalSize<u32>) {
         if new_size == self.size {
             return;
@@ -106,6 +118,9 @@ impl GameWindow {
         self.size_changed = true;
     }
 
+    /// 如有需要，重新配置 wgpu surface。
+    ///
+    /// 典型调用点：收到 `WindowEvent::Resized` 或 `ScaleFactorChanged` 后。
     pub fn resize_surface_if_needed(&mut self) {
         if self.size_changed {
             self.surf_config.width = self.size.width;
@@ -115,6 +130,17 @@ impl GameWindow {
         }
     }
 
+    /// 渲染一帧。
+    ///
+    /// - `root`：场景树根实体（用于收集 Layer 根）
+    /// - `delta`：上一帧到当前帧的时间间隔（用于统计/日志/可能的动画驱动）
+    ///
+    /// Layer 根的收集规则：
+    /// - 从 `root` 开始深度优先遍历节点树。
+    /// - 遇到挂载了 [`Layer`] 的实体时，将其视为一个可渲染 Layer 根：加入结果，并**不再深入遍历其子树**。
+    ///   这样可以避免“嵌套 Layer”被重复渲染；子 Layer 会作为独立根在各自子树内单独处理。
+    ///
+    /// 返回 `wgpu::SurfaceError` 表示 surface 获取当前帧纹理失败，通常可通过重试/重建 surface 恢复。
     pub fn render(&mut self, root: &Entity, delta: Duration) -> Result<(), wgpu::SurfaceError> {
         debug!(
             target: "jge-core",
@@ -180,28 +206,21 @@ impl GameWindow {
         layer_entity: Entity,
         load_op: wgpu::LoadOp<wgpu::Color>,
     ) {
-        let mut context = LayerRenderContext {
-            device: &self.device,
-            queue: &self.queue,
+        self.renderer.render_layer(
+            &self.device,
+            &self.queue,
             encoder,
-            target_view: view,
-            surface_format: self.surf_config.format,
-            framebuffer_size: (self.size.width, self.size.height),
+            view,
+            self.surf_config.format,
+            (self.size.width, self.size.height),
+            layer_entity,
             load_op,
-            caches: &mut self.layer_caches,
-        };
-
-        if let Some(layer) = layer_entity.get_component::<Layer>() {
-            layer.render(&mut context);
-        } else {
-            warn!(
-                target: "jge-core",
-                layer_id = layer_entity.id(),
-                "skip rendering for entity missing Layer component"
-            );
-        }
+        );
     }
 
+    /// 从节点树中收集需要渲染的 Layer 根实体。
+    ///
+    /// 该方法与 [`Layer::renderable_entities`] 的“跳过嵌套 Layer 子树”策略保持一致。
     fn collect_layer_roots(root: Entity) -> Vec<Entity> {
         let mut result = Vec::new();
         let mut stack = Vec::new();

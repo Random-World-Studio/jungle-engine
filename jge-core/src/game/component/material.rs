@@ -2,8 +2,6 @@ use super::{component, component_impl, shape::Shape};
 use crate::game::entity::Entity;
 use crate::resource::{Resource, ResourceHandle};
 use nalgebra::Vector2;
-use parking_lot::RwLock;
-use std::sync::Arc;
 
 pub type MaterialPatch = [Vector2<f32>; 3];
 
@@ -17,7 +15,7 @@ pub struct Material {
 
 #[component_impl]
 impl Material {
-    #[default(Self::placeholder_resource(), Vec::new())]
+    #[default(Resource::from_memory(Vec::new()), Vec::new())]
     pub fn new(resource: ResourceHandle, regions: Vec<MaterialPatch>) -> Self {
         Self {
             entity_id: None,
@@ -45,10 +43,6 @@ impl Material {
     pub fn set_regions(&mut self, regions: Vec<MaterialPatch>) {
         self.regions = regions;
     }
-
-    fn placeholder_resource() -> ResourceHandle {
-        Arc::new(RwLock::new(Resource::from_memory(Vec::new())))
-    }
 }
 
 #[cfg(test)]
@@ -60,8 +54,6 @@ mod tests {
     use crate::game::entity::Entity;
     use crate::resource::Resource;
     use nalgebra::{Vector2, Vector3};
-    use parking_lot::RwLock;
-    use std::sync::Arc;
 
     fn detach_node(entity: Entity) {
         if let Some(mut node) = entity.get_component_mut::<Node>() {
@@ -97,7 +89,7 @@ mod tests {
     }
 
     fn mock_resource() -> ResourceHandle {
-        Arc::new(RwLock::new(Resource::from_memory(vec![1, 2, 3])))
+        Resource::from_memory(vec![1, 2, 3])
     }
 
     #[test]

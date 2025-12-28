@@ -24,19 +24,17 @@ use jge_core::{
             material::Material,
             node::Node,
             renderable::Renderable,
-            scene2d::Scene2D,
             scene3d::Scene3D,
             shape::Shape,
             transform::Transform,
         },
         entity::Entity,
-        logic::{GameLogic, GameLogicHandle},
+        system::logic::GameLogic,
     },
     logger,
     resource::{Resource, ResourceHandle, ResourcePath},
 };
-use tokio::sync::Mutex;
-use tracing::{info, warn};
+use tracing::warn;
 use winit::dpi::PhysicalPosition;
 use winit::window::CursorGrabMode;
 
@@ -248,12 +246,10 @@ fn spawn_camera(parent: Entity) -> anyhow::Result<Entity> {
     }
 
     // 为摄像头挂载控制逻辑：WASD/QE 移动，方向键旋转。
-    let logic_handle: GameLogicHandle =
-        Arc::new(Mutex::new(Box::new(CameraControllerLogic::new())));
     let mut node = entity
         .get_component_mut::<Node>()
         .context("为摄像机挂载逻辑失败: 缺少 Node 组件")?;
-    node.set_logic(logic_handle);
+    node.set_logic(CameraControllerLogic::new());
 
     Ok(entity)
 }
@@ -519,11 +515,10 @@ fn spawn_cube(parent: Entity, position: Vector3<f32>) -> anyhow::Result<()> {
     )?;
 
     // Attach demo logic so each frame reports render timing for the cube entity.
-    let logic_handle: GameLogicHandle = Arc::new(Mutex::new(Box::new(CubeLogic)));
     let mut node = cube
         .get_component_mut::<Node>()
         .context("为立方体注册逻辑失败: 缺少 Node 组件")?;
-    node.set_logic(logic_handle);
+    node.set_logic(CubeLogic);
 
     Ok(())
 }
@@ -748,60 +743,6 @@ fn spawn_scene3d_layer(parent: Entity) -> anyhow::Result<Entity> {
     spawn_cube(entity, Vector3::new(-3.0, 0.5, 0.0)).context("Scene3D 图层创建立方体失败")?;
 
     Ok(entity)
-}
-
-fn spawn_scene2d_layer(parent: Entity) -> anyhow::Result<Entity> {
-    let entity = Entity::new().context("创建 Scene2D 图层实体失败")?;
-    let _ = entity
-        .register_component(Layer::new())
-        .context("为 Scene2D 图层注册 Layer 组件失败")?;
-    let _ = entity
-        .register_component(Scene2D::new())
-        .context("注册 Scene2D 组件失败")?;
-    attach_to_parent(entity, parent, "将 Scene2D 图层挂载到父节点失败")?;
-
-    {
-        let scene = entity
-            .get_component::<Scene2D>()
-            .context("Scene2D 图层缺少 Scene2D 组件")?;
-        let mut layer = entity
-            .get_component_mut::<Layer>()
-            .context("Scene2D 图层缺少 Layer 组件")?;
-        if !scene.warmup_lod(&mut layer) {
-            info!(target = "jge-demo", "Scene2D LOD warmup 未激活任何节点");
-        }
-    }
-
-    spawn_scene2d_quad(entity).context("创建 Scene2D 正方形失败")?;
-    spawn_parallel_light(entity).context("为 Scene2D 图层创建平行光失败")?;
-
-    Ok(entity)
-}
-
-fn spawn_scene2d_quad(parent: Entity) -> anyhow::Result<()> {
-    let triangles = vec![
-        [
-            Vector3::new(-0.5, -0.5, 0.0),
-            Vector3::new(0.5, -0.5, 0.0),
-            Vector3::new(0.5, 0.5, 0.0),
-        ],
-        [
-            Vector3::new(-0.5, -0.5, 0.0),
-            Vector3::new(0.5, 0.5, 0.0),
-            Vector3::new(-0.5, 0.5, 0.0),
-        ],
-    ];
-
-    let _ = spawn_shape(
-        parent,
-        Vector3::new(0.0, 0.0, 0.1),
-        Vector3::new(0.0, 0.0, 0.0),
-        Vector3::new(2.0, 2.0, 1.0),
-        triangles,
-        None,
-    )?;
-
-    Ok(())
 }
 
 struct CubeLogic;

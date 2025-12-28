@@ -53,9 +53,8 @@ impl Scene3D {
         }
     }
 
-    fn entity(&self) -> Entity {
-        self.entity_id
-            .expect("Scene3D component must be attached to an entity before use")
+    pub fn entity(&self) -> Entity {
+        self.entity_id.expect("Scene3D 组件尚未绑定实体")
     }
 
     fn ensure_default_layer_shaders(entity: Entity) {
@@ -87,10 +86,6 @@ impl Scene3D {
         }
         self.vertical_fov = fov;
         Ok(())
-    }
-
-    pub fn reference_framebuffer_height(&self) -> u32 {
-        self.reference_framebuffer_height
     }
 
     pub fn set_reference_framebuffer_height(
@@ -169,8 +164,7 @@ impl Scene3D {
         }
 
         let camera_transform_values = {
-            let transform = camera_entity
-                .get_component::<Transform>()
+            let transform = try_get_transform(camera_entity)
                 .ok_or(Scene3DAttachError::MissingCameraTransform(camera_entity))?;
             (
                 transform.position(),
@@ -209,8 +203,7 @@ impl Scene3D {
         }
 
         let (position, rotation, scale) = {
-            let transform = camera_entity
-                .get_component::<Transform>()
+            let transform = try_get_transform(camera_entity)
                 .ok_or(Scene3DAttachError::MissingCameraTransform(camera_entity))?;
             (
                 transform.position(),
@@ -331,12 +324,11 @@ impl Scene3D {
 
         ensure_scene_transform(scene_entity)?;
 
-        let camera_transform = camera_entity.get_component::<Transform>().ok_or(
+        let camera_transform = try_get_transform(camera_entity).ok_or(
             Scene3DVisibilityError::MissingCameraTransform(camera_entity),
         )?;
         let camera_position = camera_transform.position();
         let basis = Camera::orientation_basis(&camera_transform).normalize();
-        drop(camera_transform);
 
         let layer = scene_entity.get_component::<Layer>().ok_or_else(|| {
             Scene3DVisibilityError::LayerTraversal(LayerTraversalError::MissingLayer(scene_entity))
@@ -419,8 +411,18 @@ impl ComponentRead<Scene3D> {
     }
 }
 
+fn try_get_transform(entity: Entity) -> Option<ComponentRead<Transform>> {
+    for _ in 0..3 {
+        if let Some(transform) = entity.get_component::<Transform>() {
+            return Some(transform);
+        }
+        std::thread::yield_now();
+    }
+    None
+}
+
 fn ensure_scene_transform(entity: Entity) -> Result<(), Scene3DVisibilityError> {
-    if entity.get_component::<Transform>().is_some() {
+    if try_get_transform(entity).is_some() {
         Ok(())
     } else {
         Err(Scene3DVisibilityError::MissingSceneTransform(entity))

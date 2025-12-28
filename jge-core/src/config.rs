@@ -1,8 +1,12 @@
+/// 窗口模式。
 pub enum WindowMode {
     Windowed,
     Fullscreen,
 }
 
+/// 窗口配置。
+///
+/// 用于控制窗口标题、初始尺寸、是否开启垂直同步等。
 pub struct WindowConfig {
     pub title: String,
     pub width: u32,
@@ -23,6 +27,11 @@ impl Default for WindowConfig {
     }
 }
 
+/// 引擎运行配置。
+///
+/// - `window`：窗口相关配置
+/// - `escape_closes`：是否允许按下 `Esc` 关闭窗口
+/// - `game_tick_ms`：逻辑更新 tick 间隔（毫秒）
 pub struct GameConfig {
     pub window: WindowConfig,
     pub escape_closes: bool,

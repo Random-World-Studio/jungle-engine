@@ -1,3 +1,48 @@
+//! # 组件工作流约定（Component Workflow Policy）
+//!
+//! 引擎对“组件的挂载/读取/写入”有一个强约束：**所有组件的依赖注册、挂载与查询，都必须通过 [`Entity`] API 流转**。
+//! 这样可以保证生命周期钩子（例如 `register_dependencies`、着色器预热等）一致执行，并让组件能与节点树/场景缓存保持同步。
+//!
+//! ## 挂载组件（Registering Components）
+//!
+//! 1. 始终使用 `entity.register_component(T::new())`（或其他构造方式）来挂载组件。
+//! 2. 不要在 `Entity` 之外直接调用以下 API：
+//!    - `Component::insert`
+//!    - `Component::storage`（以及任何基于它的静态辅助方法）
+//! 3. 若组件依赖其他基础组件（例如 `Scene3D` 依赖 `Layer`、`Transform`、`Renderable`），请通过 `#[component(DepA, DepB, ...)]`
+//!    声明依赖，或在 `register_dependencies` 中显式注册。宏生成的默认实现会先用 `entity.get_component()` 探测已有依赖，
+//!    再按需插入默认值。
+//!
+//! ## 读取/写入组件（Reading Components）
+//!
+//! 1. 只读访问使用 `entity.get_component::<T>()`。
+//! 2. 可变访问使用 `entity.get_component_mut::<T>()`。
+//! 3. 避免在 `Entity` 之外使用 `Component::read`/`Component::write`：直接访问存储会绕过依赖记账，并可能导致缓存（例如变换/场景）不同步。
+//!
+//! ## 示例
+//!
+//! ```rust
+//! use jge_core::game::{component::scene3d::Scene3D, entity::Entity};
+//! use jge_core::game::component::{layer::Layer, material::RenderPipelineStage, material::ShaderLanguage};
+//!
+//! fn ensure_scene3d(entity: Entity) -> anyhow::Result<()> {
+//!     if entity.get_component::<Scene3D>().is_none() {
+//!         entity.register_component(Scene3D::new())?;
+//!     }
+//!
+//!     // 通过 Entity API 安全地获取可变引用。
+//!     if let Some(mut layer) = entity.get_component_mut::<Layer>() {
+//!         layer.attach_shader_from_path(
+//!             RenderPipelineStage::Vertex,
+//!             ShaderLanguage::Wgsl,
+//!             "shaders/3d.vs".into(),
+//!         )?;
+//!     }
+//!
+//!     Ok(())
+//! }
+//! ```
+
 pub mod camera;
 pub mod layer;
 pub mod light;
@@ -25,7 +70,7 @@ use std::{
 
 use crate::game::entity::Entity;
 
-const CHUNK_SIZE: usize = 64;
+const CHUNK_SIZE: usize = 16;
 
 /// 所有组件都使用分块存储，每块包含固定数量的槽位，以便于后续向量化和并行优化。
 pub trait Component: Sized + 'static {
@@ -287,6 +332,33 @@ impl<C> ComponentStorage<C> {
         results
     }
 
+    pub fn collect_chunks_with<T, F>(&self, mut f: F) -> Vec<Vec<T>>
+    where
+        F: FnMut(u64, &C) -> Option<T>,
+    {
+        let guard = self.inner.read();
+        let mut results: Vec<Vec<T>> = Vec::new();
+
+        for chunk in &guard.chunks {
+            let mut chunk_results = Vec::new();
+            for slot in &chunk.slots {
+                let value_guard = slot.value.read();
+                if let Some(component) = value_guard.as_ref() {
+                    let entity_id = slot.entity_id.load(Ordering::Relaxed);
+                    debug_assert!(entity_id != EMPTY_ENTITY_ID, "组件槽位缺少实体标识");
+                    if let Some(mapped) = f(entity_id, component) {
+                        chunk_results.push(mapped);
+                    }
+                }
+            }
+            if !chunk_results.is_empty() {
+                results.push(chunk_results);
+            }
+        }
+
+        results
+    }
+
     pub fn insert(&self, entity_id: u64, component: C) -> Option<C> {
         let guard = self.inner.upgradable_read();
         if let Some(location) = guard.entity_to_location.get(&entity_id).copied() {
@@ -487,6 +559,34 @@ mod tests {
         }
     }
 
+    #[component]
+    #[derive(Debug, PartialEq, Eq)]
+    struct ChunkProbeGroupComponent {
+        index: usize,
+    }
+
+    #[component_impl(ChunkProbeGroupComponent)]
+    impl ChunkProbeGroupComponent {
+        #[default(0)]
+        fn new(index: usize) -> Self {
+            Self { index }
+        }
+    }
+
+    #[component]
+    #[derive(Debug, PartialEq, Eq)]
+    struct ChunkProbeSkipComponent {
+        index: usize,
+    }
+
+    #[component_impl(ChunkProbeSkipComponent)]
+    impl ChunkProbeSkipComponent {
+        #[default(0)]
+        fn new(index: usize) -> Self {
+            Self { index }
+        }
+    }
+
     #[test]
     fn insert_and_read_component() {
         let entity = Entity::new().expect("应能创建实体");
@@ -650,5 +750,67 @@ mod tests {
 
         assert!(entity.get_component::<FailingDefaultComponent>().is_none());
         assert!(entity.get_component::<NeedsFailingDefault>().is_none());
+    }
+
+    #[test]
+    fn collect_chunks_with_groups_values_by_chunk() {
+        let total = CHUNK_SIZE + 2;
+        let entities: Vec<Entity> = (0..total)
+            .map(|_| Entity::new().expect("应能创建实体"))
+            .collect();
+
+        for (index, entity) in entities.iter().enumerate() {
+            entity
+                .register_component(ChunkProbeGroupComponent::new(index))
+                .expect("插入组件不应触发依赖错误");
+        }
+
+        let chunks = ChunkProbeGroupComponent::storage()
+            .collect_chunks_with(|_entity_id, component| Some(component.index));
+
+        assert_eq!(chunks.len(), 2, "应跨越 CHUNK_SIZE 形成两个 chunk");
+        assert_eq!(
+            chunks[0].len(),
+            CHUNK_SIZE,
+            "第一个 chunk 应填满 CHUNK_SIZE 个槽位"
+        );
+        assert_eq!(chunks[1].len(), 2, "第二个 chunk 应只包含剩余 2 个组件");
+
+        // 清理，避免影响后续测试。
+        for entity in entities {
+            let _ = entity.unregister_component::<ChunkProbeGroupComponent>();
+        }
+    }
+
+    #[test]
+    fn collect_chunks_with_skips_empty_chunks() {
+        let total = CHUNK_SIZE + 1;
+        let entities: Vec<Entity> = (0..total)
+            .map(|_| Entity::new().expect("应能创建实体"))
+            .collect();
+
+        for (index, entity) in entities.iter().enumerate() {
+            entity
+                .register_component(ChunkProbeSkipComponent::new(index))
+                .expect("插入组件不应触发依赖错误");
+        }
+
+        // 移除第一个 chunk 的所有组件，使其成为空 chunk。
+        for entity in &entities[..CHUNK_SIZE] {
+            let _ = entity.unregister_component::<ChunkProbeSkipComponent>();
+        }
+
+        let chunks = ChunkProbeSkipComponent::storage()
+            .collect_chunks_with(|_entity_id, component| Some(component.index));
+
+        assert_eq!(chunks.len(), 1, "空 chunk 应被跳过");
+        assert_eq!(
+            chunks[0],
+            vec![CHUNK_SIZE],
+            "应只剩下第二个 chunk 的最后一个组件"
+        );
+
+        // 清理。
+        let _ = entities[CHUNK_SIZE].unregister_component::<ChunkProbeSkipComponent>();
     }
 }

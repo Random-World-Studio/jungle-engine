@@ -2,7 +2,8 @@ use std::{collections::HashSet, fmt, ops::ControlFlow};
 
 use super::layer::Layer;
 use super::{Component, ComponentWrite, component, component_impl};
-use crate::game::{entity::Entity, logic::GameLogicHandle};
+use crate::game::system::logic::GameLogic;
+use crate::game::{entity::Entity, system::logic::GameLogicHandle};
 use tracing::warn;
 
 /// [`Node`] 组件用于构建实体之间的树形关系并携带节点名称。
@@ -209,7 +210,15 @@ impl Node {
     }
 
     /// 为节点设置或替换 `GameLogic` 实例。
-    pub fn set_logic(&mut self, logic: GameLogicHandle) {
+    pub fn set_logic(&mut self, logic: impl GameLogic + 'static) {
+        self.set_logic_handle(GameLogicHandle::new(logic));
+    }
+
+    /// 为节点设置或替换 `GameLogic` 句柄。
+    ///
+    /// 仅在你需要复用/转移同一个逻辑实例（例如在节点间移动）时使用；
+    /// 一般情况下建议直接调用 [`Node::set_logic`] 传入具体逻辑类型。
+    pub fn set_logic_handle(&mut self, logic: GameLogicHandle) {
         let entity = self.entity();
         let is_attached = self.parent.is_some();
         let previous_logic = self.logic.replace(logic.clone());
@@ -277,16 +286,6 @@ impl Node {
             return Err(NodeNameError::ContainsWhitespace);
         }
         Ok(())
-    }
-
-    fn nearest_layer_ancestor(entity: Entity) -> Result<Option<Entity>, NodeHierarchyError> {
-        let parent_hint = {
-            let node_guard = entity
-                .get_component::<Node>()
-                .ok_or(NodeHierarchyError::MissingNode(entity))?;
-            node_guard.parent()
-        };
-        Self::nearest_layer_ancestor_with_hint(entity, parent_hint)
     }
 
     fn nearest_layer_ancestor_with_hint(
@@ -548,7 +547,8 @@ mod tests {
             node.parent = Some(entity);
         }
 
-        let error = Node::nearest_layer_ancestor(entity).expect_err("应检测到循环");
+        let error =
+            Node::nearest_layer_ancestor_with_hint(entity, Some(entity)).expect_err("应检测到循环");
         assert!(matches!(
             error,
             NodeHierarchyError::HierarchyCycle { ancestor, descendant }
@@ -679,7 +679,7 @@ mod tests {
     fn logic_callbacks_fire_on_attach_and_detach() {
         use std::sync::{Arc, Mutex as StdMutex};
 
-        use crate::game::logic::GameLogic;
+        use crate::game::system::logic::GameLogic;
 
         struct TrackingLogic {
             events: Arc<StdMutex<Vec<&'static str>>>,
@@ -708,11 +708,10 @@ mod tests {
         let logic = TrackingLogic {
             events: events.clone(),
         };
-        let handle: GameLogicHandle = Arc::new(tokio::sync::Mutex::new(Box::new(logic)));
 
         {
             let mut child_node = child.get_component_mut::<Node>().unwrap();
-            child_node.set_logic(handle.clone());
+            child_node.set_logic(logic);
         }
 
         {
@@ -738,7 +737,7 @@ mod tests {
     fn logic_callbacks_fire_when_logic_set_after_attachment() {
         use std::sync::{Arc, Mutex as StdMutex};
 
-        use crate::game::logic::GameLogic;
+        use crate::game::system::logic::GameLogic;
 
         struct TrackingLogic {
             events: Arc<StdMutex<Vec<&'static str>>>,
@@ -772,11 +771,10 @@ mod tests {
         let logic = TrackingLogic {
             events: events.clone(),
         };
-        let handle: GameLogicHandle = Arc::new(tokio::sync::Mutex::new(Box::new(logic)));
 
         {
             let mut child_node = child.get_component_mut::<Node>().unwrap();
-            child_node.set_logic(handle.clone());
+            child_node.set_logic(logic);
         }
 
         {
@@ -791,6 +789,110 @@ mod tests {
 
         let log = events.lock().unwrap();
         assert_eq!(log.as_slice(), &["attach", "detach"]);
+    }
+
+    #[test]
+    fn set_logic_handle_attaches_when_node_is_attached() {
+        use std::sync::{Arc, Mutex as StdMutex};
+
+        use crate::game::system::logic::GameLogic;
+
+        struct TrackingLogic {
+            events: Arc<StdMutex<Vec<&'static str>>>,
+        }
+
+        #[async_trait::async_trait]
+        impl GameLogic for TrackingLogic {
+            fn on_attach(&mut self, _e: Entity) -> anyhow::Result<()> {
+                self.events.lock().unwrap().push("attach");
+                Ok(())
+            }
+        }
+
+        let parent = Entity::new().expect("应能创建父实体");
+        let child = Entity::new().expect("应能创建子实体");
+
+        prepare_node(&parent, "logic_parent_handle");
+        prepare_node(&child, "logic_child_handle");
+
+        {
+            let mut parent_node = parent.get_component_mut::<Node>().unwrap();
+            parent_node.attach(child).unwrap();
+        }
+
+        let events = Arc::new(StdMutex::new(Vec::new()));
+        let handle = GameLogicHandle::new(TrackingLogic {
+            events: events.clone(),
+        });
+
+        {
+            let mut child_node = child.get_component_mut::<Node>().unwrap();
+            child_node.set_logic_handle(handle);
+        }
+
+        let log = events.lock().unwrap();
+        assert_eq!(log.as_slice(), &["attach"]);
+    }
+
+    #[test]
+    fn replacing_logic_on_attached_node_detaches_old_then_attaches_new() {
+        use std::sync::{Arc, Mutex as StdMutex};
+
+        use crate::game::system::logic::GameLogic;
+
+        struct RecordingLogic {
+            label: &'static str,
+            events: Arc<StdMutex<Vec<&'static str>>>,
+        }
+
+        #[async_trait::async_trait]
+        impl GameLogic for RecordingLogic {
+            fn on_attach(&mut self, _e: Entity) -> anyhow::Result<()> {
+                self.events.lock().unwrap().push(if self.label == "a" {
+                    "attach_a"
+                } else {
+                    "attach_b"
+                });
+                Ok(())
+            }
+
+            fn on_detach(&mut self, _e: Entity) -> anyhow::Result<()> {
+                self.events.lock().unwrap().push(if self.label == "a" {
+                    "detach_a"
+                } else {
+                    "detach_b"
+                });
+                Ok(())
+            }
+        }
+
+        let parent = Entity::new().expect("应能创建父实体");
+        let child = Entity::new().expect("应能创建子实体");
+
+        prepare_node(&parent, "logic_parent_replace");
+        prepare_node(&child, "logic_child_replace");
+
+        {
+            let mut parent_node = parent.get_component_mut::<Node>().unwrap();
+            parent_node.attach(child).unwrap();
+        }
+
+        let events = Arc::new(StdMutex::new(Vec::new()));
+
+        {
+            let mut child_node = child.get_component_mut::<Node>().unwrap();
+            child_node.set_logic(RecordingLogic {
+                label: "a",
+                events: events.clone(),
+            });
+            child_node.set_logic(RecordingLogic {
+                label: "b",
+                events: events.clone(),
+            });
+        }
+
+        let log = events.lock().unwrap();
+        assert_eq!(log.as_slice(), &["attach_a", "detach_a", "attach_b"]);
     }
 
     #[test]

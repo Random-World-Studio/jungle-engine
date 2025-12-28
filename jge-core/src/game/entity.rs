@@ -51,3 +51,31 @@ impl Entity {
         C::write(*self)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::game::component::node::Node;
+
+    #[test]
+    fn entity_new_assigns_unique_ids() {
+        let a = Entity::new().expect("应能创建实体");
+        let b = Entity::new().expect("应能创建实体");
+        assert_ne!(a.id(), b.id(), "不同实体应有不同 id");
+    }
+
+    #[test]
+    fn entity_new_auto_registers_node_component() {
+        let entity = Entity::new().expect("应能创建实体");
+        let node = entity
+            .get_component::<Node>()
+            .expect("Entity::new 应自动挂载 Node");
+        assert_eq!(node.name(), format!("entity_{}", entity.id()));
+    }
+
+    #[test]
+    fn entity_from_preserves_id() {
+        let entity = Entity::from(123);
+        assert_eq!(entity.id(), 123);
+    }
+}

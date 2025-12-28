@@ -1,6 +1,6 @@
 pub mod component;
 pub mod entity;
-pub mod logic;
+pub mod system;
 
 use std::{
     sync::{
@@ -29,11 +29,17 @@ use crate::{
     game::{
         component::{Component, node::Node},
         entity::Entity,
-        logic::GameLogicHandle,
+        system::logic::GameLogicHandle,
     },
     window::GameWindow,
 };
 
+/// 引擎运行时入口。
+///
+/// `Game` 负责：
+/// - 创建并持有窗口（基于 `winit`）
+/// - 驱动 tick/update、事件分发与渲染
+/// - 管理内部 Tokio runtime，用于并发执行游戏逻辑
 pub struct Game {
     config: GameConfig,
     window: Option<GameWindow>,
@@ -52,6 +58,9 @@ pub struct Game {
 }
 
 impl Game {
+    /// 创建一个新的引擎实例。
+    ///
+    /// `root` 是场景树根实体，通常应已挂载 [`Node`] 组件；若缺失会记录错误日志（但仍会返回 `Ok`）。
     pub fn new(config: GameConfig, root: Entity) -> anyhow::Result<Self> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -108,7 +117,7 @@ impl Game {
         self.window_init = Some(Box::new(init));
     }
 
-    /// Builder 风格：返回带窗口初始化回调的新 `Game`。
+    /// 构建器风格：返回带窗口初始化回调的新 `Game`。
     pub fn with_window_init<F>(mut self, init: F) -> Self
     where
         F: FnMut(&mut Game) + Send + Sync + 'static,
@@ -125,7 +134,7 @@ impl Game {
         self.window_event_mapper = Box::new(mapper);
     }
 
-    /// Builder 风格：返回带映射器的新 `Game`。
+    /// 构建器风格：返回带映射器的新 `Game`。
     pub fn with_window_event_mapper<M>(mut self, mapper: M) -> Self
     where
         M: WindowEventMapper + 'static,
@@ -142,7 +151,7 @@ impl Game {
         self.device_event_mapper = Box::new(mapper);
     }
 
-    /// Builder 风格：返回带设备事件映射器的新 `Game`。
+    /// 构建器风格：返回带设备事件映射器的新 `Game`。
     pub fn with_device_event_mapper<M>(mut self, mapper: M) -> Self
     where
         M: DeviceEventMapper + 'static,
@@ -151,7 +160,31 @@ impl Game {
         self
     }
 
+    /// 运行引擎主循环（阻塞当前线程）。
+    ///
+    /// 该方法会：
+    /// - 在内部 Tokio runtime 中启动固定 tick 的 `GameLogic::update` 调度任务
+    /// - 创建 `winit` 事件循环并进入 `run_app`，处理窗口/输入事件与渲染
+    ///
+    /// 返回值：
+    /// - 当事件循环正常退出时返回 `Ok(())`
+    /// - 当 `winit` 创建事件循环或运行时出现错误时返回 `Err`
     pub fn run(mut self) -> anyhow::Result<()> {
+        self.spawn_update_loop();
+
+        let event_loop = EventLoop::new()?;
+        Ok(event_loop.run_app(&mut self)?)
+    }
+
+    /// 在内部 runtime 中启动固定 tick 的 `GameLogic::update` 调度循环。
+    ///
+    /// 调度语义：
+    /// - tick 周期由 `config.game_tick_ms` 决定。
+    /// - 每个 tick 会等待本轮 `update` 调度全部完成后再进入下一轮（避免积压）。
+    /// - 以 chunk 为并发粒度：每个 chunk 一个任务并行执行；chunk 内按存储顺序顺序 `await`。
+    ///
+    /// 停止条件：当 `stopped` 被置为 `true`（例如窗口关闭）时退出循环。
+    fn spawn_update_loop(&self) {
         let game_tick_ms = self.config.game_tick_ms;
         let stopped = Arc::clone(&self.stopped);
         self.runtime.spawn(async move {
@@ -164,59 +197,84 @@ impl Game {
                 let delta = last_tick.elapsed();
                 last_tick = Instant::now();
 
-                let mut join_set = JoinSet::new();
-
-                let node_targets = Game::collect_logic_handles();
-                for (entity_id, handle) in node_targets {
-                    let delta = delta;
-                    join_set.spawn(async move {
-                        let mut logic = handle.lock().await;
-                        logic.update(Entity::from(entity_id), delta).await?;
-                        Ok::<u64, anyhow::Error>(entity_id)
-                    });
-                }
-
-                while let Some(task) = join_set.join_next().await {
-                    match task {
-                        Ok(Ok(_entity_id)) => {}
-                        Ok(Err(err)) => {
-                            warn!(target: "jge-core", error = %err, "GameLogic update task failed");
-                        }
-                        Err(err) => {
-                            warn!(target: "jge-core", error = %err, "GameLogic update task panicked");
-                        }
-                    }
-                }
+                Game::dispatch_update(delta).await;
             }
         });
-
-        let event_loop = EventLoop::new()?;
-        Ok(event_loop.run_app(&mut self)?)
     }
 
+    /// 执行一次 `GameLogic::update` 调度（会等待所有 chunk 完成）。
+    ///
+    /// 错误处理：
+    /// - 单个逻辑返回 `Err`：记录 `warn` 并继续处理同 chunk 的后续逻辑。
+    /// - chunk 任务 panic：记录 `warn`；其他 chunk 不受影响。
+    async fn dispatch_update(delta: Duration) {
+        let mut join_set = JoinSet::new();
+
+        let node_targets = Game::collect_logic_handle_chunks();
+        for chunk in node_targets {
+            let delta = delta;
+            join_set.spawn(async move {
+                for (entity_id, handle) in chunk {
+                    let mut logic = handle.lock().await;
+                    if let Err(err) = logic.update(Entity::from(entity_id), delta).await {
+                        warn!(
+                            target: "jge-core",
+                            error = %err,
+                            "GameLogic update failed"
+                        );
+                    }
+                }
+            });
+        }
+
+        while let Some(task) = join_set.join_next().await {
+            if let Err(err) = task {
+                warn!(
+                    target: "jge-core",
+                    error = %err,
+                    "GameLogic update task panicked"
+                );
+            }
+        }
+    }
+
+    /// 分发一条引擎事件到所有已注册逻辑（`GameLogic::on_event`）。
+    ///
+    /// 调度语义：
+    /// - 以 chunk 为并发粒度：每个 chunk 启动一个异步任务并行执行。
+    /// - chunk 内按存储顺序顺序执行：同一 chunk 中多个逻辑依次 `await`，避免为每个逻辑单独建任务。
+    /// - 本方法为“发射后不等待”（fire-and-forget）：不会阻塞 `winit` 事件回调线程。
+    /// - 事件对象会为每个 chunk `clone` 一份：用于把同一事件同时发送给多个并发任务。
+    ///   这要求事件类型可克隆，并带来一定的内存/拷贝开销；如果事件 payload 很大，建议把 payload 设计为
+    ///   共享所有权（例如 `Arc<T>`），以降低 clone 成本。
+    ///
+    /// 错误处理：
+    /// - 单个逻辑返回 `Err`：记录 `warn` 并继续处理同 chunk 的后续逻辑。
+    /// - chunk 任务 panic：记录 `warn`；其他 chunk 不受影响。
     fn dispatch_event(&self, event: GameEvent) {
-        let logic_targets = Game::collect_logic_handles();
+        let logic_targets = Game::collect_logic_handle_chunks();
         self.runtime.spawn(async move {
             let mut join_set = JoinSet::new();
 
-            for (entity_id, handle) in logic_targets {
+            for chunk in logic_targets {
                 let event = event.clone();
                 join_set.spawn(async move {
-                    let mut logic = handle.lock().await;
-                    logic.on_event(Entity::from(entity_id), &event).await?;
-                    Ok::<u64, anyhow::Error>(entity_id)
+                    for (entity_id, handle) in chunk {
+                        let mut logic = handle.lock().await;
+                        if let Err(err) = logic.on_event(Entity::from(entity_id), &event).await {
+                            warn!(
+                                target: "jge-core",
+                                error = %err,
+                                "GameLogic on_event failed"
+                            );
+                        }
+                    }
                 });
             }
 
             while let Some(task) = join_set.join_next().await {
-                match task {
-                    Ok(Ok(_entity_id)) => {}
-                    Ok(Err(err)) => {
-                        warn!(target: "jge-core", error = %err, "GameLogic on_event task failed");
-                    }
-                    Err(err) => {
-                        warn!(target: "jge-core", error = %err, "GameLogic on_event task panicked");
-                    }
+                if let Err(err) = task {
+                    warn!(target: "jge-core", error = %err, "GameLogic on_event task panicked");
                 }
             }
         });
@@ -225,22 +283,7 @@ impl Game {
 
 impl ApplicationHandler for Game {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.window.is_some() {
-            return;
-        }
-
-        let window_attributes = Self::window_attributes(&self.config.window);
-        let window = event_loop.create_window(window_attributes).unwrap();
-
-        self.window = Some(
-            self.runtime
-                .block_on(GameWindow::new(Arc::new(window), &self.config.window))
-                .unwrap(),
-        );
-
-        if let Some(mut init) = self.window_init.take() {
-            init(self);
-        }
+        self.ensure_window_created(event_loop);
     }
 
     fn window_event(
@@ -279,51 +322,7 @@ impl ApplicationHandler for Game {
                 event_loop.exit();
             }
             WindowEvent::RedrawRequested => {
-                let delta = self.last_redraw.elapsed();
-                self.last_redraw = Instant::now();
-
-                {
-                    let gwin = self.window.as_mut().unwrap();
-
-                    gwin.resize_surface_if_needed();
-
-                    gwin.window.pre_present_notify();
-
-                    match gwin.render(&self.root, delta) {
-                        Ok(_) => {}
-                        // 展示平面的上下文丢失
-                        Err(wgpu::SurfaceError::Lost) => {
-                            warn!(target: "jge-core", "Surface is lost")
-                        }
-                        // 所有其他错误
-                        Err(e) => warn!(target: "jge-core", "{:?}", e),
-                    }
-                    gwin.window.request_redraw();
-                }
-
-                let logic_targets = Game::collect_logic_handles();
-                let frame_delta = delta;
-                self.runtime.spawn(async move {
-                    let mut join_set = JoinSet::new();
-
-                    for (entity_id, handle) in logic_targets {
-                        let logic_delta = frame_delta;
-                        join_set.spawn(async move {
-                            let mut logic = handle.lock().await;
-                            logic.on_render(Entity::from(entity_id), logic_delta).await?;
-                            Ok::<u64, anyhow::Error>(entity_id)
-                        });
-                    }
-
-                    while let Some(task) = join_set.join_next().await {
-                        match task {
-                            Ok(_) => {}
-                            Err(err) => {
-                            warn!(target: "jge-core", error = %err, "GameLogic on_render task panicked");
-                            }
-                        }
-                    }
-                });
+                self.handle_redraw_requested();
             }
             _ => (),
         }
@@ -342,6 +341,105 @@ impl ApplicationHandler for Game {
 }
 
 impl Game {
+    /// 确保窗口与渲染上下文已创建。
+    ///
+    /// 该方法只会创建一次：如果窗口已存在会直接返回。
+    ///
+    /// 创建完成后会立即执行 `window_init` 回调（若存在），以便进行与窗口绑定的初始化逻辑。
+    fn ensure_window_created(&mut self, event_loop: &ActiveEventLoop) {
+        if self.window.is_some() {
+            return;
+        }
+
+        let window_attributes = Self::window_attributes(&self.config.window);
+        let window = event_loop.create_window(window_attributes).unwrap();
+
+        self.window = Some(
+            self.runtime
+                .block_on(GameWindow::new(Arc::new(window), &self.config.window))
+                .unwrap(),
+        );
+
+        if let Some(mut init) = self.window_init.take() {
+            init(self);
+        }
+    }
+
+    /// 处理 `winit` 的重绘请求：执行一帧渲染，并异步调度 `GameLogic::on_render`。
+    ///
+    /// 注意：该方法会请求下一帧重绘（`request_redraw`），形成持续渲染；同时 `on_render` 的调度
+    /// 与渲染本身解耦，不会阻塞当前 `winit` 回调。
+    fn handle_redraw_requested(&mut self) {
+        let delta = self.last_redraw.elapsed();
+        self.last_redraw = Instant::now();
+
+        {
+            let gwin = self.window.as_mut().unwrap();
+
+            gwin.resize_surface_if_needed();
+
+            gwin.window.pre_present_notify();
+
+            match gwin.render(&self.root, delta) {
+                Ok(_) => {}
+                // 展示平面的上下文丢失
+                Err(wgpu::SurfaceError::Lost) => warn!(target: "jge-core", "Surface is lost"),
+                // 所有其他错误
+                Err(e) => warn!(target: "jge-core", "{:?}", e),
+            }
+
+            gwin.window.request_redraw();
+        }
+
+        self.dispatch_on_render(delta);
+    }
+
+    /// 调度一帧渲染回调到所有已注册逻辑（`GameLogic::on_render`）。
+    ///
+    /// 调度语义：
+    /// - 以 chunk 为并发粒度：每个 chunk 启动一个异步任务并行执行。
+    /// - chunk 内按存储顺序顺序执行：同一 chunk 中多个逻辑依次 `await`。
+    /// - 本方法为“发射后不等待”（fire-and-forget）。
+    ///
+    /// 错误处理：
+    /// - 单个逻辑返回 `Err`：记录 `warn` 并继续处理同 chunk 的后续逻辑。
+    /// - chunk 任务 panic：记录 `warn`；其他 chunk 不受影响。
+    fn dispatch_on_render(&self, delta: Duration) {
+        let logic_targets = Game::collect_logic_handle_chunks();
+        self.runtime.spawn(async move {
+            let mut join_set = JoinSet::new();
+
+            for chunk in logic_targets {
+                let logic_delta = delta;
+                join_set.spawn(async move {
+                    for (entity_id, handle) in chunk {
+                        let mut logic = handle.lock().await;
+                        if let Err(err) =
+                            logic.on_render(Entity::from(entity_id), logic_delta).await
+                        {
+                            warn!(
+                                target: "jge-core",
+                                error = %err,
+                                "GameLogic on_render failed"
+                            );
+                        }
+                    }
+                });
+            }
+
+            while let Some(task) = join_set.join_next().await {
+                if let Err(err) = task {
+                    warn!(
+                        target: "jge-core",
+                        error = %err,
+                        "GameLogic on_render task panicked"
+                    );
+                }
+            }
+        });
+    }
+
+    /// 根据窗口配置构造 `winit` 的窗口属性。
     fn window_attributes(window_config: &WindowConfig) -> WindowAttributes {
         let width = window_config.width.max(1);
         let height = window_config.height.max(1);
@@ -357,8 +455,13 @@ impl Game {
         attributes
     }
 
-    fn collect_logic_handles() -> Vec<(u64, GameLogicHandle)> {
-        Node::storage()
-            .collect_with(|entity_id, node| node.logic().cloned().map(|logic| (entity_id, logic)))
+    /// 收集当前世界里所有挂载了 `GameLogic` 的实体，并按存储的 chunk 组织。
+    ///
+    /// 返回值的 chunk 划分与顺序由 `Node` 的内部存储决定；调用方通常会对每个 chunk 并发执行，
+    /// 同时保持 chunk 内顺序遍历，以获得更好的缓存局部性并降低任务开销。
+    fn collect_logic_handle_chunks() -> Vec<Vec<(u64, GameLogicHandle)>> {
+        Node::storage().collect_chunks_with(|entity_id, node| {
+            node.logic().cloned().map(|logic| (entity_id, logic))
+        })
     }
 }

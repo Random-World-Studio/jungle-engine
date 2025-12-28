@@ -7,6 +7,10 @@ use std::{
 
 use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
+/// 资源本体。
+///
+/// `Resource` 负责持有资源的二进制数据，并可选择性地关联文件系统路径用于延迟加载/缓存。
+/// 通常不直接持有该类型，而是通过 [`ResourceHandle`]（`Arc<RwLock<_>>`）共享访问。
 #[derive(Debug)]
 pub struct Resource {
     fs_path: Option<String>,
@@ -14,6 +18,9 @@ pub struct Resource {
     data: Vec<u8>,
 }
 
+/// 资源路径（逻辑路径）。
+///
+/// 资源系统使用“分段路径”组织资源，类似 `shaders/3d.vs` 这种以 `/` 分隔的层级。
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ResourcePath(Vec<String>);
 
@@ -98,27 +105,38 @@ impl AsRef<[String]> for ResourcePath {
         &self.0
     }
 }
-pub type ResourceHandle = Arc<RwLock<Resource>>;
+
+/// 资源句柄。
+///
+/// - 具备共享所有权（`Arc`）与并发读写（`RwLock`）。
+/// - 支持类型参数 `T`，默认 `T = Resource`，便于未来扩展为不同资源类型。
+pub type ResourceHandle<T = Resource> = Arc<RwLock<T>>;
 
 enum NodeData {
     Directory(RwLock<Vec<Box<ResourceNode>>>),
     Resource(ResourceHandle),
 }
 
+/// 资源树节点。
+///
+/// 资源系统内部会把 [`ResourcePath`] 解析为分段路径，并构建一棵目录/资源混合的树。
+/// 该类型主要用于内部存储结构；游戏侧通常只需要通过 [`Resource::register`] 与 [`Resource::from`] 访问资源。
 pub struct ResourceNode {
     name: String,
     data: NodeData,
 }
 
+/// 资源系统错误。
 #[derive(Debug)]
 pub enum ResourceError {
-    PathConflict(Resource),
+    /// 资源路径冲突：尝试在“已经是资源”的路径下继续注册子路径，或与已有节点类型不一致。
+    PathConflict,
 }
 
 impl Display for ResourceError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ResourceError::PathConflict(_) => {
+            ResourceError::PathConflict => {
                 write!(f, "资源路径冲突：尝试在已有资源路径下注册新资源")
             }
         }
@@ -128,7 +146,7 @@ impl Display for ResourceError {
 impl std::error::Error for ResourceError {}
 
 impl Resource {
-    pub fn from_memory(data: Vec<u8>) -> Self {
+    fn new_memory(data: Vec<u8>) -> Self {
         Self {
             fs_path: None,
             cached: true,
@@ -136,12 +154,22 @@ impl Resource {
         }
     }
 
-    pub fn from_file(path: &Path) -> Self {
+    fn new_file(path: &Path) -> Self {
         Self {
             fs_path: Some(path.to_string_lossy().to_string()),
             cached: false,
             data: Vec::new(),
         }
+    }
+
+    /// 从内存字节创建资源句柄（已缓存）。
+    pub fn from_memory(data: Vec<u8>) -> ResourceHandle {
+        Arc::new(RwLock::new(Self::new_memory(data)))
+    }
+
+    /// 从磁盘路径创建资源句柄（懒加载，首次读取时缓存）。
+    pub fn from_file(path: &Path) -> ResourceHandle {
+        Arc::new(RwLock::new(Self::new_file(path)))
     }
 
     fn resources() -> &'static RwLock<Vec<Box<ResourceNode>>> {
@@ -179,7 +207,7 @@ impl Resource {
     fn register_inner(
         mut list: RwLockWriteGuard<'static, Vec<Box<ResourceNode>>>,
         path: ResourcePath,
-        resource: Resource,
+        resource: ResourceHandle,
     ) -> Result<(), ResourceError> {
         let transmute = |r: RwLockWriteGuard<Vec<Box<ResourceNode>>>| -> RwLockWriteGuard<'static, Vec<Box<ResourceNode>>> {
             unsafe { mem::transmute(r) }
@@ -199,7 +227,7 @@ impl Resource {
                 if i + 1 == l {
                     list.push(Box::new(ResourceNode {
                         name: s.clone(),
-                        data: NodeData::Resource(Arc::new(RwLock::new(resource))),
+                        data: NodeData::Resource(resource),
                     }));
                     return Ok(());
                 } else {
@@ -217,13 +245,19 @@ impl Resource {
             }
         }
 
-        Err(ResourceError::PathConflict(resource))
+        Err(ResourceError::PathConflict)
     }
 
-    pub fn register(path: ResourcePath, resource: Resource) -> Result<(), ResourceError> {
+    /// 注册资源句柄到全局资源树。
+    ///
+    /// 若路径与已有节点发生冲突（例如 `a/b` 已经是资源，但又尝试注册 `a/b/c`），将返回 [`ResourceError::PathConflict`]。
+    pub fn register(path: ResourcePath, resource: ResourceHandle) -> Result<(), ResourceError> {
         Self::register_inner(Self::resources().write(), path, resource)
     }
 
+    /// 按资源路径获取已注册的资源句柄。
+    ///
+    /// - 返回 `None` 表示该路径未注册，或路径命中目录但不是最终资源节点。
     pub fn from(path: ResourcePath) -> Option<ResourceHandle> {
         let transmute = |r: RwLockReadGuard<Vec<Box<ResourceNode>>>| -> RwLockReadGuard<'static, Vec<Box<ResourceNode>>>{
             unsafe { mem::transmute(r) }
@@ -314,10 +348,13 @@ mod tests {
     #[test]
     fn from_memory_prefers_try_get_data() {
         let resource = Resource::from_memory(b"hello".to_vec());
-        assert!(resource.data_loaded(), "内存资源应默认已加载");
+        let resource_guard = resource.read();
+        assert!(resource_guard.data_loaded(), "内存资源应默认已加载");
 
-        let maybe_data = if resource.data_loaded() {
-            resource.try_get_data().expect("已缓存资源应能直接读取")
+        let maybe_data = if resource_guard.data_loaded() {
+            resource_guard
+                .try_get_data()
+                .expect("已缓存资源应能直接读取")
         } else {
             unreachable!("from_memory 应始终已缓存");
         };
@@ -330,22 +367,33 @@ mod tests {
         let temp = NamedTempFile::new().expect("应能创建临时文件");
         fs::write(temp.path(), b"content").expect("应能写入测试文件");
 
-        let mut resource = Resource::from_file(temp.path());
-        assert!(!resource.data_loaded(), "文件资源初始不应缓存");
+        let resource = Resource::from_file(temp.path());
+        {
+            let resource_guard = resource.read();
+            assert!(!resource_guard.data_loaded(), "文件资源初始不应缓存");
+        }
 
+        let mut resource_guard = resource.write();
         // 首次尝试应返回 None，随后退回到 get_data 触发加载。
-        assert!(resource.try_get_data().is_none(), "未缓存时应返回 None");
+        assert!(
+            resource_guard.try_get_data().is_none(),
+            "未缓存时应返回 None"
+        );
 
-        let bytes = if resource.data_loaded() {
-            resource.try_get_data().expect("缓存存在时应能直接读取")
+        let bytes = if resource_guard.data_loaded() {
+            resource_guard
+                .try_get_data()
+                .expect("缓存存在时应能直接读取")
         } else {
-            resource.get_data()
+            resource_guard.get_data()
         };
         assert_eq!(bytes, &b"content".to_vec());
-        assert!(resource.data_loaded(), "访问后应标记为已缓存");
+        assert!(resource_guard.data_loaded(), "访问后应标记为已缓存");
 
         // 再次访问应命中缓存，不需写锁。
-        let cached = resource.try_get_data().expect("缓存应在首次加载后保持可用");
+        let cached = resource_guard
+            .try_get_data()
+            .expect("缓存应在首次加载后保持可用");
         assert!(std::ptr::eq(bytes, cached));
     }
 }

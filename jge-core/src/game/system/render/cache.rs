@@ -1,0 +1,33 @@
+use super::scene2d::{Scene2DMaterialCache, Scene2DPipelineCache};
+use super::scene3d::{Scene3DDepthCache, Scene3DMaterialCache, Scene3DPipelineCache};
+
+pub(in crate::game::system::render) struct LayerRendererCache {
+    pub(in crate::game::system::render) scene2d: Scene2DPipelineCache,
+    pub(in crate::game::system::render) scene2d_materials: Scene2DMaterialCache,
+    pub(in crate::game::system::render) scene3d: Scene3DPipelineCache,
+    pub(in crate::game::system::render) scene3d_materials: Scene3DMaterialCache,
+    pub(in crate::game::system::render) scene3d_depth: Scene3DDepthCache,
+}
+
+impl Default for LayerRendererCache {
+    fn default() -> Self {
+        Self {
+            scene2d: Scene2DPipelineCache::default(),
+            scene2d_materials: Scene2DMaterialCache::default(),
+            scene3d: Scene3DPipelineCache::default(),
+            scene3d_materials: Scene3DMaterialCache::default(),
+            scene3d_depth: Scene3DDepthCache::default(),
+        }
+    }
+}
+
+pub(in crate::game::system::render) struct LayerRenderContext<'a, 'cache> {
+    pub(in crate::game::system::render) device: &'a wgpu::Device,
+    pub(in crate::game::system::render) queue: &'a wgpu::Queue,
+    pub(in crate::game::system::render) encoder: &'a mut wgpu::CommandEncoder,
+    pub(in crate::game::system::render) target_view: &'a wgpu::TextureView,
+    pub(in crate::game::system::render) surface_format: wgpu::TextureFormat,
+    pub(in crate::game::system::render) framebuffer_size: (u32, u32),
+    pub(in crate::game::system::render) load_op: wgpu::LoadOp<wgpu::Color>,
+    pub(in crate::game::system::render) caches: &'cache mut LayerRendererCache,
+}
