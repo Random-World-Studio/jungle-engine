@@ -3,7 +3,7 @@ use std::{borrow::Cow, collections::HashMap, sync::Arc};
 use anyhow::{Context, anyhow, ensure};
 use image::GenericImageView;
 use nalgebra::{Matrix4, Perspective3, Point3, Rotation3, Vector3};
-use tracing::{debug, warn};
+use tracing::{debug, trace, warn};
 use wgpu::{self, util::DeviceExt};
 
 use crate::game::{
@@ -43,14 +43,18 @@ impl RenderSystem {
         preferred: Option<Entity>,
     ) -> Result<Option<Entity>, LayerTraversalError> {
         if let Some(candidate) = preferred {
-            if candidate.get_component::<Camera>().is_some() && Self::try_get_transform(candidate).is_some() {
+            if candidate.get_component::<Camera>().is_some()
+                && Self::try_get_transform(candidate).is_some()
+            {
                 return Ok(Some(candidate));
             }
         }
 
         let ordered = Layer::renderable_entities(root)?;
         for entity in ordered {
-            if entity.get_component::<Camera>().is_some() && Self::try_get_transform(entity).is_some() {
+            if entity.get_component::<Camera>().is_some()
+                && Self::try_get_transform(entity).is_some()
+            {
                 return Ok(Some(entity));
             }
         }
@@ -536,11 +540,10 @@ impl RenderSystem {
             store: wgpu::StoreOp::Store,
         };
 
-        let depth_view =
-            context
-                .caches
-                .scene3d_depth
-                .ensure(context.device, context.framebuffer_size);
+        let depth_view = context
+            .caches
+            .scene3d_depth
+            .ensure(context.device, context.framebuffer_size);
 
         let mut pass = context
             .encoder
@@ -572,7 +575,7 @@ impl RenderSystem {
             pass.draw(0..draw.vertex_count, 0..1);
         }
 
-        debug!(
+        trace!(
             target: "jge-core",
             layer_id = entity.id(),
             camera_id = camera_entity.id(),

@@ -34,7 +34,7 @@ use jge_core::{
     logger,
     resource::{Resource, ResourceHandle, ResourcePath},
 };
-use tracing::warn;
+use tracing::{info, warn};
 use winit::dpi::PhysicalPosition;
 use winit::window::CursorGrabMode;
 
@@ -280,6 +280,9 @@ impl CameraControllerLogic {
 impl GameLogic for CameraControllerLogic {
     async fn on_event(&mut self, _entity: Entity, event: &Event) -> anyhow::Result<()> {
         let Some(input) = event.downcast_ref::<InputEvent>() else {
+            if let Event::CloseRequested = event {
+                info!("关闭请求收到，退出游戏");
+            }
             return Ok(());
         };
 
@@ -356,7 +359,7 @@ impl GameLogic for CameraControllerLogic {
         }
 
         // 旋转：鼠标控制（yaw 绕 Y 轴，pitch 绕 X 轴）。
-        // 注意 CursorMoved 的 y 轴向下为正，因此这里对 pitch 取负号以保持“鼠标上移=抬头”。
+        // 注意 CursorMoved 的 y 轴向下G::Cl为正，因此这里对 pitch 取负号以保持“鼠标上移=抬头”。
         let mut rotation = transform.rotation();
 
         let mouse_delta = self.mouse_delta;

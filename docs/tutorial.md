@@ -56,7 +56,7 @@ cargo new my-game
 cd my-game
 ```
 
-### 2.3 通过远程 git 依赖 jge-core 与 jge-macros
+### 2.3 通过远程 git 依赖 jge-core
 
 > 把下面的 `<ENGINE_GIT_URL>` 替换成本仓库地址。
 
@@ -70,7 +70,7 @@ cargo add tracing --features async-await    # 日志系统
 cargo add nalgebra                          # 引擎使用的线性代数数据类型及其相关运算（教程示例会用到 Vector2/Vector3）
 ```
 
-再添加引擎依赖（建议用 **同一个 rev** 锁定两个依赖，保证版本一致与可复现）：
+再添加引擎依赖：
 
 ```bash
 cargo add jge-core --git <ENGINE_GIT_URL>
@@ -143,7 +143,7 @@ cargo run
 
 ### 3.2 强制的“组件工作流”规范（非常重要）
 
-仓库 README 已明确要求：**所有组件挂载与读取必须通过 `Entity` API**，不要直接操作 `Component::insert`/`storage` 等底层接口。
+文档中已明确要求：**所有组件挂载与读取必须通过 `Entity` API**，不要直接操作 `Component::insert`/`storage` 等底层接口。
 
 原因是：组件依赖补齐与生命周期行为都依赖这条标准路径；绕开它容易造成行为不一致。
 

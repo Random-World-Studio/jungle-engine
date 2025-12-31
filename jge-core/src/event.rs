@@ -1,4 +1,4 @@
-use std::{any::Any, sync::Arc};
+use std::{any::Any, fmt::Debug, sync::Arc};
 
 pub use winit::{
     event::{DeviceEvent, ElementState, KeyEvent, WindowEvent},
@@ -12,6 +12,7 @@ pub use winit::{
 /// 事件载荷使用 `Arc` 承载，便于在多个 `GameLogic` 之间广播（无需要求载荷实现 `Clone`）。
 #[derive(Clone)]
 pub enum Event {
+    CloseRequested,
     /// 自定义事件：使用 `Arc<dyn Any + Send + Sync>` 承载任意用户载荷。
     Custom(Arc<dyn Any + Send + Sync>),
 }
@@ -29,6 +30,16 @@ impl Event {
     pub fn downcast_ref<T: Any>(&self) -> Option<&T> {
         match self {
             Self::Custom(payload) => payload.as_ref().downcast_ref::<T>(),
+            _ => None,
+        }
+    }
+}
+
+impl Debug for Event {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CloseRequested => write!(f, "CloseRequested"),
+            Self::Custom(arg) => f.debug_tuple("Custom").field(arg).finish(),
         }
     }
 }

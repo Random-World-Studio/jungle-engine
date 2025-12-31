@@ -10,7 +10,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::{runtime::Runtime, task::JoinSet, time::interval};
-use tracing::{error, info, warn};
+use tracing::{error, info, trace, warn};
 use winit::{
     application::ApplicationHandler,
     dpi::PhysicalSize,
@@ -252,8 +252,9 @@ impl Game {
     /// - 单个逻辑返回 `Err`：记录 `warn` 并继续处理同 chunk 的后续逻辑。
     /// - chunk 任务 panic：记录 `warn`；其他 chunk 不受影响。
     fn dispatch_event(&self, event: GameEvent) {
+        trace!(target: "jge-core", "dispatch event: {:?}", event);
         let logic_targets = Game::collect_logic_handle_chunks();
-        self.runtime.spawn(async move {
+        let hdl = self.runtime.spawn(async move {
             let mut join_set = JoinSet::new();
 
             for chunk in logic_targets {
@@ -278,6 +279,7 @@ impl Game {
                 }
             }
         });
+        self.runtime.block_on(async { hdl.await.unwrap() });
     }
 }
 
@@ -298,6 +300,19 @@ impl ApplicationHandler for Game {
 
         match event {
             WindowEvent::CloseRequested => {
+                self.dispatch_event(GameEvent::CloseRequested);
+                self.stopped.store(true, Ordering::Release);
+                event_loop.exit();
+            }
+            WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        logical_key: Key::Named(NamedKey::Escape),
+                        ..
+                    },
+                ..
+            } if self.config.escape_closes => {
+                self.dispatch_event(GameEvent::CloseRequested);
                 self.stopped.store(true, Ordering::Release);
                 event_loop.exit();
             }
@@ -310,16 +325,6 @@ impl ApplicationHandler for Game {
                         .unwrap()
                         .set_window_resized(physical_size);
                 }
-            }
-            WindowEvent::KeyboardInput {
-                event:
-                    KeyEvent {
-                        logical_key: Key::Named(NamedKey::Escape),
-                        ..
-                    },
-                ..
-            } if self.config.escape_closes => {
-                event_loop.exit();
             }
             WindowEvent::RedrawRequested => {
                 self.handle_redraw_requested();

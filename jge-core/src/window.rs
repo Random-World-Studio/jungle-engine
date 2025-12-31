@@ -11,7 +11,7 @@ use crate::{
         system::render::RenderSystem,
     },
 };
-use tracing::{debug, warn};
+use tracing::{trace, warn};
 
 /// 窗口与渲染上下文。
 ///
@@ -142,14 +142,14 @@ impl GameWindow {
     ///
     /// 返回 `wgpu::SurfaceError` 表示 surface 获取当前帧纹理失败，通常可通过重试/重建 surface 恢复。
     pub fn render(&mut self, root: &Entity, delta: Duration) -> Result<(), wgpu::SurfaceError> {
-        debug!(
+        trace!(
             target: "jge-core",
             frame_time_ms = delta.as_secs_f64() * 1000.0,
             "begin frame"
         );
 
         let layer_roots = Self::collect_layer_roots(*root);
-        debug!(
+        trace!(
             target: "jge-core",
             layer_count = layer_roots.len(),
             "collected layers for rendering"
