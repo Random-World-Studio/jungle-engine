@@ -53,6 +53,7 @@ struct MouseState {
 
 fn main() -> anyhow::Result<()> {
     logger::init()?;
+
     let root = build_demo_scene().context("构建测试场景失败")?;
 
     let mouse_state = Arc::new(StdMutex::new(MouseState {
@@ -216,8 +217,6 @@ fn build_demo_scene() -> anyhow::Result<Entity> {
     let root = Entity::new().context("创建根实体失败")?;
 
     spawn_scene3d_layer(root).context("创建 Scene3D 图层失败")?;
-
-    // spawn_scene2d_layer(root).context("创建 Scene2D 图层失败")?;
 
     Ok(root)
 }
