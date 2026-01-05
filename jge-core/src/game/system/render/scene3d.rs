@@ -3,7 +3,7 @@ use std::{borrow::Cow, collections::HashMap, sync::Arc};
 use anyhow::{Context, anyhow, ensure};
 use image::GenericImageView;
 use nalgebra::{Matrix4, Perspective3, Point3, Rotation3, Vector3};
-use tracing::{debug, trace, warn};
+use tracing::{trace, warn};
 use wgpu::{self, util::DeviceExt};
 
 use crate::game::{
@@ -71,7 +71,6 @@ impl RenderSystem {
         };
         let scene_near = scene_guard.near_plane();
         let scene_distance = scene_guard.view_distance();
-        let scene_vertical = scene_guard.vertical_fov();
         let attached_camera = scene_guard.attached_camera();
 
         let (vertex_shader, fragment_shader) = {
@@ -114,7 +113,12 @@ impl RenderSystem {
             (vertex, fragment)
         };
 
-        let (width, height) = context.framebuffer_size;
+        let viewport_framebuffer_size = context
+            .viewport
+            .map(|viewport| (viewport.width, viewport.height))
+            .unwrap_or(context.framebuffer_size);
+
+        let (width, height) = viewport_framebuffer_size;
         if width == 0 || height == 0 {
             warn!(
                 target: "jge-core",
@@ -179,7 +183,34 @@ impl RenderSystem {
                 return;
             }
         };
-        let camera_vertical = camera_guard.vertical_fov();
+        let scene_vertical = match scene_guard.vertical_fov_for_height(height) {
+            Ok(value) => value,
+            Err(error) => {
+                warn!(
+                    target: "jge-core",
+                    layer_id = entity.id(),
+                    framebuffer_height = height,
+                    error = %error,
+                    "Scene3D viewport config invalid"
+                );
+                return;
+            }
+        };
+
+        let camera_vertical = match camera_guard.vertical_fov_for_height(height) {
+            Ok(value) => value,
+            Err(error) => {
+                warn!(
+                    target: "jge-core",
+                    layer_id = entity.id(),
+                    camera_id = camera_entity.id(),
+                    framebuffer_height = height,
+                    error = %error,
+                    "Scene3D camera viewport config invalid"
+                );
+                return;
+            }
+        };
         let camera_near = camera_guard.near_plane();
         let camera_far = camera_guard.far_plane();
         drop(camera_guard);
@@ -200,20 +231,20 @@ impl RenderSystem {
         let vertical_fov = scene_vertical.min(camera_vertical);
         let aspect_ratio = width as f32 / height as f32;
 
-        let visible = match scene_guard.visible_renderables(camera_entity, context.framebuffer_size)
-        {
-            Ok(collection) => collection,
-            Err(error) => {
-                warn!(
-                    target: "jge-core",
-                    layer_id = entity.id(),
-                    camera_id = camera_entity.id(),
-                    error = %error,
-                    "Scene3D visibility query failed"
-                );
-                return;
-            }
-        };
+        let visible =
+            match scene_guard.visible_renderables(camera_entity, viewport_framebuffer_size) {
+                Ok(collection) => collection,
+                Err(error) => {
+                    warn!(
+                        target: "jge-core",
+                        layer_id = entity.id(),
+                        camera_id = camera_entity.id(),
+                        error = %error,
+                        "Scene3D visibility query failed"
+                    );
+                    return;
+                }
+            };
 
         let transform_guard = match Self::try_get_transform(camera_entity) {
             Some(transform) => transform,
@@ -442,7 +473,7 @@ impl RenderSystem {
         }
 
         if draws.is_empty() {
-            debug!(
+            trace!(
                 target: "jge-core",
                 layer_id = entity.id(),
                 "Scene3D layer has no visible geometry"
@@ -536,7 +567,11 @@ impl RenderSystem {
 
         let label = format!("Layer {} Scene3D", entity.id());
         let ops = wgpu::Operations {
-            load: context.load_op,
+            load: if context.viewport.is_some() {
+                wgpu::LoadOp::Load
+            } else {
+                context.load_op
+            },
             store: wgpu::StoreOp::Store,
         };
 
@@ -566,6 +601,18 @@ impl RenderSystem {
                 occlusion_query_set: None,
                 timestamp_writes: None,
             });
+
+        if let Some(viewport) = context.viewport {
+            pass.set_viewport(
+                viewport.x as f32,
+                viewport.y as f32,
+                viewport.width as f32,
+                viewport.height as f32,
+                0.0,
+                1.0,
+            );
+            pass.set_scissor_rect(viewport.x, viewport.y, viewport.width, viewport.height);
+        }
 
         pass.set_pipeline(pipeline.pipeline());
         pass.set_bind_group(0, &scene_bind_group, &[]);

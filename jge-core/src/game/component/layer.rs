@@ -13,12 +13,34 @@ use crate::game::{component::ComponentRead, entity::Entity};
 use crate::resource::{Resource, ResourceHandle, ResourcePath};
 use nalgebra::{Matrix4, Vector3, Vector4};
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LayerViewport {
+    /// 归一化坐标（0..=1），原点在左上角。
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+impl LayerViewport {
+    /// 创建一个归一化视口矩形（0..=1）。
+    pub fn normalized(x: f32, y: f32, width: f32, height: f32) -> Self {
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+}
+
 #[component(Renderable)]
 #[derive(Debug)]
 pub struct Layer {
     entity_id: Option<Entity>,
     shaders: HashMap<RenderPipelineStage, LayerShader>,
     spatial: LayerSpatialIndex,
+    viewport: Option<LayerViewport>,
 }
 
 #[component_impl]
@@ -30,7 +52,23 @@ impl Layer {
             entity_id: None,
             shaders: HashMap::new(),
             spatial: LayerSpatialIndex::new(),
+            viewport: None,
         }
+    }
+
+    /// 获取该 Layer 的视口裁剪区域（归一化坐标），未设置则表示全屏。
+    pub fn viewport(&self) -> Option<LayerViewport> {
+        self.viewport
+    }
+
+    /// 设置该 Layer 的视口裁剪区域（归一化坐标）。
+    pub fn set_viewport(&mut self, viewport: LayerViewport) {
+        self.viewport = Some(viewport);
+    }
+
+    /// 清除视口裁剪区域，恢复为全屏渲染。
+    pub fn clear_viewport(&mut self) {
+        self.viewport = None;
     }
 
     /// 获取指定渲染阶段关联的着色器描述。

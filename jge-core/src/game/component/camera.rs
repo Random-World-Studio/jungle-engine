@@ -44,6 +44,19 @@ impl Camera {
         self.vertical_fov
     }
 
+    /// 获取摄像机的垂直半视场角（弧度制）。
+    ///
+    /// 该角度定义为 3D 视锥的“棱”（边界射线）与视锥对称轴（forward 方向）的夹角，
+    /// 也就是 `vertical_fov / 2`。
+    pub fn vertical_half_fov(&self) -> f32 {
+        0.5 * self.vertical_fov
+    }
+
+    /// 获取摄像机的垂直半视场角（角度制）。
+    pub fn vertical_half_fov_degrees(&self) -> f32 {
+        self.vertical_half_fov().to_degrees()
+    }
+
     /// 设置摄像机的垂直视场角（弧度制）。
     pub fn set_vertical_fov(&mut self, fov: f32) -> Result<(), CameraPropertyError> {
         if !(MIN_VERTICAL_FOV..MAX_VERTICAL_FOV).contains(&fov) {
@@ -51,6 +64,21 @@ impl Camera {
         }
         self.vertical_fov = fov;
         Ok(())
+    }
+
+    /// 设置摄像机的垂直半视场角（弧度制）。
+    ///
+    /// 该值会被转换为垂直全视场角：`vertical_fov = vertical_half_fov * 2`。
+    pub fn set_vertical_half_fov(&mut self, half_fov: f32) -> Result<(), CameraPropertyError> {
+        self.set_vertical_fov(half_fov * 2.0)
+    }
+
+    /// 设置摄像机的垂直半视场角（角度制）。
+    pub fn set_vertical_half_fov_degrees(
+        &mut self,
+        half_fov_degrees: f32,
+    ) -> Result<(), CameraPropertyError> {
+        self.set_vertical_half_fov(half_fov_degrees.to_radians())
     }
 
     pub fn reference_framebuffer_height(&self) -> u32 {
@@ -294,6 +322,28 @@ mod tests {
         assert!(camera.set_clip_planes(0.0, camera.far_plane()).is_err());
         assert!(camera.set_clip_planes(0.5, 0.4).is_err());
         assert!(camera.set_clip_planes(0.5, 200.0).is_ok());
+    }
+
+    #[test]
+    fn camera_supports_vertical_half_fov_api() {
+        let mut camera = Camera::new();
+
+        let base_full = camera.vertical_fov();
+        let base_half = camera.vertical_half_fov();
+        assert!((base_half * 2.0 - base_full).abs() < 1e-6);
+
+        camera
+            .set_vertical_half_fov_degrees(20.0)
+            .expect("半视场角应能设置");
+        assert!((camera.vertical_half_fov_degrees() - 20.0).abs() < 1e-6);
+        assert!((camera.vertical_fov().to_degrees() - 40.0).abs() < 1e-6);
+
+        // 太小（小于 MIN_VERTICAL_FOV/2）应被拒绝。
+        assert!(
+            camera
+                .set_vertical_half_fov(MIN_VERTICAL_FOV / 4.0)
+                .is_err()
+        );
     }
 
     #[test]

@@ -1,3 +1,4 @@
+mod background;
 mod cache;
 mod scene2d;
 mod scene3d;
@@ -44,6 +45,11 @@ impl RenderSystem {
         layer_entity: Entity,
         load_op: wgpu::LoadOp<wgpu::Color>,
     ) {
+        let viewport = layer_entity
+            .get_component::<Layer>()
+            .and_then(|layer| layer.viewport())
+            .and_then(|viewport| util::viewport_pixels_from_normalized(framebuffer_size, viewport));
+
         let mut context = LayerRenderContext {
             device,
             queue,
@@ -51,6 +57,7 @@ impl RenderSystem {
             target_view,
             surface_format,
             framebuffer_size,
+            viewport,
             load_op,
             caches: &mut self.caches,
         };
@@ -67,6 +74,13 @@ impl RenderSystem {
     }
 
     fn render_layer_entity(entity: Entity, context: &mut LayerRenderContext<'_, '_>) {
+        // 规则：每次渲染某个 Layer 时，在该 Layer 其它内容渲染之前，
+        // 先在“以 Layer 所在节点为根的节点树”中按先序遍历找到第一个 Background 并渲染。
+        if background::render_background_if_present(entity, context) {
+            // 背景 pass 已使用当前 load_op（通常为 Clear），后续场景渲染应叠加在其上。
+            context.load_op = wgpu::LoadOp::Load;
+        }
+
         if entity.get_component::<Scene2D>().is_some() {
             Self::render_scene2d(entity, context);
         } else if entity.get_component::<Scene3D>().is_some() {

@@ -1,6 +1,59 @@
 use anyhow::ensure;
 use nalgebra::{Matrix4, Vector2, Vector3};
 
+use crate::game::component::layer::LayerViewport;
+
+use super::cache::LayerViewportPixels;
+
+pub(in crate::game::system::render) fn viewport_pixels_from_normalized(
+    framebuffer_size: (u32, u32),
+    viewport: LayerViewport,
+) -> Option<LayerViewportPixels> {
+    let (fb_width, fb_height) = framebuffer_size;
+    if fb_width == 0 || fb_height == 0 {
+        return None;
+    }
+
+    let values = [viewport.x, viewport.y, viewport.width, viewport.height];
+    if values.iter().any(|v| !v.is_finite()) {
+        return None;
+    }
+
+    let x = viewport.x.clamp(0.0, 1.0);
+    let y = viewport.y.clamp(0.0, 1.0);
+    let w = viewport.width.clamp(0.0, 1.0);
+    let h = viewport.height.clamp(0.0, 1.0);
+
+    let x2 = (x + w).clamp(0.0, 1.0);
+    let y2 = (y + h).clamp(0.0, 1.0);
+
+    let fb_w = fb_width as f32;
+    let fb_h = fb_height as f32;
+
+    let x_px = (x * fb_w).floor() as i64;
+    let y_px = (y * fb_h).floor() as i64;
+    let x2_px = (x2 * fb_w).ceil() as i64;
+    let y2_px = (y2 * fb_h).ceil() as i64;
+
+    let x_px = x_px.clamp(0, fb_width as i64);
+    let y_px = y_px.clamp(0, fb_height as i64);
+    let x2_px = x2_px.clamp(0, fb_width as i64);
+    let y2_px = y2_px.clamp(0, fb_height as i64);
+
+    let width_px = (x2_px - x_px) as i64;
+    let height_px = (y2_px - y_px) as i64;
+    if width_px <= 0 || height_px <= 0 {
+        return None;
+    }
+
+    Some(LayerViewportPixels {
+        x: x_px as u32,
+        y: y_px as u32,
+        width: width_px as u32,
+        height: height_px as u32,
+    })
+}
+
 /// 将 Scene2D 的顶点位置转换为 NDC 坐标。
 pub(in crate::game::system::render) fn scene2d_vertex_to_ndc(
     framebuffer_size: (u32, u32),

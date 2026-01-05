@@ -32,6 +32,11 @@ impl RenderSystem {
         let pixels_per_unit = scene_guard.pixels_per_unit();
         drop(scene_guard);
 
+        let viewport_framebuffer_size = context
+            .viewport
+            .map(|viewport| (viewport.width, viewport.height))
+            .unwrap_or(context.framebuffer_size);
+
         let layer_guard = match entity.get_component::<Layer>() {
             Some(layer) => layer,
             None => {
@@ -308,7 +313,7 @@ impl RenderSystem {
                     let brightness = (directional_brightness + point_brightness)
                         .clamp(0.0, MAX_TOTAL_BRIGHTNESS);
                     let ndc = util::scene2d_vertex_to_ndc(
-                        context.framebuffer_size,
+                        viewport_framebuffer_size,
                         vertex,
                         &scene_offset,
                         pixels_per_unit,
@@ -358,7 +363,11 @@ impl RenderSystem {
 
         let label = format!("Layer {}", entity.id());
         let ops = wgpu::Operations {
-            load: context.load_op,
+            load: if context.viewport.is_some() {
+                wgpu::LoadOp::Load
+            } else {
+                context.load_op
+            },
             store: wgpu::StoreOp::Store,
         };
 
@@ -376,6 +385,18 @@ impl RenderSystem {
                 occlusion_query_set: None,
                 timestamp_writes: None,
             });
+
+        if let Some(viewport) = context.viewport {
+            pass.set_viewport(
+                viewport.x as f32,
+                viewport.y as f32,
+                viewport.width as f32,
+                viewport.height as f32,
+                0.0,
+                1.0,
+            );
+            pass.set_scissor_rect(viewport.x, viewport.y, viewport.width, viewport.height);
+        }
 
         pass.set_pipeline(&render_pipeline);
         for draw in &draws {

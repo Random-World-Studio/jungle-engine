@@ -18,8 +18,9 @@ use jge_core::{
     },
     game::{
         component::{
+            background::Background,
             camera::Camera,
-            layer::Layer,
+            layer::{Layer, LayerViewport, ShaderLanguage},
             light::{Light, ParallelLight, PointLight},
             material::Material,
             node::Node,
@@ -36,6 +37,7 @@ use jge_core::{
 };
 use tracing::{info, warn};
 use winit::dpi::PhysicalPosition;
+use winit::event::MouseScrollDelta;
 use winit::window::CursorGrabMode;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -124,6 +126,16 @@ fn main() -> anyhow::Result<()> {
             }
         })
         .with_window_event_mapper(move |event: &WindowEvent| match event {
+            WindowEvent::MouseWheel { delta, .. } => {
+                let steps = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => *y,
+                    MouseScrollDelta::PixelDelta(position) => (position.y as f32) / 120.0,
+                };
+                if steps.abs() <= f32::EPSILON {
+                    return None;
+                }
+                Some(Event::custom(InputEvent::MouseWheel { steps }))
+            }
             WindowEvent::CursorMoved { position, .. } => {
                 let mut state = mouse_state_for_window
                     .lock()
@@ -183,6 +195,7 @@ fn main() -> anyhow::Result<()> {
 enum InputEvent {
     Action { action: CameraAction, pressed: bool },
     MouseDelta { dx: f32, dy: f32 },
+    MouseWheel { steps: f32 },
     Clear,
 }
 
@@ -258,6 +271,8 @@ struct CameraControllerLogic {
     mouse_delta: Vector2<f32>,
     move_speed: f32,
     mouse_sensitivity: f32,
+    wheel_steps: f32,
+    zoom_sensitivity_degrees: f32,
 }
 
 impl CameraControllerLogic {
@@ -267,6 +282,8 @@ impl CameraControllerLogic {
             mouse_delta: Vector2::new(0.0, 0.0),
             move_speed: 6.0,
             mouse_sensitivity: 0.003,
+            wheel_steps: 0.0,
+            zoom_sensitivity_degrees: 2.0,
         }
     }
 
@@ -289,6 +306,7 @@ impl GameLogic for CameraControllerLogic {
             InputEvent::Clear => {
                 self.pressed.clear();
                 self.mouse_delta = Vector2::new(0.0, 0.0);
+                self.wheel_steps = 0.0;
             }
             InputEvent::Action { action, pressed } => {
                 if pressed {
@@ -300,6 +318,9 @@ impl GameLogic for CameraControllerLogic {
             InputEvent::MouseDelta { dx, dy } => {
                 self.mouse_delta.x += dx;
                 self.mouse_delta.y += dy;
+            }
+            InputEvent::MouseWheel { steps } => {
+                self.wheel_steps += steps;
             }
         }
 
@@ -373,6 +394,17 @@ impl GameLogic for CameraControllerLogic {
         }
 
         transform.set_rotation(rotation);
+
+        // 视角（垂直半视场角）调节：滚轮上推 = 缩小视角（更“放大”）。
+        let wheel_steps = self.wheel_steps;
+        self.wheel_steps = 0.0;
+        if wheel_steps.abs() > f32::EPSILON {
+            if let Some(mut camera) = entity.get_component_mut::<Camera>() {
+                let current = camera.vertical_half_fov_degrees();
+                let candidate = current - wheel_steps * self.zoom_sensitivity_degrees;
+                let _ = camera.set_vertical_half_fov_degrees(candidate);
+            }
+        }
 
         Ok(())
     }
@@ -695,13 +727,41 @@ fn spawn_parallel_light(parent: Entity) -> anyhow::Result<()> {
 
 fn spawn_scene3d_layer(parent: Entity) -> anyhow::Result<Entity> {
     let entity = Entity::new().context("创建 Scene3D 图层实体失败")?;
+    let mut layer = Layer::new();
+    if std::env::var("JGE_DEMO_LAYER_VIEWPORT").ok().as_deref() == Some("1") {
+        layer.set_viewport(LayerViewport::normalized(0.05, 0.05, 0.45, 0.45));
+    }
     let _ = entity
-        .register_component(Layer::new())
+        .register_component(layer)
         .context("为 Scene3D 图层注册 Layer 组件失败")?;
     let _ = entity
         .register_component(Scene3D::new())
         .context("注册 Scene3D 组件失败")?;
     attach_to_parent(entity, parent, "将 Scene3D 图层挂载到父节点失败")?;
+
+    // 注册并挂载 Background：天蓝色纯色 + 自定义 horizon 渐变 shader。
+    Resource::register(
+        ResourcePath::from("shaders/demo/background_horizon.fs"),
+        Resource::from_memory(Vec::from(include_bytes!(
+            "resource/shaders/background_horizon.fs"
+        ))),
+    )
+    .context("注册 Background horizon shader 资源失败")?;
+
+    {
+        let mut bg = Background::new();
+        // 天蓝色（SkyBlue）
+        bg.set_color([0.53, 0.81, 0.92, 1.0]);
+        bg.set_fragment_shader_from_path(
+            ShaderLanguage::Wgsl,
+            ResourcePath::from("shaders/demo/background_horizon.fs"),
+        )
+        .context("设置 Background horizon shader 失败")?;
+
+        let _ = entity
+            .register_component(bg)
+            .context("为 Scene3D 图层挂载 Background 组件失败")?;
+    }
 
     let camera = spawn_camera(entity).context("创建 Scene3D 摄像机失败")?;
     {

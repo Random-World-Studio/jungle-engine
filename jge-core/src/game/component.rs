@@ -23,7 +23,7 @@
 //!
 //! ```rust
 //! use jge_core::game::{component::scene3d::Scene3D, entity::Entity};
-//! use jge_core::game::component::{layer::Layer, material::RenderPipelineStage, material::ShaderLanguage};
+//! use jge_core::game::component::layer::{Layer, RenderPipelineStage, ShaderLanguage};
 //!
 //! fn ensure_scene3d(entity: Entity) -> anyhow::Result<()> {
 //!     if entity.get_component::<Scene3D>().is_none() {
@@ -44,6 +44,7 @@
 //! ```
 
 pub mod camera;
+pub mod background;
 pub mod layer;
 pub mod light;
 pub mod material;

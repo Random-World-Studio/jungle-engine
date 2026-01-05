@@ -200,6 +200,18 @@ impl Resource {
                 Resource::from_memory(Vec::from(include_bytes!("resource/shaders/3d.fs"))),
             )
             .unwrap();
+            Self::register_inner(
+                unsafe { mem::transmute(res.write()) },
+                ResourcePath::from("shaders/background.vs"),
+                Resource::from_memory(Vec::from(include_bytes!("resource/shaders/background.vs"))),
+            )
+            .unwrap();
+            Self::register_inner(
+                unsafe { mem::transmute(res.write()) },
+                ResourcePath::from("shaders/background.fs"),
+                Resource::from_memory(Vec::from(include_bytes!("resource/shaders/background.fs"))),
+            )
+            .unwrap();
             res
         })
     }
