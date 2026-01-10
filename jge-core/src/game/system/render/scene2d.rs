@@ -42,7 +42,7 @@ impl RenderSystem {
             None => {
                 warn!(
                     target: "jge-core",
-                    layer_id = entity.id(),
+                    layer_id = %entity.id(),
                     "missing Layer component, skip rendering"
                 );
                 return;
@@ -57,7 +57,7 @@ impl RenderSystem {
             None => {
                 warn!(
                     target: "jge-core",
-                    layer_id = entity.id(),
+                    layer_id = %entity.id(),
                     "layer has no vertex shader attached"
                 );
                 return;
@@ -72,7 +72,7 @@ impl RenderSystem {
             None => {
                 warn!(
                     target: "jge-core",
-                    layer_id = entity.id(),
+                    layer_id = %entity.id(),
                     "layer has no fragment shader attached"
                 );
                 return;
@@ -95,7 +95,7 @@ impl RenderSystem {
                 Err(error) => {
                     warn!(
                         target: "jge-core",
-                        layer_id = entity.id(),
+                        layer_id = %entity.id(),
                         error = %error,
                         "failed to prepare Scene2D pipeline"
                     );
@@ -108,7 +108,7 @@ impl RenderSystem {
             Err(error) => {
                 warn!(
                     target: "jge-core",
-                    layer_id = entity.id(),
+                    layer_id = %entity.id(),
                     error = %error,
                     "Scene2D lighting query failed"
                 );
@@ -129,7 +129,7 @@ impl RenderSystem {
             Err(error) => {
                 warn!(
                     target: "jge-core",
-                    layer_id = entity.id(),
+                    layer_id = %entity.id(),
                     error = %error,
                     "Scene2D directional lighting query failed"
                 );
@@ -192,7 +192,7 @@ impl RenderSystem {
             Err(error) => {
                 warn!(
                     target: "jge-core",
-                    layer_id = entity.id(),
+                    layer_id = %entity.id(),
                     error = %error,
                     "Scene2D renderable collection failed"
                 );
@@ -205,7 +205,7 @@ impl RenderSystem {
             None => {
                 warn!(
                     target: "jge-core",
-                    layer_id = entity.id(),
+                    layer_id = %entity.id(),
                     "Scene2D component disappeared before visibility query"
                 );
                 return;
@@ -216,7 +216,7 @@ impl RenderSystem {
             None => {
                 warn!(
                     target: "jge-core",
-                    layer_id = entity.id(),
+                    layer_id = %entity.id(),
                     "Layer component missing during visibility query"
                 );
                 return;
@@ -229,7 +229,7 @@ impl RenderSystem {
                 Err(error) => {
                     warn!(
                         target: "jge-core",
-                        layer_id = entity.id(),
+                        layer_id = %entity.id(),
                         error = %error,
                         "Scene2D visibility query failed"
                     );
@@ -269,7 +269,7 @@ impl RenderSystem {
                         Err(error) => {
                             warn!(
                                 target: "jge-core",
-                                layer_id = entity.id(),
+                                layer_id = %entity.id(),
                                 error = %error,
                                 "failed to prepare material texture, fallback to default"
                             );
@@ -355,7 +355,7 @@ impl RenderSystem {
         if draws.is_empty() {
             debug!(
                 target: "jge-core",
-                layer_id = entity.id(),
+                layer_id = %entity.id(),
                 "Scene2D layer has no visible draws"
             );
             return;
@@ -407,7 +407,7 @@ impl RenderSystem {
 
         debug!(
             target: "jge-core",
-            layer_id = entity.id(),
+            layer_id = %entity.id(),
             draw_calls = draws.len(),
             vertex_total = total_vertices,
             "Scene2D layer rendered"

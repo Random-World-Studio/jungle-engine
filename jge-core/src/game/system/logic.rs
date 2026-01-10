@@ -88,6 +88,7 @@ impl Deref for GameLogicHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::entity::EntityId;
     use std::sync::{Arc, Mutex as StdMutex};
     use tokio::runtime::Builder;
 
@@ -110,7 +111,7 @@ mod tests {
         #[async_trait]
         impl GameLogic for AnyLogic {}
 
-        let entity = Entity::from(0);
+        let entity = Entity::from(EntityId::new());
         let boxed = <AnyLogic as GameLogic>::new_boxed(entity);
         assert!(boxed.is_ok());
     }
@@ -127,13 +128,13 @@ mod tests {
 
             {
                 let mut logic = handle.lock().await;
-                logic.update(Entity::from(1), std::time::Duration::from_millis(1))
+                logic.update(Entity::from(EntityId::new()), std::time::Duration::from_millis(1))
                     .await
                     .unwrap();
             }
             {
                 let mut logic = cloned.lock().await;
-                logic.update(Entity::from(1), std::time::Duration::from_millis(1))
+                logic.update(Entity::from(EntityId::new()), std::time::Duration::from_millis(1))
                     .await
                     .unwrap();
             }

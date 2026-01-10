@@ -453,8 +453,8 @@ pub(in crate::game::system::render) fn render_background_if_present(
 
     trace!(
         target: "jge-core",
-        layer_id = layer_entity.id(),
-        background_id = bg_entity.id(),
+        layer_id = %layer_entity.id(),
+        background_id = %bg_entity.id(),
         "rendered layer background"
     );
 

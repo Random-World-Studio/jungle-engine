@@ -67,7 +67,7 @@ impl RenderSystem {
         } else {
             warn!(
                 target: "jge-core",
-                layer_id = layer_entity.id(),
+                layer_id = %layer_entity.id(),
                 "skip rendering for entity missing Layer component"
             );
         }
@@ -88,7 +88,7 @@ impl RenderSystem {
         } else {
             debug!(
                 target: "jge-core",
-                layer_id = entity.id(),
+                layer_id = %entity.id(),
                 "skip layer without registered renderer"
             );
         }

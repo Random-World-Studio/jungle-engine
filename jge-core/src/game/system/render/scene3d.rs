@@ -79,7 +79,7 @@ impl RenderSystem {
                 None => {
                     warn!(
                         target: "jge-core",
-                        layer_id = entity.id(),
+                        layer_id = %entity.id(),
                         "Scene3D layer missing Layer component"
                     );
                     return;
@@ -91,7 +91,7 @@ impl RenderSystem {
                 None => {
                     warn!(
                         target: "jge-core",
-                        layer_id = entity.id(),
+                        layer_id = %entity.id(),
                         "Scene3D layer has no vertex shader attached"
                     );
                     return;
@@ -103,7 +103,7 @@ impl RenderSystem {
                 None => {
                     warn!(
                         target: "jge-core",
-                        layer_id = entity.id(),
+                        layer_id = %entity.id(),
                         "Scene3D layer has no fragment shader attached"
                     );
                     return;
@@ -122,7 +122,7 @@ impl RenderSystem {
         if width == 0 || height == 0 {
             warn!(
                 target: "jge-core",
-                layer_id = entity.id(),
+                layer_id = %entity.id(),
                 framebuffer_width = width,
                 framebuffer_height = height,
                 "Scene3D framebuffer has invalid dimensions"
@@ -140,7 +140,7 @@ impl RenderSystem {
             Err(error) => {
                 warn!(
                     target: "jge-core",
-                    layer_id = entity.id(),
+                    layer_id = %entity.id(),
                     error = %error,
                     "failed to prepare Scene3D pipeline"
                 );
@@ -154,7 +154,7 @@ impl RenderSystem {
                 None => {
                     warn!(
                         target: "jge-core",
-                        layer_id = entity.id(),
+                        layer_id = %entity.id(),
                         "Scene3D layer has no camera available"
                     );
                     return;
@@ -163,7 +163,7 @@ impl RenderSystem {
             Err(error) => {
                 warn!(
                     target: "jge-core",
-                    layer_id = entity.id(),
+                    layer_id = %entity.id(),
                     error = %error,
                     "Scene3D camera lookup failed"
                 );
@@ -176,8 +176,8 @@ impl RenderSystem {
             None => {
                 warn!(
                     target: "jge-core",
-                    layer_id = entity.id(),
-                    camera_id = camera_entity.id(),
+                    layer_id = %entity.id(),
+                    camera_id = %camera_entity.id(),
                     "Scene3D camera missing Camera component"
                 );
                 return;
@@ -188,7 +188,7 @@ impl RenderSystem {
             Err(error) => {
                 warn!(
                     target: "jge-core",
-                    layer_id = entity.id(),
+                    layer_id = %entity.id(),
                     framebuffer_height = height,
                     error = %error,
                     "Scene3D viewport config invalid"
@@ -202,8 +202,8 @@ impl RenderSystem {
             Err(error) => {
                 warn!(
                     target: "jge-core",
-                    layer_id = entity.id(),
-                    camera_id = camera_entity.id(),
+                    layer_id = %entity.id(),
+                    camera_id = %camera_entity.id(),
                     framebuffer_height = height,
                     error = %error,
                     "Scene3D camera viewport config invalid"
@@ -220,7 +220,7 @@ impl RenderSystem {
         if !(near_plane < far_plane) {
             warn!(
                 target: "jge-core",
-                layer_id = entity.id(),
+                layer_id = %entity.id(),
                 near_plane,
                 far_plane,
                 "Scene3D clip range invalid"
@@ -237,8 +237,8 @@ impl RenderSystem {
                 Err(error) => {
                     warn!(
                         target: "jge-core",
-                        layer_id = entity.id(),
-                        camera_id = camera_entity.id(),
+                        layer_id = %entity.id(),
+                        camera_id = %camera_entity.id(),
                         error = %error,
                         "Scene3D visibility query failed"
                     );
@@ -251,8 +251,8 @@ impl RenderSystem {
             None => {
                 warn!(
                     target: "jge-core",
-                    layer_id = entity.id(),
-                    camera_id = camera_entity.id(),
+                    layer_id = %entity.id(),
+                    camera_id = %camera_entity.id(),
                     "Scene3D camera missing Transform component"
                 );
                 return;
@@ -267,7 +267,7 @@ impl RenderSystem {
             Err(error) => {
                 warn!(
                     target: "jge-core",
-                    layer_id = entity.id(),
+                    layer_id = %entity.id(),
                     error = %error,
                     "Scene3D lighting query failed"
                 );
@@ -280,7 +280,7 @@ impl RenderSystem {
             Err(error) => {
                 warn!(
                     target: "jge-core",
-                    layer_id = entity.id(),
+                    layer_id = %entity.id(),
                     error = %error,
                     "Scene3D parallel lighting query failed"
                 );
@@ -354,7 +354,7 @@ impl RenderSystem {
         if point_lights.len() > MAX_SCENE3D_POINT_LIGHTS {
             warn!(
                 target: "jge-core",
-                layer_id = entity.id(),
+                layer_id = %entity.id(),
                 light_count = point_lights.len(),
                 max_supported = MAX_SCENE3D_POINT_LIGHTS,
                 "Scene3D truncating point lights to fit uniform capacity"
@@ -365,7 +365,7 @@ impl RenderSystem {
         if parallel_lights.len() > MAX_SCENE3D_PARALLEL_LIGHTS {
             warn!(
                 target: "jge-core",
-                layer_id = entity.id(),
+                layer_id = %entity.id(),
                 light_count = parallel_lights.len(),
                 max_supported = MAX_SCENE3D_PARALLEL_LIGHTS,
                 "Scene3D truncating parallel lights to fit uniform capacity"
@@ -445,8 +445,8 @@ impl RenderSystem {
                     Err(error) => {
                         warn!(
                             target: "jge-core",
-                            layer_id = entity.id(),
-                            bundle_entity = bundle.entity().id(),
+                            layer_id = %entity.id(),
+                            bundle_entity = %bundle.entity().id(),
                             error = %error,
                             "failed to prepare 3D material texture, fallback to default"
                         );
@@ -475,7 +475,7 @@ impl RenderSystem {
         if draws.is_empty() {
             trace!(
                 target: "jge-core",
-                layer_id = entity.id(),
+                layer_id = %entity.id(),
                 "Scene3D layer has no visible geometry"
             );
             return;
@@ -624,8 +624,8 @@ impl RenderSystem {
 
         trace!(
             target: "jge-core",
-            layer_id = entity.id(),
-            camera_id = camera_entity.id(),
+            layer_id = %entity.id(),
+            camera_id = %camera_entity.id(),
             draw_calls = draws.len(),
             vertex_total = total_vertices,
             "Scene3D layer rendered"

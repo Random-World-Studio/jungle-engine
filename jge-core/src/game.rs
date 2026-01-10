@@ -464,7 +464,7 @@ impl Game {
     ///
     /// 返回值的 chunk 划分与顺序由 `Node` 的内部存储决定；调用方通常会对每个 chunk 并发执行，
     /// 同时保持 chunk 内顺序遍历，以获得更好的缓存局部性并降低任务开销。
-    fn collect_logic_handle_chunks() -> Vec<Vec<(u64, GameLogicHandle)>> {
+    fn collect_logic_handle_chunks() -> Vec<Vec<(crate::game::entity::EntityId, GameLogicHandle)>> {
         Node::storage().collect_chunks_with(|entity_id, node| {
             node.logic().cloned().map(|logic| (entity_id, logic))
         })

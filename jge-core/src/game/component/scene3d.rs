@@ -389,6 +389,14 @@ impl Scene3D {
         let _ = self;
         layer.chunk_neighbors(center, radius)
     }
+
+    pub fn bind_camera(&mut self, camera_entity: Entity) -> Result<(), Scene3DAttachError> {
+        self.bind_camera_internal(camera_entity)
+    }
+
+    pub fn sync_camera_transform(&self) -> Result<(), Scene3DAttachError> {
+        self.sync_camera_transform_internal()
+    }
 }
 
 impl ComponentWrite<Scene3D> {

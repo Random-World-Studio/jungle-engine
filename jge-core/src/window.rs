@@ -232,7 +232,7 @@ impl GameWindow {
                 None => {
                     warn!(
                         target: "jge-core",
-                        entity_id = entity.id(),
+                        entity_id = %entity.id(),
                         "entity missing Node component, skip layer traversal"
                     );
                     continue;

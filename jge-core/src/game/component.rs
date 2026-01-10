@@ -43,8 +43,8 @@
 //! }
 //! ```
 
-pub mod camera;
 pub mod background;
+pub mod camera;
 pub mod layer;
 pub mod light;
 pub mod material;
@@ -59,17 +59,9 @@ pub use jge_macros::{component, component_impl};
 use parking_lot::{
     ArcRwLockReadGuard, ArcRwLockWriteGuard, Mutex, RawRwLock, RwLock, RwLockUpgradableReadGuard,
 };
-use std::{
-    any::type_name,
-    collections::HashMap,
-    fmt,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
-};
+use std::{any::type_name, collections::HashMap, fmt, sync::Arc};
 
-use crate::game::entity::Entity;
+use crate::game::entity::{Entity, EntityId};
 
 const CHUNK_SIZE: usize = 16;
 
@@ -182,7 +174,7 @@ impl std::error::Error for ComponentDependencyError {
 
 struct ComponentStorageInner<C> {
     chunks: Vec<Arc<ComponentChunk<C>>>,
-    entity_to_location: HashMap<u64, ComponentLocation>,
+    entity_to_location: HashMap<EntityId, ComponentLocation>,
     chunks_with_free_slots: Vec<usize>,
 }
 
@@ -202,25 +194,23 @@ struct ComponentLocation {
     slot: usize,
 }
 
-const EMPTY_ENTITY_ID: u64 = u64::MAX;
-
 struct ComponentSlot<C> {
     value: Arc<RwLock<Option<C>>>,
-    entity_id: AtomicU64,
+    entity_id: RwLock<Option<EntityId>>,
 }
 
 impl<C> ComponentSlot<C> {
     fn new() -> Self {
         Self {
             value: Arc::new(RwLock::new(None)),
-            entity_id: AtomicU64::new(EMPTY_ENTITY_ID),
+            entity_id: RwLock::new(None),
         }
     }
 
-    fn replace(&self, entity_id: u64, value: C) -> Option<C> {
+    fn replace(&self, entity_id: EntityId, value: C) -> Option<C> {
         let mut guard = self.value.write();
         let previous = guard.replace(value);
-        self.entity_id.store(entity_id, Ordering::Relaxed);
+        *self.entity_id.write() = Some(entity_id);
         previous
     }
 
@@ -228,7 +218,7 @@ impl<C> ComponentSlot<C> {
         let mut guard = self.value.write();
         let removed = guard.take();
         if removed.is_some() {
-            self.entity_id.store(EMPTY_ENTITY_ID, Ordering::Relaxed);
+            *self.entity_id.write() = None;
         }
         removed
     }
@@ -243,8 +233,10 @@ impl<C> ComponentSlot<C> {
         if guard.is_some() { Some(guard) } else { None }
     }
 
-    fn entity_id(&self) -> u64 {
-        self.entity_id.load(Ordering::Relaxed)
+    fn entity_id(&self) -> EntityId {
+        self.entity_id
+            .read()
+            .expect("组件槽位出现不一致状态: entity_id 缺失")
     }
 }
 
@@ -262,7 +254,7 @@ impl<C> ComponentChunk<C> {
         Self { slots, freelist }
     }
 
-    fn allocate(&self, entity_id: u64, value: C) -> (usize, Option<C>, bool) {
+    fn allocate(&self, entity_id: EntityId, value: C) -> (usize, Option<C>, bool) {
         let mut freelist = self.freelist.lock();
         let slot = freelist.pop().expect("尝试在已满的块中分配槽位");
         let has_more_free = !freelist.is_empty();
@@ -272,7 +264,7 @@ impl<C> ComponentChunk<C> {
         (slot, previous, has_more_free)
     }
 
-    fn replace(&self, slot: usize, entity_id: u64, value: C) -> Option<C> {
+    fn replace(&self, slot: usize, entity_id: EntityId, value: C) -> Option<C> {
         self.slot(slot).replace(entity_id, value)
     }
 
@@ -312,7 +304,7 @@ impl<C> ComponentStorage<C> {
 
     pub fn collect_with<T, F>(&self, mut f: F) -> Vec<T>
     where
-        F: FnMut(u64, &C) -> Option<T>,
+        F: FnMut(EntityId, &C) -> Option<T>,
     {
         let guard = self.inner.read();
         let mut results = Vec::new();
@@ -321,8 +313,7 @@ impl<C> ComponentStorage<C> {
             for slot in &chunk.slots {
                 let value_guard = slot.value.read();
                 if let Some(component) = value_guard.as_ref() {
-                    let entity_id = slot.entity_id.load(Ordering::Relaxed);
-                    debug_assert!(entity_id != EMPTY_ENTITY_ID, "组件槽位缺少实体标识");
+                    let entity_id = slot.entity_id();
                     if let Some(mapped) = f(entity_id, component) {
                         results.push(mapped);
                     }
@@ -335,7 +326,7 @@ impl<C> ComponentStorage<C> {
 
     pub fn collect_chunks_with<T, F>(&self, mut f: F) -> Vec<Vec<T>>
     where
-        F: FnMut(u64, &C) -> Option<T>,
+        F: FnMut(EntityId, &C) -> Option<T>,
     {
         let guard = self.inner.read();
         let mut results: Vec<Vec<T>> = Vec::new();
@@ -345,8 +336,7 @@ impl<C> ComponentStorage<C> {
             for slot in &chunk.slots {
                 let value_guard = slot.value.read();
                 if let Some(component) = value_guard.as_ref() {
-                    let entity_id = slot.entity_id.load(Ordering::Relaxed);
-                    debug_assert!(entity_id != EMPTY_ENTITY_ID, "组件槽位缺少实体标识");
+                    let entity_id = slot.entity_id();
                     if let Some(mapped) = f(entity_id, component) {
                         chunk_results.push(mapped);
                     }
@@ -360,7 +350,7 @@ impl<C> ComponentStorage<C> {
         results
     }
 
-    pub fn insert(&self, entity_id: u64, component: C) -> Option<C> {
+    pub fn insert(&self, entity_id: EntityId, component: C) -> Option<C> {
         let guard = self.inner.upgradable_read();
         if let Some(location) = guard.entity_to_location.get(&entity_id).copied() {
             let chunk = guard.chunks[location.chunk].clone();
@@ -397,7 +387,7 @@ impl<C> ComponentStorage<C> {
         None
     }
 
-    pub fn get(&'static self, entity_id: u64) -> Option<ComponentRead<C>> {
+    pub fn get(&'static self, entity_id: EntityId) -> Option<ComponentRead<C>> {
         let (chunk, slot) = {
             let guard = self.inner.read();
             let location = guard.entity_to_location.get(&entity_id)?;
@@ -406,7 +396,7 @@ impl<C> ComponentStorage<C> {
         ComponentRead::new(chunk, slot)
     }
 
-    pub fn get_mut(&'static self, entity_id: u64) -> Option<ComponentWrite<C>> {
+    pub fn get_mut(&'static self, entity_id: EntityId) -> Option<ComponentWrite<C>> {
         let (chunk, slot) = {
             let guard = self.inner.read();
             let location = guard.entity_to_location.get(&entity_id)?;
@@ -415,7 +405,7 @@ impl<C> ComponentStorage<C> {
         ComponentWrite::new(chunk, slot)
     }
 
-    pub fn remove(&self, entity_id: u64) -> Option<C> {
+    pub fn remove(&self, entity_id: EntityId) -> Option<C> {
         let guard = self.inner.upgradable_read();
         let location = match guard.entity_to_location.get(&entity_id).copied() {
             Some(location) => location,

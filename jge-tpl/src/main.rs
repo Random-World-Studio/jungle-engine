@@ -5,7 +5,7 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{Context, anyhow, ensure};
+use anyhow::{Context, anyhow};
 use async_trait::async_trait;
 use nalgebra::{Vector2, Vector3};
 
@@ -20,6 +20,7 @@ use jge_core::{
         component::{
             background::Background,
             camera::Camera,
+            layer::LayerShader,
             layer::{Layer, LayerViewport, ShaderLanguage},
             light::{Light, ParallelLight, PointLight},
             material::Material,
@@ -33,7 +34,8 @@ use jge_core::{
         system::logic::GameLogic,
     },
     logger,
-    resource::{Resource, ResourceHandle, ResourcePath},
+    resource::{Resource, ResourcePath},
+    scene,
 };
 use tracing::{info, warn};
 use winit::dpi::PhysicalPosition;
@@ -227,43 +229,126 @@ fn map_key_event_to_camera_action(event: &KeyEvent) -> Option<CameraAction> {
 }
 
 fn build_demo_scene() -> anyhow::Result<Entity> {
-    let root = Entity::new().context("创建根实体失败")?;
+    register_demo_resources()?;
+    let bindings = scene! {
+        node {
+            node as scene3d_layer {
+                + Layer::new() => |_, mut layer| -> anyhow::Result<()> {
+                    if std::env::var("JGE_DEMO_LAYER_VIEWPORT").ok().as_deref() == Some("1") {
+                        layer.set_viewport(LayerViewport::normalized(0.05, 0.05, 0.45, 0.45));
+                    }
+                    Ok(())
+                };
 
-    spawn_scene3d_layer(root).context("创建 Scene3D 图层失败")?;
+                + Scene3D::new();
 
-    Ok(root)
-}
+                + Background::new() => resource(horizon_fs = "shaders/demo/background_horizon.fs") |_, mut bg| -> anyhow::Result<()> {
+                    // 天蓝色（SkyBlue）
+                    bg.set_color([0.53, 0.81, 0.92, 1.0]);
+                    bg.set_fragment_shader(Some(LayerShader::new(ShaderLanguage::Wgsl, horizon_fs)));
+                    Ok(())
+                };
 
-fn attach_to_parent(entity: Entity, parent: Entity, message: &str) -> anyhow::Result<()> {
-    let mut parent_node = parent
-        .get_component_mut::<Node>()
-        .with_context(|| format!("{message}: 父节点缺少 Node 组件"))?;
-    parent_node
-        .attach(entity)
-        .with_context(|| message.to_owned())?;
-    Ok(())
-}
+                node as camera {
+                    + Camera::new();
 
-fn spawn_camera(parent: Entity) -> anyhow::Result<Entity> {
-    let entity = Entity::new().context("创建摄像机实体失败")?;
-    let _ = entity
-        .register_component(Camera::new())
-        .context("为实体注册 Camera 组件失败")?;
-    attach_to_parent(entity, parent, "将摄像机挂载到父节点失败")?;
+                    with(mut transform: Transform, mut node: Node) {
+                        transform.set_position(Vector3::new(0.0, 6.0, 6.0));
+                        // +Y 向上：默认 forward 为 -Z，因此 pitch 需要为负才能“向下看”到地面。
+                        transform.set_rotation(Vector3::new(-FRAC_PI_4, 0.0, 0.0));
+                        node.set_logic(CameraControllerLogic::new());
+                        Ok(())
+                    }
+                }
 
-    if let Some(mut transform) = entity.get_component_mut::<Transform>() {
-        transform.set_position(Vector3::new(0.0, 6.0, 6.0));
-        // +Y 向上：默认 forward 为 -Z，因此 pitch 需要为负才能“向下看”到地面。
-        transform.set_rotation(Vector3::new(-FRAC_PI_4, 0.0, 0.0));
-    }
+                // 绑定摄像机并同步变换（依赖执行顺序与作用域规则：camera 在此已可见）。
+                with(mut scene: Scene3D) {
+                    scene
+                        .bind_camera(camera)
+                        .context("为 Scene3D 图层绑定摄像机失败")?;
+                    Ok(())
+                }
 
-    // 为摄像头挂载控制逻辑：WASD/QE 移动，方向键旋转。
-    let mut node = entity
-        .get_component_mut::<Node>()
-        .context("为摄像机挂载逻辑失败: 缺少 Node 组件")?;
-    node.set_logic(CameraControllerLogic::new());
+                with(scene: Scene3D) {
+                    scene.sync_camera_transform().context("同步 Scene3D 摄像机变换失败")?;
+                    Ok(())
+                }
 
-    Ok(entity)
+                node {
+                    + Shape::from_triangles(ground_triangles());
+                    with(mut transform: Transform) {
+                        transform.set_position(Vector3::new(0.0, 0.0, 0.0));
+                        transform.set_rotation(Vector3::new(0.0, 0.0, 0.0));
+                        transform.set_scale(Vector3::new(6.0, 1.0, 6.0));
+                        Ok(())
+                    }
+                }
+
+                node {
+                    + PointLight::new(15.0);
+                    with(mut transform: Transform, mut light: Light) {
+                        if let Some(mut renderable) = e.get_component_mut::<Renderable>() {
+                            renderable.set_enabled(false);
+                        }
+                        transform.set_position(Vector3::new(6.0, 1.0, 6.0));
+                        light.set_lightness(1.0);
+                        Ok(())
+                    }
+                }
+
+                node {
+                    + ParallelLight::new();
+                    with(mut transform: Transform, mut light: Light) {
+                        if let Some(mut renderable) = e.get_component_mut::<Renderable>() {
+                            renderable.set_enabled(false);
+                        }
+                        transform.set_rotation(Vector3::new(-0.3, -std::f32::consts::PI, 0.0));
+                        light.set_lightness(0.7);
+                        Ok(())
+                    }
+                }
+
+                node {
+                    + Shape::from_triangles(triangle_triangles());
+                    with(mut transform: Transform) {
+                        transform.set_position(Vector3::new(0.0, 0.5, -4.0));
+                        transform.set_rotation(Vector3::new(0.0, 0.3, 0.0));
+                        transform.set_scale(Vector3::new(1.6, 1.6, 1.6));
+                        Ok(())
+                    }
+                }
+
+                node {
+                    + Shape::from_triangles(triangle_triangles());
+                    with(mut transform: Transform) {
+                        transform.set_position(Vector3::new(-2.5, 0.9, -6.0));
+                        transform.set_rotation(Vector3::new(0.2, -0.3, 0.1));
+                        transform.set_scale(Vector3::new(1.2, 1.2, 1.2));
+                        Ok(())
+                    }
+                }
+
+                node {
+                    + Shape::from_triangles(cube_triangles());
+
+                    + Material::new(bamboo, Vec::new()) => resource(bamboo = "textures/bamboo.png") |_, mut mat| -> anyhow::Result<()> {
+                        let triangles = cube_triangles();
+                        let patches = compute_cube_uv_patches(&triangles).context("计算立方体 UV patches 失败")?;
+                        mat.set_regions(patches);
+                        Ok(())
+                    };
+
+                    with(mut transform: Transform, mut node: Node) {
+                        transform.set_position(Vector3::new(-3.0, 0.5, 0.0));
+                        node.set_logic(CubeLogic);
+                        Ok(())
+                    }
+                }
+            }
+        }
+    };
+
+    Ok(bindings?.root)
 }
 
 struct CameraControllerLogic {
@@ -410,8 +495,28 @@ impl GameLogic for CameraControllerLogic {
     }
 }
 
-fn spawn_ground(parent: Entity) -> anyhow::Result<()> {
-    let triangles = vec![
+fn register_demo_resources() -> anyhow::Result<()> {
+    // Background horizon fragment shader
+    Resource::register(
+        ResourcePath::from("shaders/demo/background_horizon.fs"),
+        Resource::from_memory(Vec::from(include_bytes!(
+            "resource/shaders/background_horizon.fs"
+        ))),
+    )
+    .context("注册 Background horizon shader 资源失败")?;
+
+    // Bamboo texture
+    Resource::register(
+        ResourcePath::from("textures/bamboo.png"),
+        Resource::from_memory(Vec::from(include_bytes!("resource/bamboo.png"))),
+    )
+    .context("注册竹子材质资源失败")?;
+
+    Ok(())
+}
+
+fn ground_triangles() -> Vec<[Vector3<f32>; 3]> {
+    vec![
         [
             Vector3::new(-1.0, 0.0, -1.0),
             Vector3::new(-1.0, 0.0, 1.0),
@@ -422,58 +527,20 @@ fn spawn_ground(parent: Entity) -> anyhow::Result<()> {
             Vector3::new(-1.0, 0.0, 1.0),
             Vector3::new(1.0, 0.0, 1.0),
         ],
-    ];
-
-    let _ = spawn_shape(
-        parent,
-        Vector3::new(0.0, 0.0, 0.0),
-        Vector3::new(0.0, 0.0, 0.0),
-        Vector3::new(6.0, 1.0, 6.0),
-        triangles,
-        None,
-    )?;
-
-    Ok(())
+    ]
 }
 
-fn spawn_point_light(parent: Entity) -> anyhow::Result<()> {
-    let entity = Entity::new().context("创建点光源实体失败")?;
-    let _ = entity
-        .register_component(PointLight::new(15.0))
-        .context("为点光源注册 PointLight 组件失败")?;
-    attach_to_parent(entity, parent, "将点光源挂载到父节点失败")?;
-
-    if let Some(mut renderable) = entity.get_component_mut::<Renderable>() {
-        renderable.set_enabled(false);
-    }
-    if let Some(mut transform) = entity.get_component_mut::<Transform>() {
-        transform.set_position(Vector3::new(6.0, 1.0, 6.0));
-    }
-    if let Some(mut light) = entity.get_component_mut::<Light>() {
-        light.set_lightness(1.0);
-    }
-
-    Ok(())
-}
-
-fn spawn_triangle(
-    parent: Entity,
-    position: Vector3<f32>,
-    rotation: Vector3<f32>,
-    scale: Vector3<f32>,
-) -> anyhow::Result<()> {
-    let triangles = vec![[
+fn triangle_triangles() -> Vec<[Vector3<f32>; 3]> {
+    vec![[
         Vector3::new(0.0, 0.6, 0.0),
         Vector3::new(-0.5, -0.4, 0.0),
         Vector3::new(0.5, -0.4, 0.0),
-    ]];
-
-    spawn_shape(parent, position, rotation, scale, triangles, None).map(|_| ())
+    ]]
 }
 
-fn spawn_cube(parent: Entity, position: Vector3<f32>) -> anyhow::Result<()> {
+fn cube_triangles() -> Vec<[Vector3<f32>; 3]> {
     let half = 0.5;
-    let triangles = vec![
+    vec![
         [
             Vector3::new(-half, -half, half),
             Vector3::new(half, -half, half),
@@ -534,42 +601,7 @@ fn spawn_cube(parent: Entity, position: Vector3<f32>) -> anyhow::Result<()> {
             Vector3::new(half, -half, -half),
             Vector3::new(half, -half, half),
         ],
-    ];
-
-    let (material_handle, patches) =
-        prepare_bamboo_material(&triangles).context("准备竹子材质失败")?;
-
-    let cube = spawn_shape(
-        parent,
-        position,
-        Vector3::new(0.0, 0.0, 0.0),
-        Vector3::new(1.0, 1.0, 1.0),
-        triangles,
-        Some((material_handle, patches)),
-    )?;
-
-    // Attach demo logic so each frame reports render timing for the cube entity.
-    let mut node = cube
-        .get_component_mut::<Node>()
-        .context("为立方体注册逻辑失败: 缺少 Node 组件")?;
-    node.set_logic(CubeLogic);
-
-    Ok(())
-}
-
-fn prepare_bamboo_material(
-    triangles: &[[Vector3<f32>; 3]],
-) -> anyhow::Result<(ResourceHandle, Vec<[Vector2<f32>; 3]>)> {
-    let resource_path = ResourcePath::from("textures/bamboo.png");
-    Resource::register(
-        resource_path.clone(),
-        Resource::from_memory(Vec::from(include_bytes!("resource/bamboo.png"))),
-    )
-    .context("注册竹子材质资源失败")?;
-    let handle = Resource::from(resource_path.clone()).context("获取竹子材质资源句柄失败")?;
-
-    let patches = compute_cube_uv_patches(triangles)?;
-    Ok((handle, patches))
+    ]
 }
 
 fn compute_cube_uv_patches(
@@ -666,145 +698,6 @@ fn compute_cube_uv_patches(
     }
 
     Ok(patches)
-}
-
-fn spawn_shape(
-    parent: Entity,
-    position: Vector3<f32>,
-    rotation: Vector3<f32>,
-    scale: Vector3<f32>,
-    triangles: Vec<[Vector3<f32>; 3]>,
-    material: Option<(ResourceHandle, Vec<[Vector2<f32>; 3]>)>,
-) -> anyhow::Result<Entity> {
-    let entity = Entity::new().context("创建子实体失败")?;
-    let shape = Shape::from_triangles(triangles);
-    let triangle_count = shape.triangle_count();
-    let _ = entity
-        .register_component(shape)
-        .context("为子实体注册 Shape 组件失败")?;
-    attach_to_parent(entity, parent, "将子实体挂载到父节点失败")?;
-
-    if let Some((resource, regions)) = material {
-        ensure!(
-            regions.len() == triangle_count,
-            "材质贴图区域数量与三角形数量不匹配"
-        );
-        let _ = entity
-            .register_component(Material::new(resource, regions))
-            .context("为子实体注册 Material 组件失败")?;
-    }
-
-    if let Some(mut transform) = entity.get_component_mut::<Transform>() {
-        transform.set_position(position);
-        transform.set_rotation(rotation);
-        transform.set_scale(scale);
-    }
-
-    Ok(entity)
-}
-
-fn spawn_parallel_light(parent: Entity) -> anyhow::Result<()> {
-    let entity = Entity::new().context("创建平行光实体失败")?;
-    let _ = entity
-        .register_component(ParallelLight::new())
-        .context("为平行光注册 ParallelLight 组件失败")?;
-    attach_to_parent(entity, parent, "将平行光挂载到父节点失败")?;
-
-    if let Some(mut renderable) = entity.get_component_mut::<Renderable>() {
-        renderable.set_enabled(false);
-    }
-
-    if let Some(mut transform) = entity.get_component_mut::<Transform>() {
-        transform.set_rotation(Vector3::new(-0.3, -std::f32::consts::PI, 0.0));
-    }
-
-    if let Some(mut light) = entity.get_component_mut::<Light>() {
-        light.set_lightness(0.7);
-    }
-
-    Ok(())
-}
-
-fn spawn_scene3d_layer(parent: Entity) -> anyhow::Result<Entity> {
-    let entity = Entity::new().context("创建 Scene3D 图层实体失败")?;
-    let mut layer = Layer::new();
-    if std::env::var("JGE_DEMO_LAYER_VIEWPORT").ok().as_deref() == Some("1") {
-        layer.set_viewport(LayerViewport::normalized(0.05, 0.05, 0.45, 0.45));
-    }
-    let _ = entity
-        .register_component(layer)
-        .context("为 Scene3D 图层注册 Layer 组件失败")?;
-    let _ = entity
-        .register_component(Scene3D::new())
-        .context("注册 Scene3D 组件失败")?;
-    attach_to_parent(entity, parent, "将 Scene3D 图层挂载到父节点失败")?;
-
-    // 注册并挂载 Background：天蓝色纯色 + 自定义 horizon 渐变 shader。
-    Resource::register(
-        ResourcePath::from("shaders/demo/background_horizon.fs"),
-        Resource::from_memory(Vec::from(include_bytes!(
-            "resource/shaders/background_horizon.fs"
-        ))),
-    )
-    .context("注册 Background horizon shader 资源失败")?;
-
-    {
-        let mut bg = Background::new();
-        // 天蓝色（SkyBlue）
-        bg.set_color([0.53, 0.81, 0.92, 1.0]);
-        bg.set_fragment_shader_from_path(
-            ShaderLanguage::Wgsl,
-            ResourcePath::from("shaders/demo/background_horizon.fs"),
-        )
-        .context("设置 Background horizon shader 失败")?;
-
-        let _ = entity
-            .register_component(bg)
-            .context("为 Scene3D 图层挂载 Background 组件失败")?;
-    }
-
-    let camera = spawn_camera(entity).context("创建 Scene3D 摄像机失败")?;
-    {
-        let mut scene = entity
-            .get_component_mut::<Scene3D>()
-            .context("Scene3D 图层缺少 Scene3D 组件")?;
-        scene
-            .bind_camera(camera)
-            .context("为 Scene3D 图层绑定摄像机失败")?;
-    }
-
-    {
-        let scene = entity
-            .get_component::<Scene3D>()
-            .context("Scene3D 图层缺少 Scene3D 组件")?;
-        scene
-            .sync_camera_transform()
-            .context("同步 Scene3D 摄像机变换失败")?;
-    }
-
-    spawn_ground(entity).context("Scene3D 图层创建地面失败")?;
-    spawn_point_light(entity).context("Scene3D 图层创建点光源失败")?;
-    spawn_parallel_light(entity).context("Scene3D 图层创建平行光失败")?;
-
-    spawn_triangle(
-        entity,
-        Vector3::new(0.0, 0.5, -4.0),
-        Vector3::new(0.0, 0.3, 0.0),
-        Vector3::new(1.6, 1.6, 1.6),
-    )
-    .context("Scene3D 图层创建中央三角形失败")?;
-
-    spawn_triangle(
-        entity,
-        Vector3::new(-2.5, 0.9, -6.0),
-        Vector3::new(0.2, -0.3, 0.1),
-        Vector3::new(1.2, 1.2, 1.2),
-    )
-    .context("Scene3D 图层创建侧边三角形失败")?;
-
-    spawn_cube(entity, Vector3::new(-3.0, 0.5, 0.0)).context("Scene3D 图层创建立方体失败")?;
-
-    Ok(entity)
 }
 
 struct CubeLogic;

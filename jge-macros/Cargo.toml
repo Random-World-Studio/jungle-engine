@@ -6,9 +6,15 @@ edition = "2024"
 [lib]
 proc-macro = true
 
+[features]
+# 启用后：scene!("...") 的相对路径会以“宏调用点源文件的父目录”为基准。
+# 需要 nightly（依赖 `proc_macro_span`）。
+callsite_relative_paths = []
+
 [dependencies]
 proc-macro2 = "1.0"
 quote = "1.0"
 syn = { version = "2.0", features = ["full"] }
 heck = "0.4"
 inventory = "0.3"
+proc-macro-crate = "3.1"

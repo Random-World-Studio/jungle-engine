@@ -36,7 +36,7 @@ impl fmt::Debug for Node {
 #[component_impl]
 impl Node {
     /// 构造节点组件并校验名称规则。
-    #[default(format!("entity_{}", entity.id()))]
+    #[default(format!("{}", entity.id()))]
     pub fn new(name: impl Into<String>) -> Result<Self, NodeNameError> {
         let name = name.into();
         Self::validate_name(&name)?;
@@ -57,6 +57,14 @@ impl Node {
     /// 返回节点名称。
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// 设置节点名称并校验名称规则。
+    pub fn set_name(&mut self, name: impl Into<String>) -> Result<(), NodeNameError> {
+        let name = name.into();
+        Self::validate_name(&name)?;
+        self.name = name;
+        Ok(())
     }
 
     /// 返回父节点实体（若存在）。
@@ -142,9 +150,9 @@ impl Node {
                 Self::nearest_layer_ancestor_with_hint(parent_entity, self.parent)?
             {
                 warn!(
-                    child_id = child.id(),
-                    parent_id = parent_entity.id(),
-                    ancestor_layer_id = ancestor_layer.id(),
+                    child_id = %child.id(),
+                    parent_id = %parent_entity.id(),
+                    ancestor_layer_id = %ancestor_layer.id(),
                     "尝试在已有 Layer 树中挂载子 Layer，子 Layer 将在遍历时被忽略"
                 );
             }
@@ -348,7 +356,7 @@ impl Node {
             if let Err(err) = result {
                 warn!(
                     target: "jge-core",
-                    entity_id = entity.id(),
+                    entity_id = %entity.id(),
                     lifecycle_event = event.label(),
                     error = %err,
                     "GameLogic lifecycle callback failed"
