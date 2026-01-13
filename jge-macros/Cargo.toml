@@ -18,3 +18,4 @@ syn = { version = "2.0", features = ["full"] }
 heck = "0.4"
 inventory = "0.3"
 proc-macro-crate = "3.1"
+serde_yaml = "0.9"

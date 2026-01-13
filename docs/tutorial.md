@@ -287,23 +287,78 @@ fn on_event(event: &Event) {
 
 ## 7. 材质（Material）与资源（Resource）
 
+- 先用 `resource!` 宏注册纹理/着色器等资源
+- 再在 `scene!` 里把纹理句柄注入到 `Material` 组件
+
+### 7.1 资源系统（resource! 宏）
+
+引擎提供 `resource!` 宏，用一份 YAML 描述“资源树”，并在编译期展开为一串注册调用。
+
+推荐把 YAML 放在 `src/` 下（和调用点源文件同目录更直观）。例如创建：
+
+- `src/resources.yaml`
+- `src/resource/shaders/background_horizon.fs`
+- `src/resource/bamboo.png`
+
+然后在 `src/resources.yaml` 写：
+
+```yaml
+- shaders:
+  - demo:
+    - background_horizon.fs: embed
+      from: "resource/shaders/background_horizon.fs"
+- textures:
+  - bamboo.png: embed
+    from: "resource/bamboo.png"
+```
+
+在 `src/main.rs` 里注册（通常在 `Game::new(...)` 之前调用一次）：
+
+```rust
+fn register_resources() -> anyhow::Result<()> {
+        // YAML 文件路径相对当前源文件所在目录（此处是 src/）。
+        jge_core::resource!("resources.yaml")?;
+        Ok(())
+}
+```
+
+### 7.2 三种资源类型
+
+- `embed`：编译期嵌入（`include_bytes!`），适合纹理/着色器等随二进制分发的资源。
+- `fs`：磁盘懒加载（`Resource::from_file`），适合开发期热改或超大文件。
+- `txt`：内联文本（写在 YAML 里）。注意：`txt` 必须是 **YAML 字符串标量**，推荐使用 `|` 块标量：
+
+```yaml
+- config:
+    - hello.txt: txt
+        txt: |
+            hello
+            world
+```
+
+### 7.3 路径规则（重点）
+
+这里有两层“相对路径”，基准不同：
+
+1) `resource!("...")` 这个 **YAML 文件路径**：相对“宏调用点所在源文件”的目录解析。
+
+2) YAML 中每个节点的 `from:` **资源文件路径**：
+
+- 当使用 `resource!(r#"..."#)` **内联 YAML** 时，`from:` 相对“宏调用点所在源文件”的目录。
+- 当使用 `resource!("path/to/resources.yaml")` **从文件读取 YAML** 时，`from:` 相对该 YAML 文件自身所在目录。
+
+这一设计的好处是：当你的资源声明放在单独的 YAML 文件里时，你可以把 **YAML 与它引用的资源文件按相对布局一起移动/复用**（例如把整个资源目录从 `assets/` 移到 `content/`）。
+注意：如果你只移动 YAML 而不移动对应资源文件，那么 `from:` 的相对路径会随之改变，通常会导致资源找不到。
+
+### 7.4 材质（Material）使用纹理资源
+
 `Material` 组件需要一个纹理资源句柄（`ResourceHandle`）以及一组 UV patch（每个三角形对应 3 个 UV 坐标）。
 你可以先从“只挂纹理资源，UV 之后再补”开始：
 
-1) 注册资源（通常用 `include_bytes!` 打包到二进制里）：
+1) 先注册纹理资源：
 
 ```rust
-use anyhow::Context;
-use jge_core::resource::{Resource, ResourcePath};
-
-fn register_resources() -> anyhow::Result<()> {
-    Resource::register(
-        ResourcePath::from("textures/bamboo.png"),
-        Resource::from_memory(Vec::from(include_bytes!("resource/bamboo.png"))),
-    )
-    .context("注册纹理资源失败")?;
-    Ok(())
-}
+register_resources()?;
 ```
 
 2) 在 `scene!` 里挂 `Material`（用 `resource(...)` 把句柄注入到配置闭包里）：

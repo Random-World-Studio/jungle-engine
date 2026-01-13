@@ -27,3 +27,6 @@ image = { version = "0.25", default-features = false, features = [
 ] }
 inventory = "0.3"
 uuid = { version = "1.11", features = ["v4"] }
+
+[dev-dependencies]
+trybuild = "1.0"

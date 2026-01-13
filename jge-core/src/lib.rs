@@ -85,3 +85,75 @@ pub use game::Game;
 /// }
 /// ```
 pub use jge_macros::scene;
+
+/// 资源 DSL 宏：用 YAML 描述一棵“资源树”，并在编译期展开成一串
+/// [`resource::Resource::register`](crate::resource::Resource::register) 调用。
+///
+/// 该宏由 `jge-core` 重导出，因此游戏项目只需要依赖 `jge-core` 即可使用。
+///
+/// # 输入形式
+///
+/// - **内联 YAML**：`resource!(r#"..."#)`
+/// - **从文件读取**：`resource!("path/to/resources.yaml")`
+///
+/// 当参数字符串以 `.yaml`/`.yml` 结尾时，宏会把它当作文件路径解析：
+/// - 文件 **必须存在**，否则在编译期报错。
+/// - 文件内容会作为编译依赖被追踪（修改 YAML 会触发重新编译）。
+///
+/// # 路径规则
+///
+/// - 资源逻辑路径：由 YAML 的目录层级拼接而成，使用 `/` 作为分隔符，例如 `textures/ui/button.png`。
+/// - `from` 相对路径：
+///   - **内联 YAML**：以 **宏调用点源代码文件的父目录** 为基准解析。
+///   - **从文件读取 YAML**：以该 **YAML 文件所在目录** 为基准解析。
+///
+/// # YAML 语法（精简 BNF）
+///
+/// 顶层必须是一个列表：
+///
+/// ```text
+/// - <dir_name>: [ <node>... ]
+/// - <res_name>: embed|fs|txt
+///   from: <path>     # embed/fs 必须
+/// - <res_name>: txt
+///   txt: |\n...      # txt 必须（必须是 YAML 字符串标量；推荐用 | 块标量）
+/// ```
+///
+/// 约束：
+/// - 目录名/资源名（每个路径段）不能为空，且 **不允许包含 `/`**。
+/// - 同一个宏展开内的逻辑路径不能重复。
+/// - `embed`/`fs` 不允许出现 `txt` 字段；`txt` 不允许出现 `from` 字段。
+///
+/// # 三种资源类型
+///
+/// - `embed`：编译期嵌入（`include_bytes!`），适合纹理/着色器等随二进制分发的资源。
+/// - `fs`：磁盘懒加载（`Resource::from_file`），适合开发期热改或超大文件。
+/// - `txt`：内联文本（写在 YAML 里），适合小配置/小片段。
+///
+/// # 示例：内联 YAML
+///
+/// ```no_run
+/// fn register_resources_inline() -> ::anyhow::Result<()> {
+///     ::jge_core::resource!(r#"
+/// - textures:
+///   - hello.txt: txt
+///     txt: |
+///       hello
+///       world
+/// "#)?;
+///     Ok(())
+/// }
+/// ```
+///
+/// # 示例：从文件读取
+///
+/// ```ignore
+/// fn register_resources_from_file() -> ::anyhow::Result<()> {
+///     // 说明：
+///     // - YAML 文件路径（assets/resources.yaml）仍然相对“本行所在源文件的父目录”。
+///     // - YAML 里的 `from:` 相对路径则相对 YAML 文件自身所在目录。
+///     ::jge_core::resource!("assets/resources.yaml")?;
+///     Ok(())
+/// }
+/// ```
+pub use jge_macros::resource;

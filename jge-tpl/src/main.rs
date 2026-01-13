@@ -33,9 +33,7 @@ use jge_core::{
         entity::Entity,
         system::logic::GameLogic,
     },
-    logger,
-    resource::{Resource, ResourcePath},
-    scene,
+    logger, scene,
 };
 use tracing::{info, warn};
 use winit::dpi::PhysicalPosition;
@@ -57,6 +55,8 @@ struct MouseState {
 
 fn main() -> anyhow::Result<()> {
     logger::init()?;
+
+    jge_core::resource!("resources.yaml")?;
 
     let root = build_demo_scene().context("构建测试场景失败")?;
 
@@ -229,7 +229,6 @@ fn map_key_event_to_camera_action(event: &KeyEvent) -> Option<CameraAction> {
 }
 
 fn build_demo_scene() -> anyhow::Result<Entity> {
-    register_demo_resources()?;
     let bindings = scene! {
         node {
             node as scene3d_layer {
@@ -493,26 +492,6 @@ impl GameLogic for CameraControllerLogic {
 
         Ok(())
     }
-}
-
-fn register_demo_resources() -> anyhow::Result<()> {
-    // Background horizon fragment shader
-    Resource::register(
-        ResourcePath::from("shaders/demo/background_horizon.fs"),
-        Resource::from_memory(Vec::from(include_bytes!(
-            "resource/shaders/background_horizon.fs"
-        ))),
-    )
-    .context("注册 Background horizon shader 资源失败")?;
-
-    // Bamboo texture
-    Resource::register(
-        ResourcePath::from("textures/bamboo.png"),
-        Resource::from_memory(Vec::from(include_bytes!("resource/bamboo.png"))),
-    )
-    .context("注册竹子材质资源失败")?;
-
-    Ok(())
 }
 
 fn ground_triangles() -> Vec<[Vector3<f32>; 3]> {

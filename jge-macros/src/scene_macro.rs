@@ -5,6 +5,17 @@ use syn::parse_macro_input;
 
 use std::path::PathBuf;
 
+fn is_rust_analyzer_env() -> bool {
+    // rust-analyzer 的 proc-macro 展开运行在 VS Code extension host 环境里。
+    // 在该环境下我们不做任何文件读取/解析，避免“路径不存在”的误报污染编辑器诊断。
+    std::env::var("ELECTRON_RUN_AS_NODE").ok().as_deref() == Some("1")
+        && std::env::var("VSCODE_CRASH_REPORTER_PROCESS_TYPE")
+            .ok()
+            .as_deref()
+            == Some("extensionHost")
+        && std::env::var("VSCODE_IPC_HOOK").ok().is_some()
+}
+
 // ===== scene! DSL =====
 
 mod scene_dsl {
@@ -595,6 +606,21 @@ pub fn expand_scene(input: TokenStream) -> TokenStream {
 
     // 支持：scene!("path/to/file.jgs") —— 编译期从文件读取 DSL。
     if let Ok(path_lit) = syn::parse2::<syn::LitStr>(input2.clone()) {
+        if is_rust_analyzer_env() {
+            // RA 环境下：不读取文件、不解析 DSL、不生成节点树，仅返回最小占位实现。
+            // 这能让编辑器不再报“路径不存在”，但 bindings 字段信息不会反映真实 .jgs。
+            return quote!({
+                ::core::result::Result::<_, ::anyhow::Error>::Ok({
+                    struct __SceneBindings {
+                        pub root: ::jge_core::game::entity::Entity,
+                    }
+                    __SceneBindings {
+                        root: ::jge_core::game::entity::Entity::new(),
+                    }
+                })
+            })
+            .into();
+        }
         return expand_scene_from_file(path_lit, callsite_file);
     }
 

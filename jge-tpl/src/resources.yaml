@@ -1,0 +1,7 @@
+- shaders:
+    - demo:
+        - background_horizon.fs: embed
+          from: "resource/shaders/background_horizon.fs"
+- textures:
+    - bamboo.png: embed
+      from: "resource/bamboo.png"
