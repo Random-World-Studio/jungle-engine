@@ -79,6 +79,15 @@ pub fn expand_resource(input: TokenStream) -> TokenStream {
         .into();
     }
 
+    // 支持空输入：resource!() / resource!{} / resource! —— 直接生成 Ok(())。
+    // 目的：允许调用方统一在末尾写 `?`，并在“可选资源表”情况下把该宏当作 no-op。
+    if input.is_empty() {
+        return quote! {{
+            ::core::result::Result::<(), ::anyhow::Error>::Ok(())
+        }}
+        .into();
+    }
+
     let input2 = proc_macro2::TokenStream::from(input.clone());
 
     let callsite_file = match input.clone().into_iter().next() {

@@ -3,10 +3,6 @@ name = "jge-core"
 version = "0.1.0"
 edition = "2024"
 
-[features]
-# 启用后：scene!("...") 的相对路径以“宏调用点源文件目录”为基准（需要 nightly）。
-callsite-relative-paths = ["jge-macros/callsite_relative_paths"]
-
 [dependencies]
 anyhow = { version = "1.0.100", features = ["backtrace"] }
 backtrace = "0.3"

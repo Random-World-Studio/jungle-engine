@@ -600,6 +600,15 @@ mod scene_dsl {
 }
 
 pub fn expand_scene(input: TokenStream) -> TokenStream {
+    // 支持空输入：scene!() / scene!{} / scene! —— 直接生成 Ok(())。
+    // 目的：允许调用方统一在末尾写 `?`，并在“可选场景”情况下把该宏当作 no-op。
+    if input.is_empty() {
+        return quote! {{
+            ::core::result::Result::<(), ::anyhow::Error>::Ok(())
+        }}
+        .into();
+    }
+
     let input2 = proc_macro2::TokenStream::from(input.clone());
 
     let callsite_file = PathBuf::from(input.clone().into_iter().next().unwrap().span().file());
