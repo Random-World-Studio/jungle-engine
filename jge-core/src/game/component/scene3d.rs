@@ -1,3 +1,11 @@
+//! 三维场景组件（`Scene3D`）。
+//!
+//! 把一个挂载了 [`Layer`](jge_core::game::component::layer::Layer) 的实体声明为“3D 渲染层”。
+//! 典型用法：
+//! - 在 Layer 根实体上注册 `Scene3D`（会自动补齐默认 3D 着色器）。
+//! - 选择一个摄像机实体（挂载 [`Camera`](jge_core::game::component::camera::Camera) + `Transform`），并绑定到该场景。
+//! - 每帧通过 `Scene3D::visible_renderables` 获取当前视锥内的可见几何集合，用于渲染。
+
 use super::{
     camera::{Camera, CameraBasis, CameraViewportError},
     component_impl,
@@ -29,6 +37,36 @@ const DEFAULT_REFERENCE_FRAMEBUFFER_HEIGHT: u32 = 1080;
 
 static SCENE3D_STORAGE: OnceLock<ComponentStorage<Scene3D>> = OnceLock::new();
 
+/// 三维场景组件。
+///
+/// 该组件管理：
+/// - 场景自身的视锥参数（FOV、近裁剪面、视距等）
+/// - （可选）绑定的摄像机实体，用于把摄像机的 `Transform` 同步到场景实体
+///
+/// # 依赖
+/// - 该组件依赖 [`Layer`](jge_core::game::component::layer::Layer)。
+/// - 3D 场景实体通常也会有 [`Transform`](jge_core::game::component::transform::Transform)，用于渲染时的坐标基准。
+///
+/// # 示例
+///
+/// ```no_run
+/// # use jge_core::game::{entity::Entity, component::{scene3d::Scene3D, layer::Layer, camera::Camera, transform::Transform}};
+/// # fn main() -> anyhow::Result<()> {
+/// let scene = Entity::new()?;
+/// scene.register_component(Layer::new())?;
+/// scene.register_component(Transform::new())?;
+/// scene.register_component(Scene3D::new())?;
+///
+/// let camera = Entity::new()?;
+/// camera.register_component(Transform::new())?;
+/// camera.register_component(Camera::new())?;
+///
+/// if let Some(mut scene3d) = scene.get_component_mut::<Scene3D>() {
+///     scene3d.bind_camera(camera)?;
+/// }
+/// Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone)]
 pub struct Scene3D {
     entity_id: Option<Entity>,
@@ -41,6 +79,7 @@ pub struct Scene3D {
 
 #[component_impl]
 impl Scene3D {
+    /// 创建一个 3D 场景组件。
     #[default()]
     pub fn new() -> Self {
         Self {
@@ -53,6 +92,9 @@ impl Scene3D {
         }
     }
 
+    /// 获取该组件绑定到的实体。
+    ///
+    /// 仅在组件已通过 `Entity::register_component` 挂载后可用。
     pub fn entity(&self) -> Entity {
         self.entity_id.expect("Scene3D 组件尚未绑定实体")
     }
@@ -76,10 +118,12 @@ impl Scene3D {
         }
     }
 
+    /// 当前垂直视场角（弧度）。
     pub fn vertical_fov(&self) -> f32 {
         self.vertical_fov
     }
 
+    /// 设置垂直视场角（弧度）。
     pub fn set_vertical_fov(&mut self, fov: f32) -> Result<(), Scene3DPropertyError> {
         if !(MIN_VERTICAL_FOV..MAX_VERTICAL_FOV).contains(&fov) {
             return Err(Scene3DPropertyError::VerticalFovOutOfRange(fov));
@@ -88,6 +132,9 @@ impl Scene3D {
         Ok(())
     }
 
+    /// 设置参考帧缓冲高度（用于让 FOV 随窗口高度缩放）。
+    ///
+    /// 该值必须大于 0。
     pub fn set_reference_framebuffer_height(
         &mut self,
         height: u32,
@@ -99,10 +146,14 @@ impl Scene3D {
         Ok(())
     }
 
+    /// 当前近裁剪面距离。
     pub fn near_plane(&self) -> f32 {
         self.near_plane
     }
 
+    /// 设置近裁剪面距离。
+    ///
+    /// 必须满足 `near_plane > 0` 且 `near_plane < view_distance`。
     pub fn set_near_plane(&mut self, near_plane: f32) -> Result<(), Scene3DPropertyError> {
         if near_plane <= 0.0 {
             return Err(Scene3DPropertyError::InvalidNearPlane(near_plane));
@@ -117,10 +168,14 @@ impl Scene3D {
         Ok(())
     }
 
+    /// 当前绑定的摄像机实体（若存在）。
     pub fn attached_camera(&self) -> Option<Entity> {
         self.attached_camera
     }
 
+    /// 设置场景视距（远裁剪面）。
+    ///
+    /// 必须满足 `distance > near_plane`。
     pub fn set_view_distance(&mut self, distance: f32) -> Result<(), Scene3DPropertyError> {
         if distance <= self.near_plane {
             return Err(Scene3DPropertyError::InvalidViewDistanceRange {
@@ -132,10 +187,12 @@ impl Scene3D {
         Ok(())
     }
 
+    /// 当前场景视距（远裁剪面）。
     pub fn view_distance(&self) -> f32 {
         self.view_distance
     }
 
+    /// 根据帧缓冲高度计算“随高度缩放”的垂直视场角（弧度）。
     pub fn vertical_fov_for_height(
         &self,
         framebuffer_height: u32,
@@ -187,6 +244,7 @@ impl Scene3D {
         Ok(())
     }
 
+    /// 解除绑定的摄像机。
     pub fn detach_camera(&mut self) -> Option<Entity> {
         self.attached_camera.take()
     }
@@ -253,6 +311,7 @@ impl Scene3D {
         Ok(())
     }
 
+    /// 根据帧缓冲宽高计算水平视场角（弧度）。
     pub fn horizontal_fov(
         &self,
         framebuffer_size: (u32, u32),
@@ -370,6 +429,7 @@ impl Scene3D {
         Ok(LayerRenderableCollection::from_bundles(visible))
     }
 
+    /// 推进该 Layer 的 LOD（通常用于体素/分块场景）。
     pub fn step_lod(&self, layer: &mut Layer, targets: &[OctVec], detail: u64) -> LayerLodUpdate {
         let _ = self;
         layer.step_lod(targets, detail)
@@ -390,10 +450,18 @@ impl Scene3D {
         layer.chunk_neighbors(center, radius)
     }
 
+    /// 将摄像机绑定到该 3D 场景。
+    ///
+    /// 绑定后：
+    /// - 场景实体的 `Transform` 会被同步为摄像机的 `Transform`（用于渲染时以摄像机为视点）。
+    /// - 你可以在每帧渲染前调用 [`sync_camera_transform`](Self::sync_camera_transform) 刷新。
     pub fn bind_camera(&mut self, camera_entity: Entity) -> Result<(), Scene3DAttachError> {
         self.bind_camera_internal(camera_entity)
     }
 
+    /// 将当前绑定摄像机的 `Transform` 同步到场景实体。
+    ///
+    /// 当你在游戏逻辑里更新了摄像机实体的位置/旋转/缩放后，可在渲染前调用此方法。
     pub fn sync_camera_transform(&self) -> Result<(), Scene3DAttachError> {
         self.sync_camera_transform_internal()
     }
@@ -410,6 +478,10 @@ impl ComponentRead<Scene3D> {
         self.sync_camera_transform_internal()
     }
 
+    /// 计算当前摄像机视锥内的可见几何集合。
+    ///
+    /// 返回值是一个便于渲染的集合（按实体聚合三角面，并保留材质信息）。
+    /// 常见调用点：每帧渲染时。
     pub fn visible_renderables(
         &self,
         camera_entity: Entity,

@@ -10,6 +10,18 @@ pub use winit::{
 /// 当前以 `Custom` 为主：允许游戏侧把任意自定义类型作为事件载荷传入逻辑层。
 ///
 /// 事件载荷使用 `Arc` 承载，便于在多个 `GameLogic` 之间广播（无需要求载荷实现 `Clone`）。
+///
+/// # 示例：自定义事件载荷
+///
+/// ```
+/// #[derive(Debug, PartialEq, Eq)]
+/// struct MyEvent {
+///     id: u32,
+/// }
+///
+/// let e = ::jge_core::event::Event::custom(MyEvent { id: 1 });
+/// assert_eq!(e.downcast_ref::<MyEvent>().unwrap().id, 1);
+/// ```
 #[derive(Clone)]
 pub enum Event {
     CloseRequested,
@@ -47,6 +59,21 @@ impl Debug for Event {
 /// 将 `winit` 的窗口事件映射为引擎事件。
 ///
 /// 游戏侧可实现该 trait，把 `WindowEvent` 转成自己的事件类型并包进 [`Event::Custom`]。
+///
+/// # 示例：用闭包实现映射器
+///
+/// ```
+/// use ::jge_core::event::{Event, WindowEvent, WindowEventMapper};
+///
+/// let mut mapper = |evt: &WindowEvent| {
+///     // 这里仅做演示：真实项目中你通常会匹配特定按键/鼠标事件。
+///     let _ = evt;
+///     Some(Event::custom("hello".to_string()))
+/// };
+///
+/// // 通过 trait 调用：
+/// let _ = WindowEventMapper::map_window_event(&mut mapper, &WindowEvent::Focused(true));
+/// ```
 pub trait WindowEventMapper: Send + Sync {
     /// 将 `winit::WindowEvent` 转换为引擎 [`Event`]。
     ///

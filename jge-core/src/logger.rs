@@ -9,6 +9,16 @@ use tracing_subscriber::{EnvFilter, fmt::time, layer::SubscriberExt, util::Subsc
 /// - Debug 构建下日志更详细；Release 构建下更偏向错误级别。
 ///
 /// 注意：该函数应在应用启动早期调用一次；重复初始化通常会失败或被忽略（取决于 tracing 订阅者实现）。
+///
+/// # 示例
+///
+/// ```no_run
+/// fn main() -> ::anyhow::Result<()> {
+///     ::jge_core::logger::init()?;
+///     // ... 创建 Game/加载资源/运行主循环
+///     Ok(())
+/// }
+/// ```
 pub fn init() -> anyhow::Result<()> {
     if cfg!(debug_assertions) {
         tracing_subscriber::Registry::default()

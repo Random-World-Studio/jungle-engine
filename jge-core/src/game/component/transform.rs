@@ -6,6 +6,28 @@ use nalgebra::{Matrix4, Rotation3, Translation3, Vector3};
 
 #[component(Node, Renderable)]
 #[derive(Debug, Clone)]
+/// 世界变换组件（平移/旋转/缩放）。
+///
+/// `Transform` 描述实体在世界空间中的位置、旋转（欧拉角，弧度制，按 X-Y-Z 顺序）与缩放。
+/// 渲染时通常会用该矩阵把 `Shape` 的局部顶点变换到世界空间。
+///
+/// 依赖：该组件依赖 `Node` 与 `Renderable`（注册 `Transform` 时会按需自动补齐）。
+///
+/// # 示例
+///
+/// ```no_run
+/// use jge_core::game::{component::transform::Transform, entity::Entity};
+/// use nalgebra::Vector3;
+///
+/// # fn main() -> anyhow::Result<()> {
+/// let e = Entity::new()?;
+/// e.register_component(Transform::new())?;
+/// if let Some(mut t) = e.get_component_mut::<Transform>() {
+///     t.set_position(Vector3::new(1.0, 2.0, 3.0));
+/// }
+/// Ok(())
+/// # }
+/// ```
 pub struct Transform {
     entity_id: Option<Entity>,
     position: Vector3<f32>,

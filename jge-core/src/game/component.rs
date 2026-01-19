@@ -65,20 +65,39 @@ use crate::game::entity::{Entity, EntityId};
 
 const CHUNK_SIZE: usize = 16;
 
-/// 所有组件都使用分块存储，每块包含固定数量的槽位，以便于后续向量化和并行优化。
+/// 组件 trait（所有组件的统一接口）。
+///
+/// 对游戏开发者来说：你通常不需要手动实现这个 trait。
+///
+/// - 引擎内置组件（如 `Transform`、`Layer`、`Scene3D`）都已实现。
+/// - 自定义组件建议优先使用 `#[component]` / `#[component_impl]` 宏生成实现。
+/// - **不要**在游戏代码里直接调用 `insert/read/write/remove/storage`。
+///   统一使用 [`Entity`](crate::game::entity::Entity) 的 API（`register_component`/`get_component`/`get_component_mut`）。
 pub trait Component: Sized + 'static {
+    /// 返回该组件类型的全局存储。
+    ///
+    /// 这是底层存储入口，一般不直接使用。
     fn storage() -> &'static ComponentStorage<Self>;
 
+    /// 注册依赖组件。
+    ///
+    /// 当你通过 `Entity::register_component` 注册组件时，会先调用此函数。
     fn register_dependencies(_entity: Entity) -> Result<(), ComponentDependencyError> {
         Ok(())
     }
 
+    /// 注销依赖组件。
     fn unregister_dependencies(_entity: Entity) {}
 
+    /// 组件被挂载到实体时触发（生命周期钩子）。
     fn attach_entity(&mut self, _entity: Entity) {}
 
+    /// 组件从实体卸载时触发（生命周期钩子）。
     fn detach_entity(&mut self) {}
 
+    /// 将组件写入存储。
+    ///
+    /// 建议通过 `Entity::register_component` 间接调用。
     fn insert(entity: Entity, component: Self) -> Result<Option<Self>, ComponentDependencyError> {
         let mut component = component;
         component.attach_entity(entity);
@@ -106,6 +125,9 @@ pub trait Component: Sized + 'static {
 }
 
 #[derive(Debug)]
+/// 组件依赖不满足时的错误。
+///
+/// 常见于 `Entity::register_component(...)`：当某个组件声明了依赖，但依赖组件缺失且无法自动补齐时会返回此错误。
 pub struct ComponentDependencyError {
     entity: Entity,
     required: &'static str,
@@ -121,6 +143,7 @@ impl PartialEq for ComponentDependencyError {
 impl Eq for ComponentDependencyError {}
 
 impl ComponentDependencyError {
+    /// 构造一个“缺少某依赖组件”的错误。
     pub fn new(entity: Entity, required: &'static str) -> Self {
         Self {
             entity,
@@ -140,10 +163,12 @@ impl ComponentDependencyError {
         }
     }
 
+    /// 发生错误的实体。
     pub fn entity(&self) -> Entity {
         self.entity
     }
 
+    /// 缺失的依赖组件名（类型名字符串）。
     pub fn required(&self) -> &'static str {
         self.required
     }
@@ -296,12 +321,18 @@ impl<C> Default for ComponentStorage<C> {
 }
 
 impl<C> ComponentStorage<C> {
+    /// 创建一个空的组件存储。
+    ///
+    /// 通常只在组件实现中作为 `static OnceLock<ComponentStorage<T>>` 的默认值使用。
     pub fn new() -> Self {
         Self {
             inner: RwLock::new(ComponentStorageInner::default()),
         }
     }
 
+    /// 遍历所有已存在组件，并将其映射收集成一个 Vec。
+    ///
+    /// 这是偏底层的枚举接口，通常用于系统层做批处理/收集。
     pub fn collect_with<T, F>(&self, mut f: F) -> Vec<T>
     where
         F: FnMut(EntityId, &C) -> Option<T>,
@@ -324,6 +355,9 @@ impl<C> ComponentStorage<C> {
         results
     }
 
+    /// 按 chunk 分组遍历并收集结果。
+    ///
+    /// 当你希望利用“分块”天然分组做并行/局部性优化时可用。
     pub fn collect_chunks_with<T, F>(&self, mut f: F) -> Vec<Vec<T>>
     where
         F: FnMut(EntityId, &C) -> Option<T>,
@@ -350,6 +384,9 @@ impl<C> ComponentStorage<C> {
         results
     }
 
+    /// 插入或替换一个组件值。
+    ///
+    /// 建议通过 `Entity::register_component` 间接调用。
     pub fn insert(&self, entity_id: EntityId, component: C) -> Option<C> {
         let guard = self.inner.upgradable_read();
         if let Some(location) = guard.entity_to_location.get(&entity_id).copied() {
@@ -387,6 +424,7 @@ impl<C> ComponentStorage<C> {
         None
     }
 
+    /// 获取组件的只读 guard。
     pub fn get(&'static self, entity_id: EntityId) -> Option<ComponentRead<C>> {
         let (chunk, slot) = {
             let guard = self.inner.read();
@@ -396,6 +434,7 @@ impl<C> ComponentStorage<C> {
         ComponentRead::new(chunk, slot)
     }
 
+    /// 获取组件的可写 guard。
     pub fn get_mut(&'static self, entity_id: EntityId) -> Option<ComponentWrite<C>> {
         let (chunk, slot) = {
             let guard = self.inner.read();
@@ -405,6 +444,7 @@ impl<C> ComponentStorage<C> {
         ComponentWrite::new(chunk, slot)
     }
 
+    /// 移除组件并返回旧值。
     pub fn remove(&self, entity_id: EntityId) -> Option<C> {
         let guard = self.inner.upgradable_read();
         let location = match guard.entity_to_location.get(&entity_id).copied() {
@@ -422,12 +462,20 @@ impl<C> ComponentStorage<C> {
     }
 }
 
+/// 组件只读访问 guard。
+///
+/// 通过 `Entity::get_component::<T>()` 获得。
+/// 该类型实现了 `Deref<Target = T>`，因此可以像 `&T` 一样使用。
 pub struct ComponentRead<C: 'static> {
     _chunk: Arc<ComponentChunk<C>>,
     _slot: Arc<ComponentSlot<C>>,
     guard: ArcRwLockReadGuard<RawRwLock, Option<C>>,
 }
 
+/// 组件可写访问 guard。
+///
+/// 通过 `Entity::get_component_mut::<T>()` 获得。
+/// 该类型实现了 `DerefMut`，因此可以直接修改组件字段/调用 setter。
 pub struct ComponentWrite<C: 'static> {
     _chunk: Arc<ComponentChunk<C>>,
     _slot: Arc<ComponentSlot<C>>,
@@ -445,6 +493,7 @@ impl<C: 'static> ComponentRead<C> {
         })
     }
 
+    /// 返回拥有该组件的实体。
     pub fn entity(&self) -> Entity {
         Entity::from(self._slot.entity_id())
     }
@@ -461,6 +510,7 @@ impl<C: 'static> ComponentWrite<C> {
         })
     }
 
+    /// 返回拥有该组件的实体。
     pub fn entity(&self) -> Entity {
         Entity::from(self._slot.entity_id())
     }

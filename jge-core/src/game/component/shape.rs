@@ -3,6 +3,32 @@ use super::{component, component_impl};
 use crate::game::entity::Entity;
 use nalgebra::Vector3;
 
+/// 网格/形状组件（三角形网格）。
+///
+/// `Shape` 用“顶点数组 + 三角面索引”描述几何：
+/// - `vertices`：局部空间顶点
+/// - `faces`：每个三角面是 `[usize; 3]` 索引
+///
+/// 渲染时通常会结合实体的 [`Transform`](jge_core::game::component::transform::Transform) 把顶点变换到世界空间。
+///
+/// 依赖：该组件依赖 `Transform`。
+///
+/// # 示例
+///
+/// ```no_run
+/// use jge_core::game::{component::shape::Shape, entity::Entity};
+/// use nalgebra::Vector3;
+///
+/// # fn main() -> anyhow::Result<()> {
+/// let e = Entity::new()?;
+/// e.register_component(Shape::from_triangles(vec![[
+///     Vector3::new(0.0, 0.0, 0.0),
+///     Vector3::new(1.0, 0.0, 0.0),
+///     Vector3::new(0.0, 1.0, 0.0),
+/// ]]))?;
+/// Ok(())
+/// # }
+/// ```
 #[component(Transform)]
 #[derive(Debug, Clone)]
 pub struct Shape {
@@ -76,6 +102,9 @@ impl Shape {
     }
 }
 
+/// `Shape::triangles()` 的迭代器。
+///
+/// 每次迭代返回一个三元组：`(&v0, &v1, &v2)`。
 pub struct Triangles<'a> {
     vertices: &'a [Vector3<f32>],
     faces: &'a [[usize; 3]],

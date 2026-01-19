@@ -6,12 +6,41 @@ use crate::game::system::logic::GameLogic;
 use crate::game::{entity::Entity, system::logic::GameLogicHandle};
 use tracing::warn;
 
-/// [`Node`] 组件用于构建实体之间的树形关系并携带节点名称。
+/// 节点组件：用于构建实体之间的树形层级（父子关系）并携带节点名称。
 ///
-/// 名称约束如下：
+/// 你可以把 `Node` 理解为“场景树”里的一个节点。
+/// 常见用途：
+/// - 把实体挂到某个 `Layer` 的子树下参与渲染；
+/// - 组织 UI/场景的层级关系；
+/// - 通过 [`path`](Self::path) 生成一个便于调试的层级路径字符串。
+///
+/// 约定：
+/// - [`Entity::new`](crate::game::entity::Entity::new) 会自动注册一个默认 `Node`。
+/// - 维护父子关系使用 `Node::attach` / `Node::detach`（实际 API 在 `ComponentWrite<Node>` 上）。
+///
+/// 名称约束：
 /// - 不能为空字符串；
 /// - 不得包含空白字符；
-/// - 不得包含字符 `/`。
+/// - 不得包含字符 `/`（因为 `path` 使用 `/` 作为分隔符）。
+///
+/// # 示例
+///
+/// ```no_run
+/// use jge_core::game::{component::node::Node, entity::Entity};
+///
+/// # fn main() -> anyhow::Result<()> {
+/// let parent = Entity::new()?;
+/// let child = Entity::new()?;
+///
+/// // 把 child 挂到 parent 下
+/// parent.get_component_mut::<Node>().unwrap().attach(child)?;
+///
+/// // 也可以在 child 上获取当前 path（根到自身）
+/// let path = child.get_component::<Node>().unwrap().path()?;
+/// println!("{path}");
+/// Ok(())
+/// # }
+/// ```
 #[component]
 pub struct Node {
     entity_id: Option<Entity>,
@@ -91,6 +120,10 @@ impl Node {
     }
 
     /// 构建从根节点开始的路径表示。
+    ///
+    /// 返回值形如 `root/child/grandchild`。
+    ///
+    /// 注意：若层级关系存在环，或层级中某个实体缺失 `Node` 组件，将返回错误。
     pub fn path(&self) -> Result<String, NodeHierarchyError> {
         let mut segments = Vec::new();
         Self::walk_ancestor_chain::<(), _>(Some(self.entity()), self.entity(), |id| {
@@ -213,11 +246,15 @@ impl Node {
     }
 
     /// 将当前节点与父节点解除关联。
+    ///
+    /// 调用后该节点会成为一棵子树的根（其 children 保持不变）。
     pub fn detach(&mut self) -> Result<(), NodeHierarchyError> {
         self.detach_from_parent()
     }
 
     /// 为节点设置或替换 `GameLogic` 实例。
+    ///
+    /// 通常用于给某个实体挂上逻辑脚本/回调。
     pub fn set_logic(&mut self, logic: impl GameLogic + 'static) {
         self.set_logic_handle(GameLogicHandle::new(logic));
     }
@@ -324,6 +361,12 @@ impl Node {
 }
 
 impl ComponentWrite<Node> {
+    /// 将 `child` 挂到当前节点下。
+    ///
+    /// - 若 `child` 已经有父节点，会先从旧父节点下移除，再挂到当前节点下。
+    /// - 若会产生层级环，会返回错误。
+    ///
+    /// 典型用法见 [`Node`] 的示例。
     pub fn attach(&mut self, child: Entity) -> Result<(), NodeHierarchyError> {
         Node::attach_internal(&mut *self, child)
     }

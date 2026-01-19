@@ -7,6 +7,16 @@ pub enum WindowMode {
 /// 窗口配置。
 ///
 /// 用于控制窗口标题、初始尺寸、是否开启垂直同步等。
+///
+/// # 示例
+///
+/// ```
+/// let mut cfg = ::jge_core::config::WindowConfig::default();
+/// cfg.title = "My Game".to_string();
+/// cfg.width = 1280;
+/// cfg.height = 720;
+/// cfg.vsync = true;
+/// ```
 pub struct WindowConfig {
     pub title: String,
     pub width: u32,
@@ -32,6 +42,16 @@ impl Default for WindowConfig {
 /// - `window`：窗口相关配置
 /// - `escape_closes`：是否允许按下 `Esc` 关闭窗口
 /// - `game_tick_ms`：逻辑更新 tick 间隔（毫秒）
+///
+/// # 示例
+///
+/// ```
+/// let mut cfg = ::jge_core::config::GameConfig::default();
+/// cfg.game_tick_ms = 16; // 约 60 tick/s
+/// cfg.escape_closes = true;
+/// cfg.window.width = 1280;
+/// cfg.window.height = 720;
+/// ```
 pub struct GameConfig {
     pub window: WindowConfig,
     pub escape_closes: bool,

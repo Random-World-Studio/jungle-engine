@@ -1,3 +1,11 @@
+//! 二维场景组件（`Scene2D`）。
+//!
+//! 把一个挂载了 [`Layer`](jge_core::game::component::layer::Layer) 的实体声明为“2D 渲染层”。
+//! 常见用法：
+//! - 在 Layer 根实体上注册 `Scene2D`（会自动补齐默认 2D 着色器）。
+//! - 在该 Layer 子树下放置 `Renderable + Shape + Transform (+ Material)` 的实体参与渲染。
+//! - 使用 [`Scene2D::visible_faces`] 获取可见三角面（用于 2D 渲染/拾取/遮挡分析等）。
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
@@ -21,8 +29,30 @@ use crate::game::{
 };
 use crate::resource::ResourcePath;
 
+/// 二维场景组件。
+///
+/// 二维场景默认按照世界空间的 `z` 进行遮挡：更大的 `z` 代表更靠前。
+///
+/// 依赖与约定：
+/// - 该组件依赖 [`Layer`](jge_core::game::component::layer::Layer)。注册 `Scene2D` 时会按需自动注册 `Layer`。
+/// - 参与渲染的实体通常需要：
+///   - [`Renderable`](jge_core::game::component::renderable::Renderable)
+///   - [`Shape`](jge_core::game::component::shape::Shape)
+///   - [`Transform`](jge_core::game::component::transform::Transform)
+///   - （可选）[`Material`](jge_core::game::component::material::Material)
+///
+/// # 示例
+///
+/// ```no_run
+/// # use jge_core::game::{entity::Entity, component::{scene2d::Scene2D, layer::Layer}};
+/// # fn main() -> anyhow::Result<()> {
+/// let layer_root = Entity::new()?;
+/// layer_root.register_component(Layer::new())?;
+/// layer_root.register_component(Scene2D::new())?;
+/// Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone)]
-/// 二维场景默认按照 Renderable 的 z 值进行遮挡，高 z 表示位于前方。
 pub struct Scene2D {
     entity_id: Option<Entity>,
     offset: Vector2<f32>,
@@ -35,6 +65,11 @@ static SCENE2D_STORAGE: OnceLock<ComponentStorage<Scene2D>> = OnceLock::new();
 
 #[component_impl]
 impl Scene2D {
+    /// 创建一个 2D 场景组件。
+    ///
+    /// 默认值：
+    /// - `offset = (0,0)`
+    /// - `pixels_per_unit = 100`
     #[default()]
     pub fn new() -> Self {
         Self {
@@ -55,6 +90,8 @@ impl Scene2D {
     }
 
     /// 设置世界坐标中的单位长度对应的像素数量。
+    ///
+    /// 该值必须为有限正数；否则会忽略本次设置。
     pub fn set_pixels_per_unit(&mut self, value: f32) {
         if value.is_sign_positive() && value.is_finite() {
             self.pixels_per_unit = value.max(f32::EPSILON);
@@ -130,6 +167,12 @@ impl Scene2D {
 
     /// 收集当前 Layer 树下所有启用 Shape 的未被完全遮挡的三角面集合。
     /// 返回的数组按照 Layer 八叉树节点顺序分组，每个子数组包含同一实体的连续面。
+    ///
+    /// 适合用于：
+    /// - 2D 渲染（按 chunk/实体批处理）
+    /// - 2D 逻辑拾取/可见性判定
+    ///
+    /// 注意：需要该组件已绑定到实体，且该实体已注册 [`Layer`](jge_core::game::component::layer::Layer)。
     pub fn visible_faces(&self) -> Result<Vec<Scene2DFaceGroup>, Scene2DVisibilityError> {
         let entity = self
             .entity_id
@@ -143,6 +186,10 @@ impl Scene2D {
         self.visible_faces_with_renderables(&layer, &renderables)
     }
 
+    /// 与 [`visible_faces`](Self::visible_faces) 相同，但允许调用方复用已收集好的渲染数据。
+    ///
+    /// 当你在同一帧内需要多次查询（例如渲染 + 物理拾取）时，可先通过
+    /// `layer.world_renderables()` 获取一次数据，再多次传入此函数以减少重复遍历。
     pub fn visible_faces_with_renderables(
         &self,
         layer: &Layer,
@@ -319,14 +366,17 @@ pub struct Scene2DFaceGroup {
 }
 
 impl Scene2DFaceGroup {
+    /// 该组面片所属的实体。
     pub fn entity(&self) -> Entity {
         self.entity
     }
 
+    /// 该实体在当前可见集合中的三角面列表（世界空间）。
     pub fn faces(&self) -> &[[Vector3<f32>; 3]] {
         &self.faces
     }
 
+    /// 消费该对象并返回面片列表。
     pub fn into_faces(self) -> Vec<[Vector3<f32>; 3]> {
         self.faces
     }
@@ -334,7 +384,9 @@ impl Scene2DFaceGroup {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Scene2DVisibilityError {
+    /// 传入实体缺少 Scene2D 组件。
     MissingScene(Entity),
+    /// Layer 遍历失败（例如缺少 Layer/Node）。
     LayerTraversal(LayerTraversalError),
 }
 

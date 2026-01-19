@@ -6,6 +6,22 @@ use crate::resource::{Resource, ResourceHandle, ResourcePath};
 ///
 /// 渲染规则：每次渲染某个 Layer 时，会在该 Layer 其它内容渲染之前，
 /// 先在“以 Layer 所在节点为根的节点树”中按先序遍历找到第一个 Background 并渲染。
+///
+/// # 示例
+///
+/// ```no_run
+/// use jge_core::game::{
+///     component::{background::Background, layer::Layer},
+///     entity::Entity,
+/// };
+///
+/// # fn main() -> anyhow::Result<()> {
+/// let layer_root = Entity::new()?;
+/// layer_root.register_component(Layer::new())?;
+/// layer_root.register_component(Background::new())?;
+/// Ok(())
+/// # }
+/// ```
 #[component(Node)]
 #[derive(Debug, Clone)]
 pub struct Background {

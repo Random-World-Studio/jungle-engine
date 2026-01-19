@@ -149,11 +149,6 @@ fn build_scene() -> anyhow::Result<jge_core::game::entity::Entity> {
                     }
                 }
             }
-
-            with() {
-                let _ = (e, root, layer);
-                Ok(())
-            }
         }
     }?;
 
@@ -437,3 +432,62 @@ if let Some(mut health) = entity.get_component_mut::<Health>() {
     println!("Entity {:?} 受伤，剩余生命值：{}", entity.id(), health.hp());
 }
 ```
+
+## 9. jge-core API 入口速查（面向游戏开发者）
+
+这一节是一个“去翻源码/Rustdoc 之前的导航”。只列使用入口，不讲底层原理。
+
+### 9.1 运行与窗口
+
+- `jge_core::Game`：创建并运行游戏主循环（见本教程第 3 节）。
+- `jge_core::config::GameConfig`：窗口/渲染相关配置。
+- `jge_core::logger::init()`：初始化日志。
+
+### 9.2 场景构建（scene!）
+
+- `jge_core::scene! { ... }`：用 DSL 声明节点树并在节点上挂组件。
+- 典型模式：
+    - `+ SomeComponent::new()`：注册组件
+    - `with(mut c: SomeComponent) { ... }`：对组件做一次性配置
+
+### 9.3 ECS/组件访问（Entity）
+
+- `jge_core::game::entity::Entity`：实体句柄。
+    - `Entity::new()` 创建实体（自动带 `Node`）。
+    - `entity.register_component(T::new())` 注册组件（会自动补齐依赖）。
+    - `entity.get_component::<T>()` 只读访问。
+    - `entity.get_component_mut::<T>()` 可写访问。
+
+### 9.4 渲染基础工作流（Layer / Scene2D / Scene3D）
+
+- `jge_core::game::component::layer::Layer`：把一棵节点子树声明为一个渲染层。
+- `jge_core::game::component::scene2d::Scene2D`：2D 渲染路径。
+- `jge_core::game::component::scene3d::Scene3D`：3D 渲染路径（可绑定摄像机）。
+- 常用组合：
+    - `Renderable + Transform + Shape (+ Material)`：让实体“能被绘制”。
+    - `Camera + Transform`：摄像机实体。
+    - `Light + PointLight/ParallelLight (+ Transform)`：光源实体。
+
+### 9.5 资源系统（resource!）
+
+- `jge_core::resource!("resources.yaml")`：注册资源树。
+- `jge_core::resource::ResourceHandle`：资源句柄（常用于 `Material`、shader 等组件配置）。
+
+### 9.6 事件与逻辑
+
+- `jge_core::event::Event`：统一事件类型（支持 `Event::custom(T)` + downcast）。
+- `jge_core::game::system::logic::GameLogic`：每帧更新与事件回调接口。
+- `jge_core::game::component::node::Node::set_logic(...)`：把逻辑挂到节点上（见本教程第 5 节）。
+
+### 9.7 本次文档覆盖范围与后续可补点
+
+本仓库当前已重点补齐/增强了以下“高频入口”的 Rustdoc（用途 + 工作流 + 最小示例）：
+
+- ECS/组件访问：`Entity`、`Component`、`ComponentRead/Write`、`Node`
+- 渲染组件：`Layer`、`Scene2D/Scene3D`、`Renderable`、`Transform`、`Camera`、`Shape`、`Material`、`Light`、`Background`
+
+如果你打算继续完善文档，通常最有价值的下一批是：
+
+- `jge-macros`：把 `#[component]` / `#[component_impl]` / `scene!` / `resource!` 的边界条件、常见错误信息做成“FAQ 小节”。
+- `jge-cli`：把创建项目/生成模板的命令行参数整理进 README，并配一条“从 0 到能跑”的命令序列。
+- `jge-tpl`：把示例里的渲染/资源/输入组织方式，提炼成“推荐目录结构 + 最小工程骨架”。

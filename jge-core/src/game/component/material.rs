@@ -3,8 +3,33 @@ use crate::game::entity::Entity;
 use crate::resource::{Resource, ResourceHandle};
 use nalgebra::Vector2;
 
+/// 材质贴图区域（三角形 UV）。
+///
+/// 用三个 `Vector2<f32>` 表示一个三角形的 UV 坐标。
+/// 常见用途：同一张贴图里裁剪/拼图（atlas）。
 pub type MaterialPatch = [Vector2<f32>; 3];
 
+/// 材质组件。
+///
+/// - `resource` 通常指向一张纹理或材质数据（由渲染路径解释）。
+/// - `regions` 可用于为同一 `Shape` 提供多个三角形区域的 UV 映射。
+///
+/// 依赖：该组件依赖 [`Shape`](jge_core::game::component::shape::Shape)。
+///
+/// # 示例
+///
+/// ```no_run
+/// use jge_core::game::{component::material::Material, entity::Entity};
+/// use jge_core::resource::Resource;
+///
+/// # fn main() -> anyhow::Result<()> {
+/// let e = Entity::new()?;
+/// // resource 的具体内容（纹理/材质数据）由渲染路径解释。
+/// let resource = Resource::from_memory(vec![1, 2, 3]);
+/// e.register_component(Material::new(resource, Vec::new()))?;
+/// Ok(())
+/// # }
+/// ```
 #[component(Shape)]
 #[derive(Debug, Clone)]
 pub struct Material {
@@ -15,6 +40,10 @@ pub struct Material {
 
 #[component_impl]
 impl Material {
+    /// 创建材质组件。
+    ///
+    /// - `resource`：材质资源句柄
+    /// - `regions`：UV 区域列表（可为空）
     #[default(Resource::from_memory(Vec::new()), Vec::new())]
     pub fn new(resource: ResourceHandle, regions: Vec<MaterialPatch>) -> Self {
         Self {
@@ -24,22 +53,27 @@ impl Material {
         }
     }
 
+    /// 获取资源句柄（克隆 `Arc`）。
     pub fn resource(&self) -> ResourceHandle {
         self.resource.clone()
     }
 
+    /// 替换材质资源。
     pub fn set_resource(&mut self, resource: ResourceHandle) {
         self.resource = resource;
     }
 
+    /// 获取 UV 区域列表（只读）。
     pub fn regions(&self) -> &[MaterialPatch] {
         &self.regions
     }
 
+    /// 获取 UV 区域列表（可写）。
     pub fn regions_mut(&mut self) -> &mut [MaterialPatch] {
         self.regions.as_mut_slice()
     }
 
+    /// 替换 UV 区域列表。
     pub fn set_regions(&mut self, regions: Vec<MaterialPatch>) {
         self.regions = regions;
     }

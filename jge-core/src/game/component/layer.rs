@@ -1,3 +1,41 @@
+//! 渲染层组件（`Layer`）。
+//!
+//! `Layer` 用来把一棵节点子树声明为一个独立的“渲染层”（一次渲染 pass 的逻辑单位）。
+//! 引擎渲染时会：
+//! - 从根实体开始遍历节点树
+//! - 遇到挂载了 `Layer` 的实体时，把它当作一个 Layer 根来渲染
+//! - **不会继续深入遍历该实体的子树来寻找其他 Layer**（避免嵌套 Layer 被重复渲染）
+//!
+//! 你通常会把 `Layer` 与下列组件搭配使用：
+//! - [`Scene2D`](jge_core::game::component::scene2d::Scene2D) / [`Scene3D`](jge_core::game::component::scene3d::Scene3D)：选择具体渲染路径
+//! - [`Background`](jge_core::game::component::background::Background)：渲染层背景
+//! - `Renderable + Shape + Transform (+ Material)`：可渲染实体
+//!
+//! # 示例
+//!
+//! ```no_run
+//! use jge_core::game::{
+//!     component::{layer::Layer, node::Node, renderable::Renderable, transform::Transform},
+//!     entity::Entity,
+//! };
+//!
+//! # fn main() -> anyhow::Result<()> {
+//! // 创建一个 Layer 根实体
+//! let root = Entity::new()?;
+//! root.register_component(Layer::new())?;
+//!
+//! // 在 Layer 子树下创建一个可渲染实体
+//! let child = Entity::new()?;
+//! child.register_component(Renderable::new())?;
+//! child.register_component(Transform::new())?;
+//! // child.register_component(Shape::from_triangles(...))?;
+//!
+//! // 维护节点关系
+//! root.get_component_mut::<Node>().unwrap().attach(child)?;
+//! Ok(())
+//! # }
+//! ```
+
 use std::{collections::HashMap, fmt, sync::Arc};
 
 use lodtree::{coords::OctVec, tree::Tree};
@@ -13,6 +51,11 @@ use crate::game::{component::ComponentRead, entity::Entity};
 use crate::resource::{Resource, ResourceHandle, ResourcePath};
 use nalgebra::{Matrix4, Vector3, Vector4};
 
+/// 渲染层视口（归一化矩形）。
+///
+/// 坐标为 0..=1 的归一化空间，原点在左上角。
+///
+/// 典型用法：把 UI Layer 放在屏幕一角，或做分屏。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LayerViewport {
     /// 归一化坐标（0..=1），原点在左上角。
@@ -36,6 +79,14 @@ impl LayerViewport {
 
 #[component(Renderable)]
 #[derive(Debug)]
+/// 渲染层组件。
+///
+/// 把某个实体标记为一个独立的渲染层根（一次渲染 pass 的逻辑单位）。
+///
+/// 常见工作流：
+/// - 在“层根实体”上注册 `Layer`，并在同一实体上注册 `Scene2D` 或 `Scene3D`。
+/// - 在该层的节点子树下挂载 `Renderable + Shape + Transform (+ Material)` 的实体。
+/// - 如需自定义着色器，通过 [`attach_shader_from_path`](Self::attach_shader_from_path) 绑定。
 pub struct Layer {
     entity_id: Option<Entity>,
     shaders: HashMap<RenderPipelineStage, LayerShader>,
@@ -86,6 +137,9 @@ impl Layer {
     }
 
     /// 通过资源路径与语言快速挂载着色器。
+    ///
+    /// - `resource_path` 必须已注册到资源系统（例如通过 `resource!` 宏）。
+    /// - 成功时返回旧的着色器（如果该 stage 之前已绑定）。
     pub fn attach_shader_from_path(
         &mut self,
         stage: RenderPipelineStage,
@@ -103,6 +157,8 @@ impl Layer {
     }
 
     /// 基于给定目标更新八叉树 LOD，并返回本次迭代的变化。
+    ///
+    /// `targets` 通常来自玩家/摄像机在世界中的位置映射到 `OctVec` 的结果。
     pub fn step_lod(&mut self, targets: &[OctVec], detail: u64) -> LayerLodUpdate {
         self.spatial.step_lod(targets, detail)
     }
@@ -147,6 +203,10 @@ impl Layer {
         Ok(renderables)
     }
 
+    /// 收集当前 Layer 子树下的点光源实体。
+    ///
+    /// 只会返回同时拥有 [`Light`] 与 [`PointLight`] 的实体。
+    /// 遍历规则与 [`renderable_entities`](Self::renderable_entities) 一致（会跳过嵌套 Layer 子树）。
     pub fn point_light_entities(root: Entity) -> Result<Vec<Entity>, LayerTraversalError> {
         let ordered = Self::traverse_layer_entities(root)?;
         let mut lights = Vec::new();
@@ -162,6 +222,10 @@ impl Layer {
         Ok(lights)
     }
 
+    /// 收集当前 Layer 子树下的平行光实体。
+    ///
+    /// 只会返回同时拥有 [`Light`] 与 [`ParallelLight`] 的实体。
+    /// 遍历规则与 [`renderable_entities`](Self::renderable_entities) 一致（会跳过嵌套 Layer 子树）。
     pub fn parallel_light_entities(root: Entity) -> Result<Vec<Entity>, LayerTraversalError> {
         let ordered = Self::traverse_layer_entities(root)?;
         let mut lights = Vec::new();
@@ -533,6 +597,9 @@ pub struct LayerShader {
 }
 
 impl LayerShader {
+    /// 使用资源句柄创建一个着色器描述。
+    ///
+    /// 资源内容通常是源码（GLSL/WGSL），具体解析由渲染路径决定。
     pub fn new(language: ShaderLanguage, resource: ResourceHandle) -> Self {
         Self { language, resource }
     }
@@ -561,6 +628,7 @@ impl Eq for LayerShader {}
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum LayerShaderAttachError {
+    /// 指定资源路径未注册。
     ResourceMissing(ResourcePath),
 }
 
@@ -597,13 +665,18 @@ impl std::error::Error for LayerSpatialError {}
 /// 细节层次（LOD）更新过程中的节点变更集合。
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct LayerLodUpdate {
+    /// 新增的节点（创建）。
     pub added: Vec<OctVec>,
+    /// 移除的节点（销毁）。
     pub removed: Vec<OctVec>,
+    /// 从非激活变为激活的节点。
     pub activated: Vec<OctVec>,
+    /// 从激活变为非激活的节点。
     pub deactivated: Vec<OctVec>,
 }
 
 impl LayerLodUpdate {
+    /// 是否没有任何变更。
     pub fn is_empty(&self) -> bool {
         self.added.is_empty()
             && self.removed.is_empty()

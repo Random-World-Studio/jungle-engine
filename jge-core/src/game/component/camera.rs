@@ -18,6 +18,28 @@ const DEFAULT_REFERENCE_FRAMEBUFFER_HEIGHT: u32 = 1080;
 
 #[component(Transform)]
 #[derive(Debug, Clone)]
+/// 3D 摄像机组件。
+///
+/// 摄像机定义了视锥参数（FOV、近/远裁剪面等），并依赖实体的 [`Transform`](jge_core::game::component::transform::Transform)
+/// 来确定相机在世界中的位置与朝向。
+///
+/// 常见用法：把 `Camera` 挂在一个实体上，然后在 `Scene3D` 中绑定该实体作为当前摄像机。
+///
+/// # 示例
+///
+/// ```no_run
+/// use jge_core::game::{
+///     component::{camera::Camera, transform::Transform},
+///     entity::Entity,
+/// };
+///
+/// # fn main() -> anyhow::Result<()> {
+/// let camera = Entity::new()?;
+/// camera.register_component(Transform::new())?;
+/// camera.register_component(Camera::new())?;
+/// Ok(())
+/// # }
+/// ```
 pub struct Camera {
     entity_id: Option<Entity>,
     vertical_fov: f32,

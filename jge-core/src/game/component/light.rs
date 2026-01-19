@@ -1,6 +1,26 @@
 use super::{component, component_impl, transform::Transform};
 use crate::game::entity::Entity;
 
+/// 通用光照强度（基础光组件）。
+///
+/// 该组件本身不定义光源类型；它与 [`PointLight`] / [`ParallelLight`] 组合使用：
+/// - `Light` 负责强度（`lightness`）
+/// - 具体光源组件负责几何/范围
+///
+/// `lightness` 会被限制为非负有限数。
+///
+/// # 示例
+///
+/// ```no_run
+/// use jge_core::game::{component::light::{Light, PointLight}, entity::Entity};
+///
+/// # fn main() -> anyhow::Result<()> {
+/// let e = Entity::new()?;
+/// e.register_component(Light::new(2.0))?;
+/// e.register_component(PointLight::new(10.0))?;
+/// Ok(())
+/// # }
+/// ```
 #[component(Transform)]
 #[derive(Debug, Clone)]
 pub struct Light {
@@ -10,6 +30,9 @@ pub struct Light {
 
 #[component_impl]
 impl Light {
+    /// 创建基础光组件。
+    ///
+    /// `lightness` 会被 clamp 到 $[0, +\infty)$。
     #[default(1.0)]
     pub fn new(lightness: f32) -> Self {
         let mut instance = Self {
@@ -20,10 +43,15 @@ impl Light {
         instance
     }
 
+    /// 获取光照强度。
     pub fn lightness(&self) -> f32 {
         self.lightness
     }
 
+    /// 设置光照强度。
+    ///
+    /// - 非有限值会被忽略。
+    /// - 负数会被 clamp 到 0。
     pub fn set_lightness(&mut self, value: f32) {
         if value.is_finite() {
             self.lightness = value.max(0.0);
@@ -31,6 +59,13 @@ impl Light {
     }
 }
 
+/// 点光源（位置光）。
+///
+/// 依赖：必须与 [`Light`] 一起使用。
+///
+/// 光源位置来自实体的 [`Transform`]。
+///
+/// 通常会与 [`Light`] 一起挂载到同一个实体上。
 #[component(Light)]
 #[derive(Debug, Clone)]
 pub struct PointLight {
@@ -40,6 +75,9 @@ pub struct PointLight {
 
 #[component_impl]
 impl PointLight {
+    /// 创建点光源。
+    ///
+    /// `distance` 必须为有限正数，否则会回落到默认值。
     #[default(1.0)]
     pub fn new(distance: f32) -> Self {
         let mut instance = Self {
@@ -50,10 +88,14 @@ impl PointLight {
         instance
     }
 
+    /// 获取点光源影响距离（范围）。
     pub fn distance(&self) -> f32 {
         self.distance
     }
 
+    /// 设置点光源影响距离（范围）。
+    ///
+    /// 仅接受有限正数；否则忽略。
     pub fn set_distance(&mut self, value: f32) {
         if value.is_finite() && value > 0.0 {
             self.distance = value;
@@ -61,6 +103,13 @@ impl PointLight {
     }
 }
 
+/// 平行光（方向光）。
+///
+/// 依赖：必须与 [`Light`] 一起使用。
+///
+/// 光照方向通常由实体的 [`Transform`] 旋转确定（具体解释由渲染路径定义）。
+///
+/// 常见用法：与 [`Light`] 一起挂载到实体上作为“方向光”。
 #[component(Light)]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ParallelLight {
@@ -69,6 +118,7 @@ pub struct ParallelLight {
 
 #[component_impl]
 impl ParallelLight {
+    /// 创建平行光组件。
     #[default()]
     pub fn new() -> Self {
         Self { entity_id: None }

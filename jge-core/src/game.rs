@@ -1,3 +1,15 @@
+//! ECS / 场景树 / 系统模块。
+//!
+//! 你会在这里找到：
+//! - [`entity::Entity`]：实体句柄与组件读写入口
+//! - [`component`]：内置组件（渲染、摄像机、灯光、节点树等）与组件访问 guard
+//! - [`system`]：逻辑与渲染系统（通常由 [`crate::Game`] 自动驱动）
+//!
+//! 大多数游戏项目并不需要直接操作系统层；更推荐通过：
+//! - [`crate::scene!`] 构建场景树（得到根实体）
+//! - 在组件上配置渲染/逻辑能力
+//! - 在 [`system::logic::GameLogic`] 中编写每帧更新与事件响应
+
 pub mod component;
 pub mod entity;
 pub mod system;
@@ -40,6 +52,20 @@ use crate::{
 /// - 创建并持有窗口（基于 `winit`）
 /// - 驱动 tick/update、事件分发与渲染
 /// - 管理内部 Tokio runtime，用于并发执行游戏逻辑
+///
+/// # 最小示例
+///
+/// ```no_run
+/// fn main() -> ::anyhow::Result<()> {
+///     ::jge_core::logger::init()?;
+///
+///     let root = ::jge_core::game::entity::Entity::new()?;
+///     let game = ::jge_core::Game::new(::jge_core::config::GameConfig::default(), root)?;
+///
+///     game.run()?;
+///     Ok(())
+/// }
+/// ```
 pub struct Game {
     config: GameConfig,
     window: Option<GameWindow>,
@@ -61,6 +87,19 @@ impl Game {
     /// 创建一个新的引擎实例。
     ///
     /// `root` 是场景树根实体，通常应已挂载 [`Node`] 组件；若缺失会记录错误日志（但仍会返回 `Ok`）。
+    ///
+    /// 通常你会用 [`crate::scene!`] 来构建 `root`：
+    ///
+    /// ```no_run
+    /// fn build_root() -> ::anyhow::Result<::jge_core::game::entity::Entity> {
+    ///     let bindings = ::jge_core::scene! {
+    ///         node "root" as root {
+    ///             // ... 在这里挂 Layer/Scene/Renderable 等组件
+    ///         }
+    ///     }?;
+    ///     Ok(bindings.root)
+    /// }
+    /// ```
     pub fn new(config: GameConfig, root: Entity) -> anyhow::Result<Self> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()

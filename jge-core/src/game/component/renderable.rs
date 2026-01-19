@@ -4,6 +4,28 @@ use crate::game::entity::Entity;
 
 #[component(Node)]
 #[derive(Debug, Clone)]
+/// 可渲染标记组件。
+///
+/// 挂载该组件的实体会被渲染系统视为“可参与渲染的对象”。
+///
+/// - 你通常会同时挂载 `Shape` 与 `Transform`（以及可选的 `Material`）。
+/// - 想临时隐藏一个实体时，可用 [`set_enabled`](Self::set_enabled) 关闭渲染。
+///
+/// # 示例
+///
+/// ```no_run
+/// use jge_core::game::{
+///     component::{renderable::Renderable, transform::Transform},
+///     entity::Entity,
+/// };
+///
+/// # fn main() -> anyhow::Result<()> {
+/// let e = Entity::new()?;
+/// e.register_component(Renderable::new())?;
+/// e.register_component(Transform::new())?;
+/// Ok(())
+/// # }
+/// ```
 pub struct Renderable {
     entity_id: Option<Entity>,
     enabled: bool,

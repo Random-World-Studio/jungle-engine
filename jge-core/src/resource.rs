@@ -25,22 +25,36 @@ pub struct Resource {
 pub struct ResourcePath(Vec<String>);
 
 impl ResourcePath {
+    /// 从路径段创建一个资源路径。
+    ///
+    /// # 示例
+    ///
+    /// ```
+    /// let p = ::jge_core::resource::ResourcePath::new(vec!["textures".into(), "ui".into(), "a.png".into()]);
+    /// assert_eq!(p.join("/"), "textures/ui/a.png");
+    /// ```
     pub fn new<S: Into<Vec<String>>>(segments: S) -> Self {
         Self(segments.into())
     }
 
+    /// 返回资源路径的分段切片。
     pub fn segments(&self) -> &[String] {
         &self.0
     }
 
+    /// 返回路径段数量。
     pub fn len(&self) -> usize {
         self.0.len()
     }
 
+    /// 是否为空路径（没有任何段）。
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
+    /// 用指定分隔符拼接为一个字符串。
+    ///
+    /// 注意：资源系统通常使用 `/` 作为逻辑分隔符。
     pub fn join(&self, separator: &str) -> String {
         self.0.join(separator)
     }
