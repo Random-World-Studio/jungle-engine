@@ -1,0 +1,61 @@
+# GitLab CI/CD: build workspace rustdoc and publish to GitLab Pages.
+# - Only documents this repository's crates (no dependency docs): `cargo doc --workspace --no-deps`
+# - Publishes `target/doc` as Pages site (`public/` artifact)
+
+stages:
+  - docs
+  - deploy
+
+variables:
+  CARGO_HOME: "$CI_PROJECT_DIR/.cargo"
+  RUST_BACKTRACE: "1"
+
+cache:
+  key: "${CI_COMMIT_REF_SLUG}"
+  paths:
+    - .cargo/registry/
+    - .cargo/git/
+    - target/
+
+# Build rustdoc for workspace crates only.
+rustdoc:
+  stage: docs
+  image: rust:1.76-bookworm
+  rules:
+    # Build on default branch and merge requests.
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  before_script:
+    - apt-get update
+    # winit/wayland/xkbcommon are common native deps for Linux builds.
+    # Keeping this minimal but practical for most runners.
+    - apt-get install -y --no-install-recommends pkg-config libwayland-dev libxkbcommon-dev
+    - rustc -V && cargo -V
+  script:
+    # Ensure we only generate docs for this workspace (no deps).
+    - cargo doc --workspace --no-deps
+  artifacts:
+    when: always
+    expire_in: 7 days
+    paths:
+      - target/doc/
+
+# GitLab Pages: must be a job named `pages` and produce `public/`.
+pages:
+  stage: deploy
+  image: debian:bookworm-slim
+  needs:
+    - job: rustdoc
+      artifacts: true
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  script:
+    - rm -rf public
+    - mkdir -p public
+    - cp -r target/doc/* public/
+    # Make sure Pages always has an index.
+    - test -f public/index.html
+  artifacts:
+    paths:
+      - public
+    expire_in: 30 days
