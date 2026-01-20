@@ -1,5 +1,3 @@
-#![cfg_attr(feature = "callsite_relative_paths", feature(proc_macro_span))]
-
 use proc_macro::TokenStream;
 
 mod component_attr;

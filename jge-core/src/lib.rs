@@ -1,6 +1,6 @@
 //! Jungle Engine 的核心库（`jge-core`）。
 //!
-//! 该 crate 提供引擎运行时（[`Game`]）、事件抽象（[`event`]）、资源系统（[`resource`]）以及 ECS 风格的组件/实体/系统模块（[`game`]）。
+//! 该 crate 提供引擎运行时（[`Game`]）、事件抽象（[`event`]）、资源系统（[`mod@resource`]）以及 ECS 风格的组件/实体/系统模块（[`game`]）。
 //!
 //! 大多数游戏项目只需要：
 //! - 通过 [`Game`] 创建并运行主循环

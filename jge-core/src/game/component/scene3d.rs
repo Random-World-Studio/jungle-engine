@@ -1,9 +1,9 @@
 //! 三维场景组件（`Scene3D`）。
 //!
-//! 把一个挂载了 [`Layer`](jge_core::game::component::layer::Layer) 的实体声明为“3D 渲染层”。
+//! 把一个挂载了 [`Layer`] 的实体声明为“3D 渲染层”。
 //! 典型用法：
 //! - 在 Layer 根实体上注册 `Scene3D`（会自动补齐默认 3D 着色器）。
-//! - 选择一个摄像机实体（挂载 [`Camera`](jge_core::game::component::camera::Camera) + `Transform`），并绑定到该场景。
+//! - 选择一个摄像机实体（挂载 [`Camera`] + `Transform`），并绑定到该场景。
 //! - 每帧通过 `Scene3D::visible_renderables` 获取当前视锥内的可见几何集合，用于渲染。
 
 use super::{
@@ -44,8 +44,8 @@ static SCENE3D_STORAGE: OnceLock<ComponentStorage<Scene3D>> = OnceLock::new();
 /// - （可选）绑定的摄像机实体，用于把摄像机的 `Transform` 同步到场景实体
 ///
 /// # 依赖
-/// - 该组件依赖 [`Layer`](jge_core::game::component::layer::Layer)。
-/// - 3D 场景实体通常也会有 [`Transform`](jge_core::game::component::transform::Transform)，用于渲染时的坐标基准。
+/// - 该组件依赖 [`Layer`]。
+/// - 3D 场景实体通常也会有 [`Transform`]，用于渲染时的坐标基准。
 ///
 /// # 示例
 ///

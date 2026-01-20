@@ -72,7 +72,7 @@ const CHUNK_SIZE: usize = 16;
 /// - 引擎内置组件（如 `Transform`、`Layer`、`Scene3D`）都已实现。
 /// - 自定义组件建议优先使用 `#[component]` / `#[component_impl]` 宏生成实现。
 /// - **不要**在游戏代码里直接调用 `insert/read/write/remove/storage`。
-///   统一使用 [`Entity`](crate::game::entity::Entity) 的 API（`register_component`/`get_component`/`get_component_mut`）。
+///   统一使用 [`Entity`] 的 API（`register_component`/`get_component`/`get_component_mut`）。
 pub trait Component: Sized + 'static {
     /// 返回该组件类型的全局存储。
     ///

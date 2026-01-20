@@ -34,7 +34,7 @@ impl std::fmt::Display for EntityId {
 /// `Entity` 是组件的“宿主”。你通过它来注册/卸载组件、以及读取/修改组件数据。
 ///
 /// 约定：
-/// - [`Entity::new`](Self::new) 创建实体时，会自动注册一个 [`Node`](crate::game::component::node::Node)。
+/// - [`Entity::new`](Self::new) 创建实体时，会自动注册一个 [`Node`]。
 ///   这让实体可以加入节点树（父子层级、Layer 子树遍历等）。
 ///
 /// # 示例
@@ -64,7 +64,7 @@ pub struct Entity {
 impl Entity {
     /// 创建一个新实体。
     ///
-    /// 该函数会自动注册一个默认 [`Node`](crate::game::component::node::Node)。
+    /// 该函数会自动注册一个默认 [`Node`]。
     pub fn new() -> anyhow::Result<Self> {
         let id = EntityId::new();
         Self::new_with_id(id)
@@ -73,7 +73,7 @@ impl Entity {
     /// 使用指定的 [`EntityId`] 创建实体。
     ///
     /// 一般用于：从存档/网络同步恢复实体 ID。
-    /// 同样会自动注册默认 [`Node`](crate::game::component::node::Node)。
+    /// 同样会自动注册默认 [`Node`]。
     pub fn new_with_id(id: EntityId) -> anyhow::Result<Self> {
         let entity = Self { id };
         let node_component = Node::new(format!("entity_{}", entity.id().short()))?;

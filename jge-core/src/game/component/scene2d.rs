@@ -1,6 +1,6 @@
 //! 二维场景组件（`Scene2D`）。
 //!
-//! 把一个挂载了 [`Layer`](jge_core::game::component::layer::Layer) 的实体声明为“2D 渲染层”。
+//! 把一个挂载了 [`Layer`] 的实体声明为“2D 渲染层”。
 //! 常见用法：
 //! - 在 Layer 根实体上注册 `Scene2D`（会自动补齐默认 2D 着色器）。
 //! - 在该 Layer 子树下放置 `Renderable + Shape + Transform (+ Material)` 的实体参与渲染。
@@ -34,7 +34,7 @@ use crate::resource::ResourcePath;
 /// 二维场景默认按照世界空间的 `z` 进行遮挡：更大的 `z` 代表更靠前。
 ///
 /// 依赖与约定：
-/// - 该组件依赖 [`Layer`](jge_core::game::component::layer::Layer)。注册 `Scene2D` 时会按需自动注册 `Layer`。
+/// - 该组件依赖 [`Layer`]。注册 `Scene2D` 时会按需自动注册 `Layer`。
 /// - 参与渲染的实体通常需要：
 ///   - [`Renderable`](jge_core::game::component::renderable::Renderable)
 ///   - [`Shape`](jge_core::game::component::shape::Shape)
@@ -172,7 +172,7 @@ impl Scene2D {
     /// - 2D 渲染（按 chunk/实体批处理）
     /// - 2D 逻辑拾取/可见性判定
     ///
-    /// 注意：需要该组件已绑定到实体，且该实体已注册 [`Layer`](jge_core::game::component::layer::Layer)。
+    /// 注意：需要该组件已绑定到实体，且该实体已注册 [`Layer`]。
     pub fn visible_faces(&self) -> Result<Vec<Scene2DFaceGroup>, Scene2DVisibilityError> {
         let entity = self
             .entity_id

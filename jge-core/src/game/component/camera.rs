@@ -20,7 +20,7 @@ const DEFAULT_REFERENCE_FRAMEBUFFER_HEIGHT: u32 = 1080;
 #[derive(Debug, Clone)]
 /// 3D 摄像机组件。
 ///
-/// 摄像机定义了视锥参数（FOV、近/远裁剪面等），并依赖实体的 [`Transform`](jge_core::game::component::transform::Transform)
+/// 摄像机定义了视锥参数（FOV、近/远裁剪面等），并依赖实体的 [`Transform`]
 /// 来确定相机在世界中的位置与朝向。
 ///
 /// 常见用法：把 `Camera` 挂在一个实体上，然后在 `Scene3D` 中绑定该实体作为当前摄像机。

@@ -652,17 +652,9 @@ fn expand_scene_from_file(path_lit: syn::LitStr, callsite_file: PathBuf) -> Toke
             const _: &str = include_str!(#path_lit);
         }
     } else {
-        if cfg!(feature = "callsite_relative_paths") {
-            // 让依赖追踪语义与调用点一致：相对路径以源文件目录为基准。
-            quote! {
-                const _: &str = include_str!(#path_lit);
-            }
-        } else {
-            // stable 默认：相对路径以调用方 crate 的 `src/` 为基准。
-            // 这匹配绝大多数调用点都位于 `src/*.rs` 的场景（相对路径语义接近“当前源文件目录”）。
-            quote! {
-                const _: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/", #path_lit));
-            }
+        // 让依赖追踪语义与调用点一致：相对路径以源文件目录为基准。
+        quote! {
+            const _: &str = include_str!(#path_lit);
         }
     };
 
