@@ -20,7 +20,7 @@ cache:
 # Build rustdoc for workspace crates only.
 rustdoc:
   stage: docs
-  image: rust:1.76-bookworm
+  image: rust:1.92-bookworm
   rules:
     # Build on default branch and merge requests.
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
