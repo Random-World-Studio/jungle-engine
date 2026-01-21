@@ -467,10 +467,19 @@ if let Some(mut health) = entity.get_component_mut::<Health>() {
 - `jge_core::game::component::layer::Layer`：把一棵节点子树声明为一个渲染层。
 - `jge_core::game::component::scene2d::Scene2D`：2D 渲染路径。
 - `jge_core::game::component::scene3d::Scene3D`：3D 渲染路径（可绑定摄像机）。
+- `Scene2D` 的坐标约定：
+    - **视口中心为屏幕原点**（NDC 的 (0,0)），默认 `offset=(0,0)` 时世界坐标 (0,0) 落在视口中心。
+    - `offset` 表示“视口中心对应的世界坐标”；`pixels_per_unit` 表示世界单位到像素的缩放。
+    - x 向右为正，y 向上为正（注意这与 `LayerViewport` 的归一化坐标原点在左上角是两个不同概念）。
 - 常用组合：
     - `Renderable + Transform + Shape (+ Material)`：让实体“能被绘制”。
     - `Camera + Transform`：摄像机实体。
     - `Light + PointLight/ParallelLight (+ Transform)`：光源实体。
+
+补充：如果你需要在运行时实时获取“当前屏幕（或视口）内可见的世界坐标范围”，可以使用：
+
+- `Scene2D::visible_world_bounds()`：获取当前 Layer 的可见范围；如果该 Layer 设置了 `LayerViewport`（分屏/裁剪），会自动读取并应用。
+    - 该函数内部使用引擎维护的窗口/渲染目标像素尺寸（在窗口 resize 后的下一帧渲染会自动更新）；尺寸尚未初始化时会返回 `None`。
 
 ### 9.5 资源系统（resource!）
 

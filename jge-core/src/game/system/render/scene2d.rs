@@ -24,10 +24,11 @@ impl RenderSystem {
         entity: Entity,
         context: &mut LayerRenderContext<'_, '_>,
     ) {
-        let scene_guard = match entity.get_component::<Scene2D>() {
+        let mut scene_guard = match entity.get_component_mut::<Scene2D>() {
             Some(scene) => scene,
             None => return,
         };
+        scene_guard.set_framebuffer_size(context.framebuffer_size);
         let scene_offset = scene_guard.offset();
         let pixels_per_unit = scene_guard.pixels_per_unit();
         drop(scene_guard);

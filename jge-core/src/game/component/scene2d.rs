@@ -19,8 +19,8 @@ use lodtree::coords::OctVec;
 use super::{
     component_impl,
     layer::{
-        Layer, LayerLodUpdate, LayerRenderableBundle, LayerTraversalError, RenderPipelineStage,
-        ShaderLanguage,
+        Layer, LayerLodUpdate, LayerRenderableBundle, LayerTraversalError, LayerViewport,
+        RenderPipelineStage, ShaderLanguage,
     },
 };
 use crate::game::{
@@ -32,6 +32,15 @@ use crate::resource::ResourcePath;
 /// 二维场景组件。
 ///
 /// 二维场景默认按照世界空间的 `z` 进行遮挡：更大的 `z` 代表更靠前。
+///
+/// ## 坐标系与“屏幕原点”
+///
+/// `Scene2D` 的渲染坐标采用 NDC（Normalized Device Coordinates）映射：
+/// - 视口中心对应 NDC 的 `(0,0)`。
+/// - 默认 `offset = (0,0)` 时，世界坐标 `(0,0)` 会落在视口中心。
+/// - `offset` 表示“视口中心对应的世界坐标”。
+/// - `pixels_per_unit` 表示世界单位到像素的缩放（值越大，同样大小的物体在屏幕上越大）。
+/// - x 轴向右为正，y 轴向上为正。
 ///
 /// 依赖与约定：
 /// - 该组件依赖 [`Layer`]。注册 `Scene2D` 时会按需自动注册 `Layer`。
@@ -57,6 +66,20 @@ pub struct Scene2D {
     entity_id: Option<Entity>,
     offset: Vector2<f32>,
     pixels_per_unit: f32,
+    framebuffer_size: Option<(u32, u32)>,
+}
+
+/// Scene2D 在当前视口内可见的世界坐标范围（单位：世界单位）。
+///
+/// `min/max` 对应的轴向边界为：
+/// - `min.x`：左边界
+/// - `max.x`：右边界
+/// - `min.y`：下边界
+/// - `max.y`：上边界
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Scene2DVisibleWorldBounds {
+    pub min: Vector2<f32>,
+    pub max: Vector2<f32>,
 }
 
 const DEFAULT_PIXELS_PER_UNIT: f32 = 100.0;
@@ -76,10 +99,13 @@ impl Scene2D {
             entity_id: None,
             offset: Vector2::zeros(),
             pixels_per_unit: DEFAULT_PIXELS_PER_UNIT,
+            framebuffer_size: None,
         }
     }
 
     /// 设置坐标原点的偏移量（世界单位）。
+    ///
+    /// 该偏移量表示“视口中心点（NDC=(0,0)）对应的世界坐标”。
     pub fn set_offset(&mut self, offset: Vector2<f32>) {
         self.offset = offset;
     }
@@ -101,6 +127,85 @@ impl Scene2D {
     /// 当前单位长度对应的像素数量。
     pub fn pixels_per_unit(&self) -> f32 {
         self.pixels_per_unit
+    }
+
+    pub(crate) fn set_framebuffer_size(&mut self, framebuffer_size: (u32, u32)) {
+        self.framebuffer_size = Some((framebuffer_size.0.max(1), framebuffer_size.1.max(1)));
+    }
+
+    fn viewport_framebuffer_size(
+        framebuffer_size: (u32, u32),
+        viewport: Option<LayerViewport>,
+    ) -> (u32, u32) {
+        let fb_width = framebuffer_size.0.max(1) as f32;
+        let fb_height = framebuffer_size.1.max(1) as f32;
+
+        if let Some(viewport) = viewport {
+            let values = [viewport.x, viewport.y, viewport.width, viewport.height];
+            if values.iter().any(|v| !v.is_finite()) {
+                return (framebuffer_size.0.max(1), framebuffer_size.1.max(1));
+            }
+
+            let x = viewport.x.clamp(0.0, 1.0);
+            let y = viewport.y.clamp(0.0, 1.0);
+            let w = viewport.width.clamp(0.0, 1.0);
+            let h = viewport.height.clamp(0.0, 1.0);
+
+            let x2 = (x + w).clamp(0.0, 1.0);
+            let y2 = (y + h).clamp(0.0, 1.0);
+
+            let x_px = (x * fb_width).floor() as i64;
+            let y_px = (y * fb_height).floor() as i64;
+            let x2_px = (x2 * fb_width).ceil() as i64;
+            let y2_px = (y2 * fb_height).ceil() as i64;
+
+            let fb_w_i64 = fb_width as i64;
+            let fb_h_i64 = fb_height as i64;
+            let x_px = x_px.clamp(0, fb_w_i64);
+            let y_px = y_px.clamp(0, fb_h_i64);
+            let x2_px = x2_px.clamp(0, fb_w_i64);
+            let y2_px = y2_px.clamp(0, fb_h_i64);
+
+            let width_px = (x2_px - x_px).max(1) as u32;
+            let height_px = (y2_px - y_px).max(1) as u32;
+            return (width_px, height_px);
+        }
+
+        (framebuffer_size.0.max(1), framebuffer_size.1.max(1))
+    }
+
+    /// 获取当前视口内“屏幕可见”的世界坐标范围。
+    ///
+    /// - 返回值是世界单位下的轴对齐边界框。
+    ///
+    /// 当 `Scene2D` 已绑定到一个实体上时，该函数会从该实体的 [`Layer`] 中读取
+    /// `LayerViewport`，从而在存在视口裁剪（分屏/角落 UI Layer）时返回“裁剪后的可见范围”。
+    ///
+    /// 注意：该函数不依赖 wgpu/winit；但它依赖“窗口/渲染目标像素尺寸”。
+    /// 引擎会在渲染阶段（以及窗口 resize 后的下一帧渲染）自动更新该尺寸。
+    /// 在尺寸尚未初始化时会返回 `None`。
+    pub fn visible_world_bounds(&self) -> Option<Scene2DVisibleWorldBounds> {
+        let framebuffer_size = self.framebuffer_size?;
+
+        let viewport = self
+            .entity_id
+            .and_then(|entity| entity.get_component::<Layer>())
+            .and_then(|layer| layer.viewport());
+
+        let (vp_width_px, vp_height_px) =
+            Self::viewport_framebuffer_size(framebuffer_size, viewport);
+
+        let half_width = vp_width_px as f32 * 0.5;
+        let half_height = vp_height_px as f32 * 0.5;
+        let ppu = self.pixels_per_unit.max(f32::EPSILON);
+
+        let dx = half_width / ppu;
+        let dy = half_height / ppu;
+
+        Some(Scene2DVisibleWorldBounds {
+            min: Vector2::new(self.offset.x - dx, self.offset.y - dy),
+            max: Vector2::new(self.offset.x + dx, self.offset.y + dy),
+        })
     }
 
     /// 预热场景的 LOD，使 Layer 至少构建出一批八叉树节点。
@@ -527,6 +632,98 @@ mod tests {
         // 非法数值应被忽略。
         scene.set_pixels_per_unit(-10.0);
         assert!((scene.pixels_per_unit() - 64.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn scene2d_visible_world_bounds_defaults_to_center_origin() {
+        let mut scene = Scene2D::new();
+        scene.set_framebuffer_size((200, 100));
+        let bounds = scene
+            .visible_world_bounds()
+            .expect("framebuffer size should be set");
+
+        // pixels_per_unit=100 => half width=100px => 1.0 world units.
+        assert!((bounds.min.x - (-1.0)).abs() < 1.0e-6);
+        assert!((bounds.max.x - (1.0)).abs() < 1.0e-6);
+        // half height=50px => 0.5 world units.
+        assert!((bounds.min.y - (-0.5)).abs() < 1.0e-6);
+        assert!((bounds.max.y - (0.5)).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn scene2d_visible_world_bounds_uses_layer_viewport_when_attached() {
+        let entity = Entity::new().expect("应能创建实体");
+
+        // Layer + Scene2D 需要 Renderable 依赖（Scene2D 依赖 Layer，Layer 依赖 Renderable）。
+        entity
+            .register_component(Renderable::new())
+            .expect("应能注册 Renderable");
+
+        let mut layer = Layer::new();
+        layer.set_viewport(crate::game::component::layer::LayerViewport::normalized(
+            0.0, 0.0, 0.5, 0.5,
+        ));
+        entity.register_component(layer).expect("应能注册 Layer");
+
+        let mut scene = Scene2D::new();
+        scene.set_offset(Vector2::new(0.0, 0.0));
+        scene.set_pixels_per_unit(100.0);
+        entity.register_component(scene).expect("应能注册 Scene2D");
+
+        // 模拟引擎在渲染阶段更新的 framebuffer size。
+        {
+            let mut scene = entity
+                .get_component_mut::<Scene2D>()
+                .expect("应能读取 Scene2D");
+            scene.set_framebuffer_size((200, 100));
+        }
+
+        let scene = entity.get_component::<Scene2D>().expect("应能读取 Scene2D");
+
+        // framebuffer 200x100，viewport 0.5x0.5 => 100x50 pixels.
+        // ppu=100 => half width=50px => 0.5 world units; half height=25px => 0.25 world units.
+        let bounds = scene
+            .visible_world_bounds()
+            .expect("framebuffer size should be set");
+        assert!((bounds.min.x - (-0.5)).abs() < 1.0e-6);
+        assert!((bounds.max.x - 0.5).abs() < 1.0e-6);
+        assert!((bounds.min.y - (-0.25)).abs() < 1.0e-6);
+        assert!((bounds.max.y - 0.25).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn scene2d_visible_world_bounds_respects_offset_and_pixels_per_unit_when_attached() {
+        let entity = Entity::new().expect("应能创建实体");
+        entity
+            .register_component(Renderable::new())
+            .expect("应能注册 Renderable");
+        entity
+            .register_component(Layer::new())
+            .expect("应能注册 Layer");
+
+        let mut scene = Scene2D::new();
+        scene.set_offset(Vector2::new(10.0, -4.0));
+        scene.set_pixels_per_unit(50.0);
+        entity.register_component(scene).expect("应能注册 Scene2D");
+
+        {
+            let mut scene = entity
+                .get_component_mut::<Scene2D>()
+                .expect("应能读取 Scene2D");
+            scene.set_framebuffer_size((400, 200));
+        }
+
+        let scene = entity.get_component::<Scene2D>().expect("应能读取 Scene2D");
+        let bounds = scene
+            .visible_world_bounds()
+            .expect("framebuffer size should be set");
+
+        // half width=200px / 50ppu => 4.0 world units.
+        assert!((bounds.min.x - 6.0).abs() < 1.0e-6);
+        assert!((bounds.max.x - 14.0).abs() < 1.0e-6);
+        // half height=100px / 50ppu => 2.0 world units.
+        assert!((bounds.min.y - (-6.0)).abs() < 1.0e-6);
+        assert!((bounds.max.y - (-2.0)).abs() < 1.0e-6);
     }
 
     fn register_layer_scene(entity: Entity) {
