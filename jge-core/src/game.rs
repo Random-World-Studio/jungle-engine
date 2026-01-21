@@ -34,10 +34,7 @@ use winit::{
 
 use crate::{
     config::{GameConfig, WindowConfig, WindowMode},
-    event::{
-        DeviceEventMapper, Event as GameEvent, NoopDeviceEventMapper, NoopWindowEventMapper,
-        WindowEventMapper,
-    },
+    event::{Event as GameEvent, EventMapper, NoopEventMapper},
     game::{
         component::{Component, node::Node},
         entity::Entity,
@@ -72,8 +69,7 @@ pub struct Game {
 
     window_init: Option<Box<dyn FnMut(&mut Game) + Send + Sync>>,
 
-    window_event_mapper: Box<dyn WindowEventMapper>,
-    device_event_mapper: Box<dyn DeviceEventMapper>,
+    event_mapper: Box<dyn EventMapper>,
 
     root: Entity,
 
@@ -116,8 +112,7 @@ impl Game {
             config,
             window: None,
             window_init: None,
-            window_event_mapper: Box::new(NoopWindowEventMapper),
-            device_event_mapper: Box::new(NoopDeviceEventMapper),
+            event_mapper: Box::new(NoopEventMapper),
             root,
             last_redraw: Instant::now(),
             stopped: Arc::new(AtomicBool::new(false)),
@@ -165,37 +160,20 @@ impl Game {
         self
     }
 
-    /// 设置窗口事件映射器：把 `winit::WindowEvent` 转换为引擎事件并分发给 `GameLogic::on_event`。
-    pub fn set_window_event_mapper<M>(&mut self, mapper: M)
+    /// 设置事件映射器：把 `winit::WindowEvent` 转换为引擎事件并分发给 `GameLogic::on_event`。
+    pub fn set_event_mapper<M>(&mut self, mapper: M)
     where
-        M: WindowEventMapper + 'static,
+        M: EventMapper + 'static,
     {
-        self.window_event_mapper = Box::new(mapper);
+        self.event_mapper = Box::new(mapper);
     }
 
     /// 构建器风格：返回带映射器的新 `Game`。
-    pub fn with_window_event_mapper<M>(mut self, mapper: M) -> Self
+    pub fn with_event_mapper<M>(mut self, mapper: M) -> Self
     where
-        M: WindowEventMapper + 'static,
+        M: EventMapper + 'static,
     {
-        self.set_window_event_mapper(mapper);
-        self
-    }
-
-    /// 设置设备事件映射器：把 `winit::DeviceEvent` 转换为引擎事件并分发给 `GameLogic::on_event`。
-    pub fn set_device_event_mapper<M>(&mut self, mapper: M)
-    where
-        M: DeviceEventMapper + 'static,
-    {
-        self.device_event_mapper = Box::new(mapper);
-    }
-
-    /// 构建器风格：返回带设备事件映射器的新 `Game`。
-    pub fn with_device_event_mapper<M>(mut self, mapper: M) -> Self
-    where
-        M: DeviceEventMapper + 'static,
-    {
-        self.set_device_event_mapper(mapper);
+        self.set_event_mapper(mapper);
         self
     }
 
@@ -333,7 +311,7 @@ impl ApplicationHandler for Game {
         _window_id: WindowId,
         event: WindowEvent,
     ) {
-        if let Some(mapped) = self.window_event_mapper.map_window_event(&event) {
+        if let Some(mapped) = self.event_mapper.map_window_event(&event) {
             self.dispatch_event(mapped);
         }
 
@@ -378,7 +356,7 @@ impl ApplicationHandler for Game {
         _device_id: DeviceId,
         event: DeviceEvent,
     ) {
-        if let Some(mapped) = self.device_event_mapper.map_device_event(&event) {
+        if let Some(mapped) = self.event_mapper.map_device_event(&event) {
             self.dispatch_event(mapped);
         }
     }

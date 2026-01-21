@@ -14,7 +14,7 @@ use jge_core::{
     config::GameConfig,
     event::{
         DeviceEvent, ElementState, Event, Key, KeyCode, KeyEvent, NamedKey, PhysicalKey,
-        WindowEvent,
+        WindowEvent, split_event_mapper,
     },
     game::{
         component::{
@@ -82,7 +82,7 @@ fn main() -> anyhow::Result<()> {
             state.window = Some(Arc::clone(&window));
 
             // Wayland 下 set_cursor_position 仅在 Locked 时可用；同时“允许移动+回中法”也经常受限。
-            // 这里采用更稳的方案：抓取光标 + 隐藏光标 + 使用 DeviceEvent::MouseMotion 获取相对 delta。
+            // 优先采用：抓取光标 + 隐藏光标 + 使用 DeviceEvent::MouseMotion 获取相对 delta。
             // 如果 Locked 失败，则退化为“CursorMoved + 每次移动后回中”方案，避免光标到边缘后没法继续转向。
             match window.set_cursor_grab(CursorGrabMode::Locked) {
                 Ok(()) => {
@@ -110,85 +110,87 @@ fn main() -> anyhow::Result<()> {
             }
             window.set_cursor_visible(false);
         })
-        .with_device_event_mapper(move |event: &DeviceEvent| {
-            let mode = mouse_state_for_device
-                .lock()
-                .expect("mouse state mutex poisoned")
-                .mode;
-            if mode != MouseInputMode::LockedRelative {
-                return None;
-            }
+        .with_event_mapper(split_event_mapper(
+            move |event: &WindowEvent| match event {
+                WindowEvent::MouseWheel { delta, .. } => {
+                    let steps = match delta {
+                        MouseScrollDelta::LineDelta(_, y) => *y,
+                        MouseScrollDelta::PixelDelta(position) => (position.y as f32) / 120.0,
+                    };
+                    if steps.abs() <= f32::EPSILON {
+                        return None;
+                    }
+                    Some(Event::custom(InputEvent::MouseWheel { steps }))
+                }
+                WindowEvent::CursorMoved { position, .. } => {
+                    let mut state = mouse_state_for_window
+                        .lock()
+                        .expect("mouse state mutex poisoned");
+                    if state.mode != MouseInputMode::Recenter {
+                        return None;
+                    }
 
-            match event {
-                DeviceEvent::MouseMotion { delta } => Some(Event::custom(InputEvent::MouseDelta {
-                    dx: delta.0 as f32,
-                    dy: delta.1 as f32,
-                })),
+                    let Some(window) = state.window.clone() else {
+                        return None;
+                    };
+
+                    let size = window.inner_size();
+                    if size.width == 0 || size.height == 0 {
+                        return None;
+                    }
+
+                    let center_x = (size.width as f64) * 0.5;
+                    let center_y = (size.height as f64) * 0.5;
+
+                    if state.ignore_next_cursor_moved {
+                        // 我们主动 set_cursor_position 会触发一次 CursorMoved（到中心）。
+                        // 这次事件不应产生视角旋转。
+                        state.ignore_next_cursor_moved = false;
+                        return None;
+                    }
+
+                    let dx = (position.x - center_x) as f32;
+                    let dy = (position.y - center_y) as f32;
+
+                    let _ = window
+                        .set_cursor_grab(CursorGrabMode::Locked)
+                        .or_else(|_| window.set_cursor_grab(CursorGrabMode::Confined));
+                    if window
+                        .set_cursor_position(PhysicalPosition::new(center_x, center_y))
+                        .is_ok()
+                    {
+                        state.ignore_next_cursor_moved = true;
+                    }
+                    let _ = window.set_cursor_grab(CursorGrabMode::None);
+
+                    Some(Event::custom(InputEvent::MouseDelta { dx, dy }))
+                }
+                WindowEvent::KeyboardInput { event, .. } => {
+                    let action = map_key_event_to_camera_action(event)?;
+                    let pressed = matches!(event.state, ElementState::Pressed);
+                    Some(Event::custom(InputEvent::Action { action, pressed }))
+                }
+                WindowEvent::Focused(false) => Some(Event::custom(InputEvent::Clear)),
                 _ => None,
-            }
-        })
-        .with_window_event_mapper(move |event: &WindowEvent| match event {
-            WindowEvent::MouseWheel { delta, .. } => {
-                let steps = match delta {
-                    MouseScrollDelta::LineDelta(_, y) => *y,
-                    MouseScrollDelta::PixelDelta(position) => (position.y as f32) / 120.0,
-                };
-                if steps.abs() <= f32::EPSILON {
-                    return None;
-                }
-                Some(Event::custom(InputEvent::MouseWheel { steps }))
-            }
-            WindowEvent::CursorMoved { position, .. } => {
-                let mut state = mouse_state_for_window
+            },
+            move |event: &DeviceEvent| {
+                let mode = mouse_state_for_device
                     .lock()
-                    .expect("mouse state mutex poisoned");
-                if state.mode != MouseInputMode::Recenter {
+                    .expect("mouse state mutex poisoned")
+                    .mode;
+                if mode != MouseInputMode::LockedRelative {
                     return None;
                 }
 
-                let Some(window) = state.window.clone() else {
-                    return None;
-                };
-
-                let size = window.inner_size();
-                if size.width == 0 || size.height == 0 {
-                    return None;
+                match event {
+                    DeviceEvent::MouseMotion { delta } => Some(Event::custom(InputEvent::MouseDelta {
+                        dx: delta.0 as f32,
+                        dy: delta.1 as f32,
+                    })),
+                    _ => None,
                 }
-
-                let center_x = (size.width as f64) * 0.5;
-                let center_y = (size.height as f64) * 0.5;
-
-                if state.ignore_next_cursor_moved {
-                    // 我们主动 set_cursor_position 会触发一次 CursorMoved（到中心）。
-                    // 这次事件不应产生视角旋转。
-                    state.ignore_next_cursor_moved = false;
-                    return None;
-                }
-
-                let dx = (position.x - center_x) as f32;
-                let dy = (position.y - center_y) as f32;
-
-                let _ = window
-                    .set_cursor_grab(CursorGrabMode::Locked)
-                    .or_else(|_| window.set_cursor_grab(CursorGrabMode::Confined));
-                if window
-                    .set_cursor_position(PhysicalPosition::new(center_x, center_y))
-                    .is_ok()
-                {
-                    state.ignore_next_cursor_moved = true;
-                }
-                let _ = window.set_cursor_grab(CursorGrabMode::None);
-
-                Some(Event::custom(InputEvent::MouseDelta { dx, dy }))
-            }
-            WindowEvent::KeyboardInput { event, .. } => {
-                let action = map_key_event_to_camera_action(event)?;
-                let pressed = matches!(event.state, ElementState::Pressed);
-                Some(Event::custom(InputEvent::Action { action, pressed }))
-            }
-            WindowEvent::Focused(false) => Some(Event::custom(InputEvent::Clear)),
-            _ => None,
-        });
+            },
+        ));
 
     game.run()
 }

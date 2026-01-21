@@ -250,7 +250,7 @@ enum InputEvent {
 }
 
 fn wire_event_mapping(game: jge_core::Game) -> jge_core::Game {
-    game.with_window_event_mapper(|event: &WindowEvent| match event {
+    game.with_event_mapper(|event: &WindowEvent| match event {
         WindowEvent::KeyboardInput { event, .. } => {
             if event.state != ElementState::Pressed {
                 return None;

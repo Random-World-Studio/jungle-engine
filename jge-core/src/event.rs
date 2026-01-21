@@ -60,10 +60,13 @@ impl Debug for Event {
 ///
 /// 游戏侧可实现该 trait，把 `WindowEvent` 转成自己的事件类型并包进 [`Event::Custom`]。
 ///
+/// 同一个映射器也可以选择性地处理 `DeviceEvent`（例如 `MouseMotion` 的相对位移），以便在
+/// 平台/窗口系统限制导致 `CursorMoved` 不可靠时，仍能获得稳定的相对输入。
+///
 /// # 示例：用闭包实现映射器
 ///
 /// ```
-/// use ::jge_core::event::{Event, WindowEvent, WindowEventMapper};
+/// use ::jge_core::event::{Event, EventMapper, WindowEvent};
 ///
 /// let mut mapper = |evt: &WindowEvent| {
 ///     // 这里仅做演示：真实项目中你通常会匹配特定按键/鼠标事件。
@@ -72,16 +75,25 @@ impl Debug for Event {
 /// };
 ///
 /// // 通过 trait 调用：
-/// let _ = WindowEventMapper::map_window_event(&mut mapper, &WindowEvent::Focused(true));
+/// let _ = EventMapper::map_window_event(&mut mapper, &WindowEvent::Focused(true));
 /// ```
-pub trait WindowEventMapper: Send + Sync {
+pub trait EventMapper: Send + Sync {
     /// 将 `winit::WindowEvent` 转换为引擎 [`Event`]。
     ///
     /// 返回 `None` 表示忽略该事件。
-    fn map_window_event(&mut self, event: &WindowEvent) -> Option<Event>;
+    fn map_window_event(&mut self, _event: &WindowEvent) -> Option<Event> {
+        None
+    }
+
+    /// 将 `winit::DeviceEvent` 转换为引擎 [`Event`]。
+    ///
+    /// 默认忽略所有设备事件；需要时可覆写此方法（典型用例：`DeviceEvent::MouseMotion`）。
+    fn map_device_event(&mut self, _event: &DeviceEvent) -> Option<Event> {
+        None
+    }
 }
 
-impl<F> WindowEventMapper for F
+impl<F> EventMapper for F
 where
     F: FnMut(&WindowEvent) -> Option<Event> + Send + Sync,
 {
@@ -91,40 +103,45 @@ where
 }
 
 /// 默认映射器：忽略所有窗口事件。
-pub struct NoopWindowEventMapper;
+pub struct NoopEventMapper;
 
-impl WindowEventMapper for NoopWindowEventMapper {
-    fn map_window_event(&mut self, _event: &WindowEvent) -> Option<Event> {
-        None
-    }
-}
+impl EventMapper for NoopEventMapper {}
 
-/// 将 `winit` 的设备事件映射为引擎事件。
+/// 把“窗口事件映射”和“设备事件映射”组合成一个 [`EventMapper`]。
 ///
-/// 典型用途：读取 `DeviceEvent::MouseMotion` 的相对位移，用于第一人称视角控制。
-pub trait DeviceEventMapper: Send + Sync {
-    /// 将 `winit::DeviceEvent` 转换为引擎 [`Event`]。
-    ///
-    /// 返回 `None` 表示忽略该事件。
-    fn map_device_event(&mut self, event: &DeviceEvent) -> Option<Event>;
+/// 适用于需要同时处理 `WindowEvent` 与 `DeviceEvent` 的场景（例如鼠标视角控制）。
+pub struct SplitEventMapper<W, D> {
+    window: W,
+    device: D,
 }
 
-impl<F> DeviceEventMapper for F
+impl<W, D> SplitEventMapper<W, D> {
+    pub fn new(window: W, device: D) -> Self {
+        Self { window, device }
+    }
+}
+
+impl<W, D> EventMapper for SplitEventMapper<W, D>
 where
-    F: FnMut(&DeviceEvent) -> Option<Event> + Send + Sync,
+    W: FnMut(&WindowEvent) -> Option<Event> + Send + Sync,
+    D: FnMut(&DeviceEvent) -> Option<Event> + Send + Sync,
 {
+    fn map_window_event(&mut self, event: &WindowEvent) -> Option<Event> {
+        (self.window)(event)
+    }
+
     fn map_device_event(&mut self, event: &DeviceEvent) -> Option<Event> {
-        (self)(event)
+        (self.device)(event)
     }
 }
 
-/// 默认映射器：忽略所有设备事件。
-pub struct NoopDeviceEventMapper;
-
-impl DeviceEventMapper for NoopDeviceEventMapper {
-    fn map_device_event(&mut self, _event: &DeviceEvent) -> Option<Event> {
-        None
-    }
+/// 便捷构造：创建一个同时处理窗口/设备事件的映射器。
+pub fn split_event_mapper<W, D>(window: W, device: D) -> SplitEventMapper<W, D>
+where
+    W: FnMut(&WindowEvent) -> Option<Event> + Send + Sync,
+    D: FnMut(&DeviceEvent) -> Option<Event> + Send + Sync,
+{
+    SplitEventMapper::new(window, device)
 }
 
 #[cfg(test)]
@@ -164,7 +181,7 @@ mod tests {
     }
 
     #[test]
-    fn window_event_mapper_closure_is_used() {
+    fn event_mapper_closure_is_used() {
         let calls = Arc::new(AtomicUsize::new(0));
         let calls_for_mapper = calls.clone();
         let mut mapper = |event: &WindowEvent| {
@@ -176,37 +193,19 @@ mod tests {
         };
 
         let event = WindowEvent::Resized(PhysicalSize::new(800u32, 600u32));
-        let mapped =
-            WindowEventMapper::map_window_event(&mut mapper, &event).expect("应能映射窗口事件");
+        let mapped = EventMapper::map_window_event(&mut mapper, &event).expect("应能映射窗口事件");
         assert_eq!(calls.load(Ordering::Relaxed), 1);
         assert_eq!(mapped.downcast_ref::<u32>(), Some(&800));
     }
 
     #[test]
-    fn device_event_mapper_closure_is_used() {
-        let calls = Arc::new(AtomicUsize::new(0));
-        let calls_for_mapper = calls.clone();
-        let mut mapper = |_event: &DeviceEvent| {
-            calls_for_mapper.fetch_add(1, Ordering::Relaxed);
-            Some(Event::custom("device"))
-        };
-
-        let event = DeviceEvent::Added;
-        let mapped =
-            DeviceEventMapper::map_device_event(&mut mapper, &event).expect("应能映射设备事件");
-        assert_eq!(calls.load(Ordering::Relaxed), 1);
-        assert_eq!(mapped.downcast_ref::<&'static str>(), Some(&"device"));
-    }
-
-    #[test]
     fn noop_mappers_return_none() {
-        let mut window = NoopWindowEventMapper;
-        let mut device = NoopDeviceEventMapper;
+        let mut mapper = NoopEventMapper;
 
         let window_event = WindowEvent::Resized(PhysicalSize::new(1u32, 1u32));
-        assert!(window.map_window_event(&window_event).is_none());
+        assert!(mapper.map_window_event(&window_event).is_none());
 
         let device_event = DeviceEvent::Added;
-        assert!(device.map_device_event(&device_event).is_none());
+        assert!(mapper.map_device_event(&device_event).is_none());
     }
 }
