@@ -24,7 +24,6 @@ use jge_core::{
             layer::{Layer, LayerViewport, ShaderLanguage},
             light::{Light, ParallelLight, PointLight},
             material::Material,
-            node::Node,
             renderable::Renderable,
             scene3d::Scene3D,
             shape::Shape,
@@ -253,11 +252,12 @@ fn build_demo_scene() -> anyhow::Result<Entity> {
                 node as camera {
                     + Camera::new();
 
-                    with(mut transform: Transform, mut node: Node) {
+                    * CameraControllerLogic::new();
+
+                    with(mut transform: Transform) {
                         transform.set_position(Vector3::new(0.0, 6.0, 6.0));
                         // +Y 向上：默认 forward 为 -Z，因此 pitch 需要为负才能“向下看”到地面。
                         transform.set_rotation(Vector3::new(-FRAC_PI_4, 0.0, 0.0));
-                        node.set_logic(CameraControllerLogic::new());
                         Ok(())
                     }
                 }
@@ -339,9 +339,10 @@ fn build_demo_scene() -> anyhow::Result<Entity> {
                         Ok(())
                     };
 
-                    with(mut transform: Transform, mut node: Node) {
+                    * CubeLogic;
+
+                    with(mut transform: Transform) {
                         transform.set_position(Vector3::new(-3.0, 0.5, 0.0));
-                        node.set_logic(CubeLogic);
                         Ok(())
                     }
                 }

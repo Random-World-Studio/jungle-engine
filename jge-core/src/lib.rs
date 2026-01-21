@@ -47,6 +47,7 @@ pub use game::Game;
 ///   - `+ CompExpr => |e, mut c| { ... };`：注册前配置组件（`c` 为 `&mut T`）
 ///   - `resource(name = path, ...) |e, c| { ... }`：在配置闭包前注入资源句柄
 ///   - `with(...) { ... }`：在块内自动执行 `get_component/get_component_mut` 并提供引用
+///   - `* LogicExpr;`：为当前节点挂载 `GameLogic`（等价于 `with(mut node: Node) { node.set_logic(LogicExpr); Ok(()) }`）
 ///
 /// `scene!` 展开后是一段普通 Rust 语句块：**严格按书写顺序执行**，并遵循 Rust 的作用域规则。
 ///

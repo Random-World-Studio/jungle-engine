@@ -128,13 +128,21 @@ mod tests {
 
             {
                 let mut logic = handle.lock().await;
-                logic.update(Entity::from(EntityId::new()), std::time::Duration::from_millis(1))
+                logic
+                    .update(
+                        Entity::from(EntityId::new()),
+                        std::time::Duration::from_millis(1),
+                    )
                     .await
                     .unwrap();
             }
             {
                 let mut logic = cloned.lock().await;
-                logic.update(Entity::from(EntityId::new()), std::time::Duration::from_millis(1))
+                logic
+                    .update(
+                        Entity::from(EntityId::new()),
+                        std::time::Duration::from_millis(1),
+                    )
                     .await
                     .unwrap();
             }

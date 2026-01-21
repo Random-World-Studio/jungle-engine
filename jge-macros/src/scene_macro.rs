@@ -150,6 +150,7 @@ mod scene_dsl {
         Child(NodeDecl),
         With(WithItem),
         Component(ComponentItem),
+        Logic(LogicItem),
     }
 
     impl Parse for NodeItem {
@@ -163,8 +164,28 @@ mod scene_dsl {
             if input.peek(Token![+]) {
                 return Ok(Self::Component(input.parse()?));
             }
+            if input.peek(Token![*]) {
+                return Ok(Self::Logic(input.parse()?));
+            }
 
-            Err(input.error("node 体内只允许：node ...、with(...) {...}、+ Component ...;"))
+            Err(input.error(
+                "node 体内只允许：node ...、with(...) {...}、+ Component ...;、* LogicExpr;",
+            ))
+        }
+    }
+
+    pub struct LogicItem {
+        pub expr: Expr,
+        pub span: proc_macro2::Span,
+    }
+
+    impl Parse for LogicItem {
+        fn parse(input: ParseStream) -> syn::Result<Self> {
+            let star: Token![*] = input.parse()?;
+            let span = star.span();
+            let expr: Expr = input.parse()?;
+            input.parse::<Token![;]>()?;
+            Ok(Self { expr, span })
         }
     }
 
@@ -591,6 +612,18 @@ mod scene_dsl {
                             }
                         });
                     }
+                }
+                NodeItem::Logic(logic_item) => {
+                    let logic_span = logic_item.span;
+                    let logic_expr = &logic_item.expr;
+                    stmts.push(quote_spanned! {logic_span=>
+                        {
+                            let mut __node = #out_var
+                                .get_component_mut::<#node_ty>()
+                                .with_context(|| "scene!: 实体缺少 Node 组件（无法挂载 GameLogic）")?;
+                            __node.set_logic(#logic_expr);
+                        }
+                    });
                 }
             }
         }

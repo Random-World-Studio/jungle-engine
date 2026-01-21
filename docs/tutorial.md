@@ -219,10 +219,14 @@ fn attach_logic_example() -> anyhow::Result<Entity> {
     let bindings = jge_core::scene! {
         node "root" as root {
             node "spin" as spin {
-                with(mut node: Node) {
-                    node.set_logic(Rotator { speed: 1.2 });
-                    Ok(())
-                }
+                // 推荐语法：直接用 `*` 给当前节点挂逻辑
+                * Rotator { speed: 1.2 };
+
+                // 等价写法（更显式）：
+                // with(mut node: Node) {
+                //     node.set_logic(Rotator { speed: 1.2 });
+                //     Ok(())
+                // }
             }
         }
     }?;
