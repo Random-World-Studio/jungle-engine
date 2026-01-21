@@ -19,6 +19,63 @@ use crate::resource::ResourceHandle;
 
 use super::{RenderSystem, cache::LayerRenderContext, util};
 
+const SCENE2D_DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+
+pub(in crate::game::system::render) struct Scene2DDepthAttachment {
+    _texture: wgpu::Texture,
+    view: wgpu::TextureView,
+    size: (u32, u32),
+}
+
+#[derive(Default)]
+pub(in crate::game::system::render) struct Scene2DDepthCache {
+    attachment: Option<Scene2DDepthAttachment>,
+}
+
+impl Scene2DDepthCache {
+    pub(in crate::game::system::render) fn ensure(
+        &mut self,
+        device: &wgpu::Device,
+        size: (u32, u32),
+    ) -> &wgpu::TextureView {
+        let (width, height) = size;
+        let needs_rebuild = self
+            .attachment
+            .as_ref()
+            .map(|attachment| attachment.size != size)
+            .unwrap_or(true);
+
+        if needs_rebuild {
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("Scene2D Depth Texture"),
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: SCENE2D_DEPTH_FORMAT,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            self.attachment = Some(Scene2DDepthAttachment {
+                _texture: texture,
+                view,
+                size,
+            });
+        }
+
+        &self
+            .attachment
+            .as_ref()
+            .expect("Scene2D depth attachment initialized")
+            .view
+    }
+}
+
 impl RenderSystem {
     pub(in crate::game::system::render) fn render_scene2d(
         entity: Entity,
@@ -308,6 +365,13 @@ impl RenderSystem {
             let mut vertex_data = Vec::with_capacity(faces.len() * 18);
 
             for (triangle_index, triangle) in faces.iter().enumerate() {
+                // Scene2D 约定：z 必须在 [0,1]，否则该三角形直接丢弃。
+                if triangle
+                    .iter()
+                    .any(|vertex| !vertex.z.is_finite() || vertex.z < 0.0 || vertex.z > 1.0)
+                {
+                    continue;
+                }
                 for (vertex_index, vertex) in triangle.iter().enumerate() {
                     let point_brightness = evaluate_point_lights(vertex, &point_lights)
                         .clamp(0.0, MAX_POINT_LIGHT_BRIGHTNESS);
@@ -372,6 +436,11 @@ impl RenderSystem {
             store: wgpu::StoreOp::Store,
         };
 
+        let depth_view = context
+            .caches
+            .scene2d_depth
+            .ensure(context.device, context.framebuffer_size);
+
         let mut pass = context
             .encoder
             .begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -382,7 +451,15 @@ impl RenderSystem {
                     depth_slice: None,
                     ops,
                 })],
-                depth_stencil_attachment: None,
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        // 约定：z 越大越靠前，因此清 0.0 作为“最远”。
+                        load: wgpu::LoadOp::Clear(0.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
                 occlusion_query_set: None,
                 timestamp_writes: None,
             });
@@ -495,7 +572,14 @@ impl Scene2DPipeline {
                 polygon_mode: wgpu::PolygonMode::Fill,
                 conservative: false,
             },
-            depth_stencil: None,
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: SCENE2D_DEPTH_FORMAT,
+                depth_write_enabled: true,
+                // 约定：z 越大越靠前 => 更大的深度值通过测试。
+                depth_compare: wgpu::CompareFunction::GreaterEqual,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
             multisample: wgpu::MultisampleState {
                 count: 1,
                 mask: !0,

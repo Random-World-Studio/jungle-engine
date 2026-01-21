@@ -471,6 +471,7 @@ if let Some(mut health) = entity.get_component_mut::<Health>() {
     - **视口中心为屏幕原点**（NDC 的 (0,0)），默认 `offset=(0,0)` 时世界坐标 (0,0) 落在视口中心。
     - `offset` 表示“视口中心对应的世界坐标”；`pixels_per_unit` 表示世界单位到像素的缩放。
     - x 向右为正，y 向上为正（注意这与 `LayerViewport` 的归一化坐标原点在左上角是两个不同概念）。
+    - 深度（z）约定：开启深度测试并使用 `z` 作为深度值，且 **`z` 必须在 `[0,1]`**；`z` 越大越靠前。
 - 常用组合：
     - `Renderable + Transform + Shape (+ Material)`：让实体“能被绘制”。
     - `Camera + Transform`：摄像机实体。
