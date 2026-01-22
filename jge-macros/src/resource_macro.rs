@@ -39,6 +39,7 @@ enum ResourceKind {
     Embed,
     Fs,
     Txt,
+    Bin,
 }
 
 impl ResourceKind {
@@ -47,6 +48,7 @@ impl ResourceKind {
             "embed" => Some(Self::Embed),
             "fs" => Some(Self::Fs),
             "txt" => Some(Self::Txt),
+            "bin" => Some(Self::Bin),
             _ => None,
         }
     }
@@ -56,6 +58,7 @@ impl ResourceKind {
             Self::Embed => "embed",
             Self::Fs => "fs",
             Self::Txt => "txt",
+            Self::Bin => "bin",
         }
     }
 }
@@ -66,6 +69,7 @@ struct ResourceEntry {
     kind: ResourceKind,
     from: Option<String>,
     txt: Option<String>,
+    bin: Option<Vec<u8>>,
 }
 
 pub fn expand_resource(input: TokenStream) -> TokenStream {
@@ -207,6 +211,17 @@ pub fn expand_resource(input: TokenStream) -> TokenStream {
                     .with_context(|| format!("resource!: 注册资源失败（{}:txt）", #logical_path))?;
                 }
             }
+            ResourceKind::Bin => {
+                let bin = e.bin.as_ref().expect("bin must have bin");
+                let bytes = bin.iter().map(|b| quote!(#b));
+                quote! {
+                    #core_crate::resource::Resource::register(
+                        #core_crate::resource::ResourcePath::from(#logical_path),
+                        #core_crate::resource::Resource::from_memory(::std::vec![#(#bytes),*]),
+                    )
+                    .with_context(|| format!("resource!: 注册资源失败（{}:bin）", #logical_path))?;
+                }
+            }
         }
     });
 
@@ -341,6 +356,7 @@ fn parse_node(
     let mut kind: Option<ResourceKind> = None;
     let mut from: Option<String> = None;
     let mut txt: Option<String> = None;
+    let mut bin: Option<Vec<u8>> = None;
 
     for (k, v) in map {
         let Some(key) = as_plain_key(k) else { continue };
@@ -352,6 +368,9 @@ fn parse_node(
             }
             "txt" => {
                 txt = parse_txt_value(v)?;
+            }
+            "bin" => {
+                bin = parse_bin_value(v)?;
             }
             _ => {
                 // 资源名键
@@ -365,14 +384,14 @@ fn parse_node(
                     return Err(syn::Error::new(
                         proc_macro2::Span::call_site(),
                         format!(
-                            "resource!: 资源类型必须是字符串（embed/fs/txt），但 {key} 的值不是字符串"
+                            "resource!: 资源类型必须是字符串（embed/fs/txt/bin），但 {key} 的值不是字符串"
                         ),
                     ));
                 };
                 let Some(kd) = ResourceKind::parse(vs) else {
                     return Err(syn::Error::new(
                         proc_macro2::Span::call_site(),
-                        format!("resource!: 未知资源类型：{vs}（仅支持 embed/fs/txt）"),
+                        format!("resource!: 未知资源类型：{vs}（仅支持 embed/fs/txt/bin）"),
                     ));
                 };
                 validate_segment(&key)?;
@@ -409,6 +428,12 @@ fn parse_node(
                     format!("resource!: {res_name}: {} 不允许 txt 字段", kind.as_str()),
                 ));
             }
+            if bin.is_some() {
+                return Err(syn::Error::new(
+                    proc_macro2::Span::call_site(),
+                    format!("resource!: {res_name}: {} 不允许 bin 字段", kind.as_str()),
+                ));
+            }
         }
         ResourceKind::Txt => {
             if txt.as_deref().unwrap_or("").is_empty() {
@@ -421,6 +446,32 @@ fn parse_node(
                 return Err(syn::Error::new(
                     proc_macro2::Span::call_site(),
                     format!("resource!: {res_name}: txt 不允许 from 字段"),
+                ));
+            }
+            if bin.is_some() {
+                return Err(syn::Error::new(
+                    proc_macro2::Span::call_site(),
+                    format!("resource!: {res_name}: txt 不允许 bin 字段"),
+                ));
+            }
+        }
+        ResourceKind::Bin => {
+            if bin.as_deref().unwrap_or_default().is_empty() {
+                return Err(syn::Error::new(
+                    proc_macro2::Span::call_site(),
+                    format!("resource!: {res_name}: bin 需要 bin 字段"),
+                ));
+            }
+            if from.is_some() {
+                return Err(syn::Error::new(
+                    proc_macro2::Span::call_site(),
+                    format!("resource!: {res_name}: bin 不允许 from 字段"),
+                ));
+            }
+            if txt.is_some() {
+                return Err(syn::Error::new(
+                    proc_macro2::Span::call_site(),
+                    format!("resource!: {res_name}: bin 不允许 txt 字段"),
                 ));
             }
         }
@@ -436,6 +487,7 @@ fn parse_node(
         kind,
         from,
         txt,
+        bin,
     });
 
     Ok(())
@@ -470,4 +522,86 @@ fn parse_txt_value(v: &serde_yaml::Value) -> Result<Option<String>, syn::Error> 
         proc_macro2::Span::call_site(),
         "resource!: txt 字段必须是 YAML 字符串（请使用 `|` 块标量）",
     ))
+}
+
+fn parse_bin_value(v: &serde_yaml::Value) -> Result<Option<Vec<u8>>, syn::Error> {
+    if let Some(s) = v.as_str() {
+        let bytes = parse_hex_byte_blob(s)?;
+        return Ok(Some(bytes));
+    }
+
+    Err(syn::Error::new(
+        proc_macro2::Span::call_site(),
+        "resource!: bin 字段必须是 YAML 字符串（请使用 `|` 块标量）",
+    ))
+}
+
+fn parse_hex_byte_blob(s: &str) -> Result<Vec<u8>, syn::Error> {
+    let mut out = Vec::<u8>::new();
+    for token in s.split_whitespace() {
+        if token.starts_with("0x") || token.starts_with("0X") {
+            return Err(syn::Error::new(
+                proc_macro2::Span::call_site(),
+                format!(
+                    "resource!: bin 字节不允许带 0x 前缀（应为两位十六进制，例如 ff），但遇到：{token}"
+                ),
+            ));
+        }
+
+        if token.len() != 2 {
+            return Err(syn::Error::new(
+                proc_macro2::Span::call_site(),
+                format!("resource!: bin 字节必须是两位十六进制（00..ff），但遇到：{token}"),
+            ));
+        }
+
+        let byte = u8::from_str_radix(token, 16).map_err(|_| {
+            syn::Error::new(
+                proc_macro2::Span::call_site(),
+                format!("resource!: bin 字节必须是十六进制（00..ff），但遇到：{token}"),
+            )
+        })?;
+        out.push(byte);
+    }
+
+    if out.is_empty() {
+        return Err(syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "resource!: bin 内容不能为空（需要至少一个字节，例如：00 ff 7a）",
+        ));
+    }
+
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_hex_byte_blob_accepts_whitespace_separated_bytes() {
+        let bytes = parse_hex_byte_blob("00 ff 7A\n10\t20").unwrap();
+        assert_eq!(bytes, vec![0x00, 0xff, 0x7a, 0x10, 0x20]);
+    }
+
+    #[test]
+    fn parse_hex_byte_blob_rejects_empty() {
+        assert!(parse_hex_byte_blob("\n  \t").is_err());
+    }
+
+    #[test]
+    fn parse_hex_byte_blob_rejects_0x_prefix() {
+        assert!(parse_hex_byte_blob("0x00").is_err());
+    }
+
+    #[test]
+    fn parse_hex_byte_blob_rejects_non_hex() {
+        assert!(parse_hex_byte_blob("gg").is_err());
+    }
+
+    #[test]
+    fn parse_hex_byte_blob_rejects_wrong_length() {
+        assert!(parse_hex_byte_blob("0").is_err());
+        assert!(parse_hex_byte_blob("000").is_err());
+    }
 }

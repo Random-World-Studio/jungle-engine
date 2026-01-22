@@ -120,10 +120,12 @@ pub use jge_macros::scene;
 ///
 /// ```text
 /// - <dir_name>: [ <node>... ]
-/// - <res_name>: embed|fs|txt
+/// - <res_name>: embed|fs
 ///   from: <path>     # embed/fs 必须
 /// - <res_name>: txt
 ///   txt: |\n...      # txt 必须（必须是 YAML 字符串标量；推荐用 | 块标量）
+/// - <res_name>: bin
+///   bin: |\n...      # bin 必须（多个空格/换行分隔的两位十六进制字节，不含 0x 前缀）
 /// ```
 ///
 /// 约束：
@@ -131,11 +133,12 @@ pub use jge_macros::scene;
 /// - 同一个宏展开内的逻辑路径不能重复。
 /// - `embed`/`fs` 不允许出现 `txt` 字段；`txt` 不允许出现 `from` 字段。
 ///
-/// # 三种资源类型
+/// # 四种资源类型
 ///
 /// - `embed`：编译期嵌入（`include_bytes!`），适合纹理/着色器等随二进制分发的资源。
 /// - `fs`：磁盘懒加载（`Resource::from_file`），适合开发期热改或超大文件。
 /// - `txt`：内联文本（写在 YAML 里），适合小配置/小片段。
+/// - `bin`：内联二进制（写在 YAML 里），适合小型二进制 blob（例如调试用纹理/自定义表）。
 ///
 /// # 示例：内联 YAML
 ///

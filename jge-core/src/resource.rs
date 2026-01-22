@@ -422,4 +422,26 @@ mod tests {
             .expect("缓存应在首次加载后保持可用");
         assert!(std::ptr::eq(bytes, cached));
     }
+
+    #[test]
+    fn resource_macro_bin_registers_bytes() -> anyhow::Result<()> {
+        crate::resource!(
+            r#"
+- test_resources:
+  - inline_blob: bin
+    bin: |
+      00 ff 7a
+      10 20
+"#
+        )?;
+
+        let handle = Resource::from(ResourcePath::from("test_resources/inline_blob"))
+            .expect("bin resource should be registered");
+        let guard = handle.read();
+        let bytes = guard
+            .try_get_data()
+            .expect("memory resource should be loaded");
+        assert_eq!(bytes.as_slice(), &[0x00, 0xff, 0x7a, 0x10, 0x20]);
+        Ok(())
+    }
 }
