@@ -86,7 +86,7 @@ fn build_scene() -> anyhow::Result<jge_core::game::entity::Entity> {
                     }
                 }
 
-                // 绑定摄像机（依赖执行顺序：camera 在此已可见）
+                // 绑定摄像机（`scene!` 的 `as` 绑定支持前向引用/非强顺序）
                 with(mut scene: Scene3D) {
                     scene.bind_camera(camera).context("绑定摄像机失败")?;
                     Ok(())
@@ -161,6 +161,11 @@ fn build_scene() -> anyhow::Result<jge_core::game::entity::Entity> {
 ```bash
 cargo run
 ```
+
+> 关于 `scene!` 的执行语义（与“代码书写顺序”不同）：
+>
+> - `as ident` 绑定是“先收集并填充”的，因此你可以在任意位置引用同一个 `scene!` 块里导出的实体名（包括前向引用）。
+> - 节点树的 `attach` 会在宏的最后阶段集中完成：在 `with(...) { ... }` 等初始化块内，`Node::parent/children` 关系尚未建立。
 
 ## 4.（可选）把场景 DSL 放到 `.jgs` 文件
 

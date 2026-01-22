@@ -359,22 +359,35 @@ mod scene_dsl {
         let entity_ty = quote!(#core_crate::game::entity::Entity);
         let node_ty = quote!(#core_crate::game::component::node::Node);
 
-        let mut stmts: Vec<proc_macro2::TokenStream> = Vec::new();
+        let mut create_stmts: Vec<proc_macro2::TokenStream> = Vec::new();
+        let mut init_stmts: Vec<proc_macro2::TokenStream> = Vec::new();
         let mut binds: Vec<Ident> = Vec::new();
         let mut counter: usize = 0;
 
+        collect_binds(&scene.root, &mut binds);
+
         let root_var = format_ident!("__jge_scene_root");
-        expand_node(
+        let attach_stmts = expand_node(
             &scene.root,
-            None,
             &root_var,
             &mut counter,
-            &mut stmts,
-            &mut binds,
+            &mut create_stmts,
+            &mut init_stmts,
             &core_crate,
             &entity_ty,
             &node_ty,
         )?;
+
+        // 预声明 `as ident` 绑定，允许后续初始化阶段（with/组件配置等）跨节点前向引用。
+        let bind_decls: Vec<proc_macro2::TokenStream> = binds
+            .iter()
+            .map(|b| {
+                let span = b.span();
+                quote_spanned! {span=>
+                    let #b: #entity_ty;
+                }
+            })
+            .collect();
 
         // 生成 bindings 结构体（局部类型）
         // 注意：`proc_macro2::Ident` 的相等性会受 span 影响；这里按名字去重。
@@ -408,7 +421,10 @@ mod scene_dsl {
             use ::anyhow::Context as _;
             #bindings_struct
 
-            #(#stmts)*
+            #(#bind_decls)*
+            #(#create_stmts)*
+            #(#init_stmts)*
+            #attach_stmts
 
             ::core::result::Result::<SceneBindings, ::anyhow::Error>::Ok(SceneBindings {
                 root: #root_var,
@@ -417,18 +433,28 @@ mod scene_dsl {
         }})
     }
 
+    fn collect_binds(node: &NodeDecl, out: &mut Vec<Ident>) {
+        if let Some(bind) = &node.bind {
+            out.push(bind.clone());
+        }
+        for item in &node.items {
+            if let NodeItem::Child(child) = item {
+                collect_binds(child, out);
+            }
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn expand_node(
         node: &NodeDecl,
-        parent: Option<&Ident>,
         out_var: &Ident,
         counter: &mut usize,
-        stmts: &mut Vec<proc_macro2::TokenStream>,
-        binds: &mut Vec<Ident>,
+        create_stmts: &mut Vec<proc_macro2::TokenStream>,
+        init_stmts: &mut Vec<proc_macro2::TokenStream>,
         core_crate: &proc_macro2::TokenStream,
         entity_ty: &proc_macro2::TokenStream,
         node_ty: &proc_macro2::TokenStream,
-    ) -> syn::Result<()> {
+    ) -> syn::Result<proc_macro2::TokenStream> {
         let span = node.span;
         let create_stmt = if let Some(id_expr) = &node.id {
             quote_spanned! {span=>
@@ -441,11 +467,18 @@ mod scene_dsl {
                     .with_context(|| "scene!: 创建实体失败")?;
             }
         };
-        stmts.push(create_stmt);
+        create_stmts.push(create_stmt);
 
-        // 可选：设置节点名称（若用户提供 name，则覆盖默认名）
+        // 可选：as 绑定（这里用“赋值初始化”，允许在创建阶段结束后再使用该名字）
+        if let Some(bind) = &node.bind {
+            create_stmts.push(quote_spanned! {span=>
+                #bind = #out_var;
+            });
+        }
+
+        // 初始化阶段：设置节点名称（若用户提供 name，则覆盖默认名）
         if let Some(name_expr) = &node.name {
-            stmts.push(quote_spanned! {span=>
+            init_stmts.push(quote_spanned! {span=>
                 {
                     let mut __node = #out_var
                         .get_component_mut::<#node_ty>()
@@ -457,27 +490,9 @@ mod scene_dsl {
             });
         }
 
-        // 可选：挂到父节点
-        if let Some(parent_var) = parent {
-            stmts.push(quote_spanned! {span=>
-                {
-                    let mut __parent_node = #parent_var
-                        .get_component_mut::<#node_ty>()
-                        .with_context(|| "scene!: 父节点缺少 Node 组件（无法挂载子节点）")?;
-                    __parent_node
-                        .attach(#out_var)
-                        .with_context(|| "scene!: 挂载子节点失败")?;
-                }
-            });
-        }
-
-        // 可选：as 绑定
-        if let Some(bind) = &node.bind {
-            binds.push(bind.clone());
-            stmts.push(quote_spanned! {span=>
-                let #bind: #entity_ty = #out_var;
-            });
-        }
+        // 子节点实体变量（用于最终集中建树，顺序必须与 DSL 声明一致）
+        let mut child_vars_in_order: Vec<(Ident, proc_macro2::Span)> = Vec::new();
+        let mut child_attach_tokens: Vec<proc_macro2::TokenStream> = Vec::new();
 
         // body items
         for item in &node.items {
@@ -485,17 +500,18 @@ mod scene_dsl {
                 NodeItem::Child(child) => {
                     *counter += 1;
                     let child_var = format_ident!("__jge_scene_e{}", *counter);
-                    expand_node(
+                    let attach_subtree = expand_node(
                         child,
-                        Some(out_var),
                         &child_var,
                         counter,
-                        stmts,
-                        binds,
+                        create_stmts,
+                        init_stmts,
                         core_crate,
                         entity_ty,
                         node_ty,
                     )?;
+                    child_vars_in_order.push((child_var, child.span));
+                    child_attach_tokens.push(attach_subtree);
                 }
                 NodeItem::With(with_item) => {
                     let with_span = with_item.span;
@@ -523,7 +539,7 @@ mod scene_dsl {
                         }
                     });
 
-                    stmts.push(quote_spanned! {with_span=>
+                    init_stmts.push(quote_spanned! {with_span=>
                         {
                             let e: #entity_ty = #out_var;
                             let _ = e;
@@ -569,7 +585,7 @@ mod scene_dsl {
                         let comp_tmp = format_ident!("__jge_scene_comp{}", *counter);
                         let apply_fn = format_ident!("__jge_scene_apply_cfg{}", *counter);
                         if wants_mut_ref {
-                            stmts.push(quote_spanned! {comp_span=>
+                            init_stmts.push(quote_spanned! {comp_span=>
                                 {
                                     #(#resources)*
                                     let mut #comp_tmp = #comp_expr;
@@ -586,7 +602,7 @@ mod scene_dsl {
                                 }
                             });
                         } else {
-                            stmts.push(quote_spanned! {comp_span=>
+                            init_stmts.push(quote_spanned! {comp_span=>
                                 {
                                     #(#resources)*
                                     let mut #comp_tmp = #comp_expr;
@@ -604,7 +620,7 @@ mod scene_dsl {
                             });
                         }
                     } else {
-                        stmts.push(quote_spanned! {comp_span=>
+                        init_stmts.push(quote_spanned! {comp_span=>
                             {
                                 let _ = #out_var
                                     .register_component(#comp_expr)
@@ -616,7 +632,7 @@ mod scene_dsl {
                 NodeItem::Logic(logic_item) => {
                     let logic_span = logic_item.span;
                     let logic_expr = &logic_item.expr;
-                    stmts.push(quote_spanned! {logic_span=>
+                    init_stmts.push(quote_spanned! {logic_span=>
                         {
                             let mut __node = #out_var
                                 .get_component_mut::<#node_ty>()
@@ -628,7 +644,26 @@ mod scene_dsl {
             }
         }
 
-        Ok(())
+        // 最终集中建树：只保证“子节点添加顺序”与 DSL 声明一致。
+        // 这里按“父 -> 直接子 -> 子树”的顺序 attach，确保树在 attach 完成后稳定可遍历。
+        let direct_attach = child_vars_in_order.iter().map(|(child_var, child_span)| {
+            let child_span = *child_span;
+            quote_spanned! {child_span=>
+                {
+                    let mut __parent_node = #out_var
+                        .get_component_mut::<#node_ty>()
+                        .with_context(|| "scene!: 父节点缺少 Node 组件（无法挂载子节点）")?;
+                    __parent_node
+                        .attach(#child_var)
+                        .with_context(|| "scene!: 挂载子节点失败")?;
+                }
+            }
+        });
+
+        Ok(quote! {
+            #(#direct_attach)*
+            #(#child_attach_tokens)*
+        })
     }
 }
 

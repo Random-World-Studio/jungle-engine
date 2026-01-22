@@ -49,7 +49,13 @@ pub use game::Game;
 ///   - `with(...) { ... }`：在块内自动执行 `get_component/get_component_mut` 并提供引用
 ///   - `* LogicExpr;`：为当前节点挂载 `GameLogic`（等价于 `with(mut node: Node) { node.set_logic(LogicExpr); Ok(()) }`）
 ///
-/// `scene!` 展开后是一段普通 Rust 语句块：**严格按书写顺序执行**，并遵循 Rust 的作用域规则。
+/// `scene!` 会展开成一段普通 Rust 语句块，但为了支持 `as ident` 的前向引用，展开是“分阶段”的：
+/// - 先创建所有节点实体并填充 `as ident` 绑定；
+/// - 再执行节点初始化语句（`node "name"` / `+ ...` / `with(...) { ... }` / `* ...;`）；
+/// - 最后按 DSL 中的声明顺序把子节点 `attach` 成树（保证每个节点的子节点顺序与声明一致）。
+///
+/// 注意：由于 `attach` 在最后阶段才发生，在 `with(...) { ... }` 等初始化块内，节点的父子关系尚未建立。
+/// 如果你依赖 `Node::parent/children` 或 `GameLogic::on_attach` 的时机，请把相关逻辑放在宏返回之后（或在运行时由逻辑系统驱动）。
 ///
 /// # 示例
 ///
@@ -158,3 +164,6 @@ pub use jge_macros::scene;
 /// }
 /// ```
 pub use jge_macros::resource;
+
+#[cfg(test)]
+mod scene_macro_tests;
