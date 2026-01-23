@@ -160,6 +160,14 @@ impl Display for ResourceError {
 impl std::error::Error for ResourceError {}
 
 impl Resource {
+    fn new_empty() -> Self {
+        Self {
+            fs_path: None,
+            cached: true,
+            data: Vec::new(),
+        }
+    }
+
     fn new_memory(data: Vec<u8>) -> Self {
         Self {
             fs_path: None,
@@ -174,6 +182,11 @@ impl Resource {
             cached: false,
             data: Vec::new(),
         }
+    }
+
+    /// 创建一个空资源句柄。
+    pub fn empty() -> ResourceHandle {
+        Arc::new(RwLock::new(Self::new_empty()))
     }
 
     /// 从内存字节创建资源句柄（已缓存）。
