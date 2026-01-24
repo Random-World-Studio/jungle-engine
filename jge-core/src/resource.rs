@@ -332,6 +332,49 @@ impl Resource {
         None
     }
 
+    /// 列出指定目录资源路径下的直接子项名称（不区分资源类型）。
+    ///
+    /// 返回 `None` 表示该路径未注册或路径不是目录。
+    pub fn list_children(path: ResourcePath) -> Option<Vec<String>> {
+        let transmute = |r: RwLockReadGuard<Vec<Box<ResourceNode>>>| -> RwLockReadGuard<'static, Vec<Box<ResourceNode>>>{
+            unsafe { mem::transmute(r) }
+        };
+
+        let mut list = transmute(Self::resources().read());
+
+        let l = path.len();
+        for (i, s) in path.into_iter().enumerate() {
+            let mut node = None;
+            for n in list.iter() {
+                if n.name == s {
+                    node = Some(&n.data);
+                    break;
+                }
+            }
+
+            if let None = node {
+                return None;
+            }
+
+            match node.unwrap() {
+                NodeData::Directory(resource_nodes) => list = transmute(resource_nodes.read()),
+                NodeData::Resource(_) => {
+                    // 命中资源（而非目录）且不是最后一段，则说明路径不是目录
+                    if i + 1 == l {
+                        return None;
+                    } else {
+                        return None;
+                    }
+                }
+            }
+        }
+
+        // list 现在指向目标目录的 Vec<Box<ResourceNode>>
+        let mut names: Vec<String> = list.iter().map(|n| n.name.clone()).collect();
+        names.sort_unstable();
+        Some(names)
+    }
+
     pub fn data_loaded(&self) -> bool {
         if let Some(_fspath) = &self.fs_path {
             self.cached
@@ -455,6 +498,62 @@ mod tests {
             .try_get_data()
             .expect("memory resource should be loaded");
         assert_eq!(bytes.as_slice(), &[0x00, 0xff, 0x7a, 0x10, 0x20]);
+        Ok(())
+    }
+
+    #[test]
+    fn resource_macro_dir_registers_files_and_list_children_works() -> anyhow::Result<()> {
+        crate::resource!("resource_testdata/resources_dir.yaml")?;
+
+        let hello = Resource::from(ResourcePath::from("dir_test/bundle/hello.txt"))
+            .expect("dir file should be registered");
+
+        let hello_fs_path = hello
+            .read()
+            .fs_path
+            .clone()
+            .expect("fs resource should have fs_path");
+        assert!(
+            std::path::Path::new(&hello_fs_path).exists(),
+            "expected hello.txt fs path to exist, got: {hello_fs_path}"
+        );
+        assert_eq!(std::fs::read(&hello_fs_path)?, b"hello\n".to_vec());
+
+        {
+            let mut guard = hello.write();
+            let bytes = if guard.data_loaded() {
+                guard
+                    .try_get_data()
+                    .expect("cached data should be available")
+            } else {
+                guard.get_data()
+            };
+            assert_eq!(bytes.as_slice(), b"hello\n");
+        }
+
+        let world = Resource::from(ResourcePath::from("dir_test/bundle/nested/world.txt"))
+            .expect("nested dir file should be registered");
+        {
+            let mut guard = world.write();
+            let bytes = if guard.data_loaded() {
+                guard
+                    .try_get_data()
+                    .expect("cached data should be available")
+            } else {
+                guard.get_data()
+            };
+            assert_eq!(bytes.as_slice(), b"world\n");
+        }
+
+        assert_eq!(
+            Resource::list_children(ResourcePath::from("dir_test/bundle")).unwrap(),
+            vec!["hello.txt".to_string(), "nested".to_string()]
+        );
+        assert_eq!(
+            Resource::list_children(ResourcePath::from("dir_test/bundle/nested")).unwrap(),
+            vec!["world.txt".to_string()]
+        );
+
         Ok(())
     }
 }

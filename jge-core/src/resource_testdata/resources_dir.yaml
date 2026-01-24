@@ -1,0 +1,3 @@
+- dir_test:
+    - bundle: dir
+      from: dir_root

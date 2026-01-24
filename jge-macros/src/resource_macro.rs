@@ -40,6 +40,7 @@ enum ResourceKind {
     Fs,
     Txt,
     Bin,
+    Dir,
 }
 
 impl ResourceKind {
@@ -49,6 +50,7 @@ impl ResourceKind {
             "fs" => Some(Self::Fs),
             "txt" => Some(Self::Txt),
             "bin" => Some(Self::Bin),
+            "dir" => Some(Self::Dir),
             _ => None,
         }
     }
@@ -59,6 +61,7 @@ impl ResourceKind {
             Self::Fs => "fs",
             Self::Txt => "txt",
             Self::Bin => "bin",
+            Self::Dir => "dir",
         }
     }
 }
@@ -70,6 +73,7 @@ struct ResourceEntry {
     from: Option<String>,
     txt: Option<String>,
     bin: Option<Vec<u8>>,
+    // dir 类型不直接携带数据，from 字段指向目录根路径
 }
 
 pub fn expand_resource(input: TokenStream) -> TokenStream {
@@ -106,6 +110,42 @@ pub fn expand_resource(input: TokenStream) -> TokenStream {
         }
     };
 
+    // 注意：proc-macro span 给出的 file 可能是相对路径（例如 "src/foo.rs"）。
+    // 我们需要把它解析为“调用点源文件所在目录”的绝对路径，用于在宏展开期访问文件系统。
+    let callsite_dir = {
+        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
+            .ok()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("."));
+
+        let callsite_file_fs = if callsite_file.is_absolute() {
+            callsite_file.clone()
+        } else {
+            // rustc/proc-macro 提供的 span file 有两种常见形式：
+            // - "src/foo.rs"（相对 crate 根）
+            // - "crate-name/src/foo.rs"（相对 workspace 根）
+            // 这里优先按 crate 根拼接；若不存在再尝试按 workspace 根拼接。
+            let joined = manifest_dir.join(&callsite_file);
+            if joined.exists() {
+                joined
+            } else {
+                let alt = manifest_dir.parent().map(|p| p.join(&callsite_file));
+                if let Some(alt) = alt
+                    && alt.exists()
+                {
+                    alt
+                } else {
+                    joined
+                }
+            }
+        };
+
+        callsite_file_fs
+            .parent()
+            .map(PathBuf::from)
+            .unwrap_or(manifest_dir)
+    };
+
     let lit = match parse2::<LitStr>(input2.clone()) {
         Ok(lit) => lit,
         Err(_) => {
@@ -127,7 +167,7 @@ pub fn expand_resource(input: TokenStream) -> TokenStream {
     // 重要：当从文件读取 YAML 时，`from:` 的相对路径应当相对该 YAML 文件的目录。
     // 内联 YAML 则维持原语义（相对宏调用点源文件）。
     let (yaml_src, dep_include, yaml_dir_for_from) =
-        match maybe_read_yaml_file(&lit, &raw, &callsite_file) {
+        match maybe_read_yaml_file(&lit, &raw, &callsite_dir) {
             Ok(v) => v,
             Err(err) => return err.to_compile_error().into(),
         };
@@ -142,7 +182,12 @@ pub fn expand_resource(input: TokenStream) -> TokenStream {
     };
 
     let mut entries = Vec::<ResourceEntry>::new();
-    if let Err(err) = parse_root(&doc, yaml_dir_for_from.as_ref(), &mut entries) {
+    if let Err(err) = parse_root(
+        &doc,
+        &callsite_dir,
+        yaml_dir_for_from.as_ref(),
+        &mut entries,
+    ) {
         return err.to_compile_error().into();
     }
 
@@ -187,7 +232,11 @@ pub fn expand_resource(input: TokenStream) -> TokenStream {
                 let from_lit = LitStr::new(from, proc_macro2::Span::call_site());
                 quote! {
                     {
-                        let __base = ::std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(file!());
+                        let __file = ::std::path::Path::new(file!());
+                        // 在某些环境下 file!() 可能包含包目录前缀（例如 "jge-core/src/foo.rs"）。
+                        // 这里去掉该前缀，保证与 CARGO_MANIFEST_DIR 拼接后路径正确。
+                        let __file = __file.strip_prefix(env!("CARGO_PKG_NAME")).unwrap_or(__file);
+                        let __base = ::std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(__file);
                         let __dir = __base
                             .parent()
                             .ok_or_else(|| ::anyhow::anyhow!("resource!: 无法解析调用点文件父目录：{}", file!()))?;
@@ -222,6 +271,11 @@ pub fn expand_resource(input: TokenStream) -> TokenStream {
                     .with_context(|| format!("resource!: 注册资源失败（{}:bin）", #logical_path))?;
                 }
             }
+            ResourceKind::Dir => {
+                // dir entries are expanded at parse time into concrete fs entries;
+                // there should be no direct Dir entries to register here. Emit no-op.
+                quote! {}
+            }
         }
     });
 
@@ -242,7 +296,7 @@ fn looks_like_yaml_path(s: &str) -> bool {
 fn maybe_read_yaml_file(
     lit: &LitStr,
     raw: &str,
-    callsite_file: &PathBuf,
+    callsite_dir: &PathBuf,
 ) -> Result<(String, proc_macro2::TokenStream, Option<PathBuf>), syn::Error> {
     if !looks_like_yaml_path(raw) {
         return Ok((raw.to_string(), quote! {}, None));
@@ -253,12 +307,7 @@ fn maybe_read_yaml_file(
     let resolved = if path_is_absolute {
         path.clone()
     } else {
-        let base = callsite_file
-            .parent()
-            .map(PathBuf::from)
-            .or_else(|| std::env::var("CARGO_MANIFEST_DIR").ok().map(PathBuf::from))
-            .unwrap_or_else(|| PathBuf::from("."));
-        base.join(&path)
+        callsite_dir.join(&path)
     };
 
     if !resolved.exists() {
@@ -305,6 +354,7 @@ fn maybe_read_yaml_file(
 
 fn parse_root(
     doc: &serde_yaml::Value,
+    callsite_dir: &PathBuf,
     yaml_dir_for_from: Option<&PathBuf>,
     out: &mut Vec<ResourceEntry>,
 ) -> Result<(), syn::Error> {
@@ -317,13 +367,14 @@ fn parse_root(
 
     let mut prefix = Vec::<String>::new();
     for node in seq {
-        parse_node(node, yaml_dir_for_from, &mut prefix, out)?;
+        parse_node(node, callsite_dir, yaml_dir_for_from, &mut prefix, out)?;
     }
     Ok(())
 }
 
 fn parse_node(
     node: &serde_yaml::Value,
+    callsite_dir: &PathBuf,
     yaml_dir_for_from: Option<&PathBuf>,
     prefix: &mut Vec<String>,
     out: &mut Vec<ResourceEntry>,
@@ -343,7 +394,7 @@ fn parse_node(
                 validate_segment(&dir_name)?;
                 prefix.push(dir_name);
                 for child in children {
-                    parse_node(child, yaml_dir_for_from, prefix, out)?;
+                    parse_node(child, callsite_dir, yaml_dir_for_from, prefix, out)?;
                 }
                 prefix.pop();
                 return Ok(());
@@ -384,14 +435,14 @@ fn parse_node(
                     return Err(syn::Error::new(
                         proc_macro2::Span::call_site(),
                         format!(
-                            "resource!: 资源类型必须是字符串（embed/fs/txt/bin），但 {key} 的值不是字符串"
+                            "resource!: 资源类型必须是字符串（embed/fs/txt/bin/dir），但 {key} 的值不是字符串"
                         ),
                     ));
                 };
                 let Some(kd) = ResourceKind::parse(vs) else {
                     return Err(syn::Error::new(
                         proc_macro2::Span::call_site(),
-                        format!("resource!: 未知资源类型：{vs}（仅支持 embed/fs/txt/bin）"),
+                        format!("resource!: 未知资源类型：{vs}（仅支持 embed/fs/txt/bin/dir）"),
                     ));
                 };
                 validate_segment(&key)?;
@@ -410,7 +461,7 @@ fn parse_node(
     let Some(kind) = kind else {
         return Err(syn::Error::new(
             proc_macro2::Span::call_site(),
-            "resource!: 资源节点缺少类型（embed/fs/txt）",
+            "resource!: 资源节点缺少类型（embed/fs/txt/bin/dir）",
         ));
     };
 
@@ -474,6 +525,97 @@ fn parse_node(
                     format!("resource!: {res_name}: bin 不允许 txt 字段"),
                 ));
             }
+        }
+        ResourceKind::Dir => {
+            // dir 在这里不直接产生单个 entry：宏在编译期读取目录结构，
+            // 并为目录下的每个文件注册为对应的 fs 资源条目（保持子目录层级）。
+            let from_path = from.as_deref().unwrap_or("");
+            if from_path.is_empty() {
+                return Err(syn::Error::new(
+                    proc_macro2::Span::call_site(),
+                    format!("resource!: {res_name}: dir 需要 from 字段"),
+                ));
+            }
+            let dir = std::path::PathBuf::from(from_path);
+            let dir_fs_path = if dir.is_absolute() {
+                dir
+            } else {
+                callsite_dir.join(dir)
+            };
+
+            if !dir_fs_path.exists() || !dir_fs_path.is_dir() {
+                return Err(syn::Error::new(
+                    proc_macro2::Span::call_site(),
+                    format!(
+                        "resource!: {res_name}: dir 指定的路径不存在或不是目录：{}",
+                        from_path
+                    ),
+                ));
+            }
+
+            // 遍历目录并把文件注册为 fs 资源，逻辑路径以当前节点为根。
+            fn push_dir_entries(
+                base_dir: &std::path::Path,
+                callsite_dir: &std::path::Path,
+                rel_prefix: &Vec<String>,
+                out: &mut Vec<ResourceEntry>,
+            ) -> Result<(), syn::Error> {
+                let mut entries = std::fs::read_dir(base_dir)
+                    .map_err(|e| {
+                        syn::Error::new(
+                            proc_macro2::Span::call_site(),
+                            format!("resource!: 无法读取目录 {}: {}", base_dir.display(), e),
+                        )
+                    })?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|e| {
+                        syn::Error::new(
+                            proc_macro2::Span::call_site(),
+                            format!("resource!: 读取目录项失败: {}", e),
+                        )
+                    })?;
+
+                entries.sort_by_key(|e| e.file_name().to_string_lossy().into_owned());
+
+                for entry in entries {
+                    let path = entry.path();
+                    let name = entry.file_name().into_string().map_err(|_| {
+                        syn::Error::new(
+                            proc_macro2::Span::call_site(),
+                            "resource!: 目录项名称不是有效 Unicode",
+                        )
+                    })?;
+                    if path.is_dir() {
+                        let mut next = rel_prefix.clone();
+                        next.push(name);
+                        push_dir_entries(&path, callsite_dir, &next, out)?;
+                    } else if path.is_file() {
+                        let mut segs = rel_prefix.clone();
+                        segs.push(name);
+                        let logical = segs.join("/");
+
+                        let from = match path.strip_prefix(callsite_dir) {
+                            Ok(rel) => rel.to_string_lossy().into_owned(),
+                            Err(_) => path.to_string_lossy().into_owned(),
+                        };
+
+                        out.push(ResourceEntry {
+                            logical_path: logical,
+                            kind: ResourceKind::Fs,
+                            from: Some(from),
+                            txt: None,
+                            bin: None,
+                        });
+                    }
+                }
+                Ok(())
+            }
+
+            let mut base = prefix.clone();
+            base.push(res_name.clone());
+            push_dir_entries(&dir_fs_path, callsite_dir, &base, out)?;
+            // 已展开目录为具体文件条目，返回即可。
+            return Ok(());
         }
     }
 

@@ -126,6 +126,10 @@ pub use jge_macros::scene;
 ///   txt: |\n...      # txt 必须（必须是 YAML 字符串标量；推荐用 | 块标量）
 /// - <res_name>: bin
 ///   bin: |\n...      # bin 必须（多个空格/换行分隔的两位十六进制字节，不含 0x 前缀）
+/// - <res_name>: bin
+///   bin: |\n...      # bin 必须（多个空格/换行分隔的两位十六进制字节，不含 0x 前缀）
+/// - <res_name>: dir
+///   from: <dir_path>  # dir 必须（文件系统路径，宏在编译期读取目录并注册目录下所有文件）
 /// ```
 ///
 /// 约束：
