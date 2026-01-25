@@ -214,6 +214,43 @@ impl Scene2D {
         })
     }
 
+    /// 把“视口内像素坐标”转换为世界坐标。
+    ///
+    /// 该函数是 `Scene2D` 的统一屏幕坐标转换入口：用于把鼠标/触控等输入的像素位置映射到世界空间。
+    ///
+    /// ## 像素坐标系（输入）
+    ///
+    /// - 该像素坐标系**相对视口的左上角**：
+    ///   - 如果当前 Layer 设置了 [`LayerViewport`]，那么这里的“视口”指 **viewport 与 framebuffer 的交集**（即被裁剪后的可见区域）。
+    ///   - 如果未设置 viewport，则视口等价于整个 framebuffer。
+    /// - 方向约定（相对于监视器屏幕）：
+    ///   - x+：向右
+    ///   - y+：向下
+    ///
+    /// ## 世界坐标系（输出）
+    ///
+    /// - 与 `Scene2D` 其余接口保持一致：x+ 向右，y+ 向上。
+    /// - `offset` 表示“视口中心（NDC=(0,0)）对应的世界坐标”。
+    /// - `pixels_per_unit` 表示 1 世界单位对应的像素数量。
+    ///
+    /// ## 返回值
+    ///
+    /// 返回 `None` 表示 framebuffer 尺寸尚未由引擎渲染阶段初始化（或输入坐标不是有限数）。
+    pub fn pixel_to_world(&self, pixel: Vector2<f32>) -> Option<Vector2<f32>> {
+        if !pixel.x.is_finite() || !pixel.y.is_finite() {
+            return None;
+        }
+
+        let bounds = self.visible_world_bounds()?;
+        let ppu = self.pixels_per_unit.max(f32::EPSILON);
+
+        // pixel 原点在视口左上，y+ 向下；世界坐标 y+ 向上，因此需要翻转 y。
+        Some(Vector2::new(
+            bounds.min.x + pixel.x / ppu,
+            bounds.max.y - pixel.y / ppu,
+        ))
+    }
+
     /// 预热场景的 LOD，使 Layer 至少构建出一批八叉树节点。
     ///
     /// 返回值表示是否成功生成了至少一个激活节点。
@@ -730,6 +767,74 @@ mod tests {
         // half height=100px / 50ppu => 2.0 world units.
         assert!((bounds.min.y - (-6.0)).abs() < 1.0e-6);
         assert!((bounds.max.y - (-2.0)).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn scene2d_pixel_to_world_respects_framebuffer_size_and_axis_directions() {
+        let mut scene = Scene2D::new();
+        scene.set_framebuffer_size((200, 100));
+        scene.set_offset(Vector2::new(0.0, 0.0));
+        scene.set_pixels_per_unit(100.0);
+
+        // 像素坐标原点在左上，y+ 向下；默认可见范围为 x:[-1,1], y:[-0.5,0.5]
+        let p0 = scene
+            .pixel_to_world(Vector2::new(0.0, 0.0))
+            .expect("framebuffer size should be set");
+        assert!((p0.x - (-1.0)).abs() < 1.0e-6);
+        assert!((p0.y - 0.5).abs() < 1.0e-6);
+
+        let center = scene
+            .pixel_to_world(Vector2::new(100.0, 50.0))
+            .expect("framebuffer size should be set");
+        assert!(center.x.abs() < 1.0e-6);
+        assert!(center.y.abs() < 1.0e-6);
+
+        let br = scene
+            .pixel_to_world(Vector2::new(200.0, 100.0))
+            .expect("framebuffer size should be set");
+        assert!((br.x - 1.0).abs() < 1.0e-6);
+        assert!((br.y - (-0.5)).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn scene2d_pixel_to_world_uses_layer_viewport_when_attached() {
+        let entity = Entity::new().expect("应能创建实体");
+        entity
+            .register_component(Renderable::new())
+            .expect("应能注册 Renderable");
+
+        let mut layer = Layer::new();
+        layer.set_viewport(crate::game::component::layer::LayerViewport::normalized(
+            0.0, 0.0, 0.5, 0.5,
+        ));
+        entity.register_component(layer).expect("应能注册 Layer");
+
+        let mut scene = Scene2D::new();
+        scene.set_offset(Vector2::new(0.0, 0.0));
+        scene.set_pixels_per_unit(100.0);
+        entity.register_component(scene).expect("应能注册 Scene2D");
+
+        {
+            let mut scene = entity
+                .get_component_mut::<Scene2D>()
+                .expect("应能读取 Scene2D");
+            scene.set_framebuffer_size((200, 100));
+        }
+
+        let scene = entity.get_component::<Scene2D>().expect("应能读取 Scene2D");
+
+        // viewport 0.5x0.5 => 100x50 pixels，可见范围为 x:[-0.5,0.5], y:[-0.25,0.25]
+        let p0 = scene
+            .pixel_to_world(Vector2::new(0.0, 0.0))
+            .expect("framebuffer size should be set");
+        assert!((p0.x - (-0.5)).abs() < 1.0e-6);
+        assert!((p0.y - 0.25).abs() < 1.0e-6);
+
+        let center = scene
+            .pixel_to_world(Vector2::new(50.0, 25.0))
+            .expect("framebuffer size should be set");
+        assert!(center.x.abs() < 1.0e-6);
+        assert!(center.y.abs() < 1.0e-6);
     }
 
     fn register_layer_scene(entity: Entity) {
