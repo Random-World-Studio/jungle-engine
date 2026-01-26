@@ -14,7 +14,9 @@ pub mod component;
 pub mod entity;
 pub mod system;
 
+use anyhow::Context;
 use std::{
+    collections::HashSet,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -79,6 +81,14 @@ pub struct Game {
     runtime: Runtime,
 }
 
+impl Drop for Game {
+    fn drop(&mut self) {
+        // 停止调度循环，避免退出阶段仍然并发执行 update/on_event。
+        self.stopped.store(true, Ordering::Release);
+        Self::detach_node_tree(self.root);
+    }
+}
+
 impl Game {
     /// 创建一个新的引擎实例。
     ///
@@ -104,7 +114,17 @@ impl Game {
 
         info!(target: "jge-core", "Jungle Engine v{}", env!("CARGO_PKG_VERSION"));
 
-        if root.get_component::<Node>().is_none() {
+        if let Some(rootn) = root.get_component::<Node>() {
+            if let Some(logic) = rootn.logic() {
+                if let Err(err) = logic
+                    .blocking_lock()
+                    .on_attach(root)
+                    .with_context(|| "root on_attach failed")
+                {
+                    error!(target: "jge-core", error = %err, "根实体调用 GameLogic::on_attach 失败");
+                }
+            }
+        } else {
             error!(target: "jge-core", "根实体缺少 Node 组件");
         }
 
@@ -118,6 +138,63 @@ impl Game {
             stopped: Arc::new(AtomicBool::new(false)),
             runtime,
         })
+    }
+
+    fn collect_subtree_postorder(root: Entity) -> Vec<Entity> {
+        fn walk(
+            entity: Entity,
+            visited: &mut HashSet<crate::game::entity::EntityId>,
+            out: &mut Vec<Entity>,
+        ) {
+            if !visited.insert(entity.id()) {
+                return;
+            }
+
+            if let Some(node) = entity.get_component::<Node>() {
+                let children = node.children().to_vec();
+                drop(node);
+                for child in children {
+                    walk(child, visited, out);
+                }
+            }
+
+            out.push(entity);
+        }
+
+        let mut visited = HashSet::new();
+        let mut out = Vec::new();
+        walk(root, &mut visited, &mut out);
+        out
+    }
+
+    fn detach_node_tree(root: Entity) {
+        // 没有 Node 的根实体不参与拆树。
+        if root.get_component::<Node>().is_none() {
+            return;
+        }
+
+        let order = Self::collect_subtree_postorder(root);
+
+        // 拆散节点树：对除根以外的所有节点执行 detach。
+        // detach 会触发 GameLogic::on_detach（节点此前确实有 parent 时）。
+        for entity in order.iter().take(order.len().saturating_sub(1)) {
+            if let Some(mut node) = entity.get_component_mut::<Node>() {
+                let _ = node.detach();
+            }
+        }
+
+        // 退出时额外对根节点触发一次 on_detach（根节点没有 parent，detach 不会触发生命周期回调）。
+        if let Some(root_node) = root.get_component::<Node>() {
+            if let Some(handle) = root_node.logic().cloned() {
+                let result = handle
+                    .blocking_lock()
+                    .on_detach(root)
+                    .with_context(|| "root on_detach failed");
+                if let Err(err) = result {
+                    error!(target: "jge-core", error = %err, "根实体调用 GameLogic::on_detach 失败");
+                }
+            }
+        }
     }
 
     /// 获取内部 `winit::window::Window` 的共享引用。
@@ -485,5 +562,82 @@ impl Game {
         Node::storage().collect_chunks_with(|entity_id, node| {
             node.logic().cloned().map(|logic| (entity_id, logic))
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::game::component::node::Node;
+    use crate::game::system::logic::GameLogic;
+    use std::sync::{Arc, Mutex as StdMutex};
+
+    struct TrackingLogic {
+        label: &'static str,
+        events: Arc<StdMutex<Vec<&'static str>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl GameLogic for TrackingLogic {
+        fn on_attach(&mut self, _e: Entity) -> anyhow::Result<()> {
+            self.events.lock().unwrap().push(if self.label == "root" {
+                "root_attach"
+            } else {
+                "child_attach"
+            });
+            Ok(())
+        }
+
+        fn on_detach(&mut self, _e: Entity) -> anyhow::Result<()> {
+            self.events.lock().unwrap().push(if self.label == "root" {
+                "root_detach"
+            } else {
+                "child_detach"
+            });
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn game_drop_detaches_tree_and_calls_root_on_detach() {
+        let events = Arc::new(StdMutex::new(Vec::new()));
+
+        let root = Entity::new().expect("should create root entity");
+        root.register_component(Node::new("root").unwrap())
+            .expect("should register root Node");
+        {
+            let mut node = root.get_component_mut::<Node>().unwrap();
+            node.set_logic(TrackingLogic {
+                label: "root",
+                events: events.clone(),
+            });
+        }
+
+        let child = Entity::new().expect("should create child entity");
+        child
+            .register_component(Node::new("child").unwrap())
+            .expect("should register child Node");
+        {
+            let mut node = child.get_component_mut::<Node>().unwrap();
+            node.set_logic(TrackingLogic {
+                label: "child",
+                events: events.clone(),
+            });
+        }
+
+        let game = Game::new(GameConfig::default(), root).expect("should create game");
+
+        {
+            let mut root_node = root.get_component_mut::<Node>().unwrap();
+            root_node.attach(child).unwrap();
+        }
+
+        drop(game);
+
+        let log = events.lock().unwrap().clone();
+        assert_eq!(
+            log.as_slice(),
+            &["root_attach", "child_attach", "child_detach", "root_detach"]
+        );
     }
 }
