@@ -14,7 +14,7 @@ use std::{
 
 use nalgebra::{Vector2, Vector3};
 
-use lodtree::coords::OctVec;
+use lodtree::{LodVec, coords::OctVec};
 
 use super::{
     component_impl,
@@ -255,6 +255,13 @@ impl Scene2D {
     ///
     /// 返回值表示是否成功生成了至少一个激活节点。
     pub fn warmup_lod(&self, layer: &mut Layer) -> bool {
+        // 最小可用策略：先激活 root chunk（depth=0）。
+        // 这样可见性查询至少能命中一个 chunk，避免出现“没有可见 draw”的空结果。
+        let _ = self.step_lod(layer, &[OctVec::root()], 0);
+        if !self.chunk_positions(layer).is_empty() {
+            return true;
+        }
+
         const DETAIL_LEVEL: u64 = 3;
         const MAX_ITERATIONS: usize = 32;
         let target = OctVec::new(128, 128, 128, 5);

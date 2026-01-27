@@ -49,7 +49,7 @@ pub fn init() -> anyhow::Result<()> {
             )
             .with(
                 EnvFilter::builder()
-                    .with_default_directive(LevelFilter::TRACE.into())
+                    .with_default_directive(LevelFilter::INFO.into())
                     .from_env()?
                     .add_directive("jge-core=info".parse()?)
                     .add_directive("calloop=error".parse()?)

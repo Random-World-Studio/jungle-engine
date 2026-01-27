@@ -14,6 +14,7 @@ pub mod event;
 pub mod game;
 pub mod logger;
 pub mod resource;
+pub mod text;
 mod window;
 
 pub use game::Game;

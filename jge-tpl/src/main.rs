@@ -25,6 +25,7 @@ use jge_core::{
             light::{Light, ParallelLight, PointLight},
             material::Material,
             renderable::Renderable,
+            scene2d::Scene2D,
             scene3d::Scene3D,
             shape::Shape,
             transform::Transform,
@@ -33,6 +34,7 @@ use jge_core::{
         system::logic::GameLogic,
     },
     logger, scene,
+    text::{Font, TextRenderOptions, TextShadow, render_text_to_material_texture},
 };
 use tracing::{info, warn};
 use winit::dpi::PhysicalPosition;
@@ -230,6 +232,25 @@ fn map_key_event_to_camera_action(event: &KeyEvent) -> Option<CameraAction> {
 }
 
 fn build_demo_scene() -> anyhow::Result<Entity> {
+    let text = render_text_to_material_texture(
+        "Hello Jungle Engine\n你好， Jungle 引擎",
+        &Font::System("Sarasa UI SC".to_string()),
+        TextRenderOptions {
+            font_size_px: 42.0,
+            color: [255, 255, 255, 255],
+            shadow: Some(TextShadow {
+                offset_px: (2, 2),
+                color: [0, 0, 0, 220],
+            }),
+            ..Default::default()
+        },
+    )
+    .context("生成 HelloWorld 文本贴图失败")?;
+
+    // Scene2D 使用 `MaterialPatch` 逐三角形提供 UV，这里用两三角覆盖整个纹理。
+    let text_triangles = quad_triangles(text.width as f32, text.height as f32, 0.0);
+    let text_patches = quad_uv_patches();
+
     let bindings = scene! {
         node {
             node as scene3d_layer {
@@ -347,10 +368,109 @@ fn build_demo_scene() -> anyhow::Result<Entity> {
                     }
                 }
             }
+
+            // UI Layer：在屏幕左上角显示带阴影的文字。
+            node as ui_layer {
+                + Layer::new();
+                + Scene2D::new() => |e, mut scene| -> anyhow::Result<()> {
+                    // 让 1 世界单位 = 1 像素，方便用像素尺寸摆放 UI。
+                    scene.set_pixels_per_unit(1.0);
+
+                    // Scene2D 的可见性查询依赖 Layer 的 LOD（chunk_positions）。
+                    // UI Layer 做一次 warmup，避免出现 "no visible draws"。
+                    let Some(mut layer) = e.get_component_mut::<Layer>() else {
+                        anyhow::bail!("UI Layer 缺少 Layer 组件")
+                    };
+                    let _ = scene.warmup_lod(&mut layer);
+                    Ok(())
+                };
+
+                // UI 平行光：用于让 Scene2D 渲染也有方向光照（不渲染任何实体几何）。
+                node {
+                    + ParallelLight::new();
+                    with(mut transform: Transform, mut light: Light) {
+                        if let Some(mut renderable) = e.get_component_mut::<Renderable>() {
+                            renderable.set_enabled(false);
+                        }
+                        // 方向：绕 Y 轴转 180°，并略微向下俯（与 3D 示例一致的方向习惯）。
+                        transform.set_rotation(Vector3::new(0., -std::f32::consts::PI, 0.0));
+                        // UI 通常希望更“平”，把强度控制在较小范围。
+                        light.set_lightness(1.);
+                        Ok(())
+                    }
+                }
+
+                * UiHelloLogic::new(ui_text);
+
+                node as ui_text {
+                    + Shape::from_triangles(text_triangles);
+                    + Material::new(text.resource.clone(), text_patches);
+
+                    with(mut transform: Transform) {
+                        // 初始值无所谓：真正的左上角定位会在 UiHelloLogic 中等 framebuffer 尺寸初始化后写入。
+                        transform.set_position(Vector3::new(0.0, 0.0, 0.9));
+                        Ok(())
+                    }
+                }
+            }
         }
     };
 
     Ok(bindings?.root)
+}
+
+fn quad_triangles(width: f32, height: f32, z: f32) -> Vec<[Vector3<f32>; 3]> {
+    // 局部坐标：原点在左上角，y 向下为负（Scene2D 世界坐标 y 向上）。
+    let p0 = Vector3::new(0.0, 0.0, z);
+    let p1 = Vector3::new(width, 0.0, z);
+    let p2 = Vector3::new(0.0, -height, z);
+    let p3 = Vector3::new(width, -height, z);
+
+    vec![[p0, p1, p2], [p1, p3, p2]]
+}
+
+fn quad_uv_patches() -> Vec<[Vector2<f32>; 3]> {
+    vec![
+        [
+            Vector2::new(0.0, 0.0),
+            Vector2::new(1.0, 0.0),
+            Vector2::new(0.0, 1.0),
+        ],
+        [
+            Vector2::new(1.0, 0.0),
+            Vector2::new(1.0, 1.0),
+            Vector2::new(0.0, 1.0),
+        ],
+    ]
+}
+
+struct UiHelloLogic {
+    text_entity: Entity,
+}
+
+impl UiHelloLogic {
+    fn new(text_entity: Entity) -> Self {
+        Self { text_entity }
+    }
+}
+
+#[async_trait]
+impl GameLogic for UiHelloLogic {
+    async fn update(&mut self, layer_entity: Entity, _delta: Duration) -> anyhow::Result<()> {
+        // 在 framebuffer 尺寸由渲染阶段初始化后，把文字贴到视口左上角。
+        let Some(scene) = layer_entity.get_component::<Scene2D>() else {
+            return Ok(());
+        };
+
+        let Some(world_top_left) = scene.pixel_to_world(Vector2::new(16.0, 16.0)) else {
+            return Ok(());
+        };
+
+        if let Some(mut transform) = self.text_entity.get_component_mut::<Transform>() {
+            transform.set_position(Vector3::new(world_top_left.x, world_top_left.y, 0.9));
+        }
+        Ok(())
+    }
 }
 
 struct CameraControllerLogic {
