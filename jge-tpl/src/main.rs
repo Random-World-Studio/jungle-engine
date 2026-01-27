@@ -253,7 +253,7 @@ fn build_demo_scene() -> anyhow::Result<Entity> {
 
     let bindings = scene! {
         node {
-            node as scene3d_layer {
+            node "scene" as scene3d_layer {
                 + Layer::new() => |_, mut layer| -> anyhow::Result<()> {
                     if std::env::var("JGE_DEMO_LAYER_VIEWPORT").ok().as_deref() == Some("1") {
                         layer.set_viewport(LayerViewport::normalized(0.05, 0.05, 0.45, 0.45));
@@ -270,7 +270,7 @@ fn build_demo_scene() -> anyhow::Result<Entity> {
                     Ok(())
                 };
 
-                node as camera {
+                node "camera" as camera {
                     + Camera::new();
 
                     * CameraControllerLogic::new();
@@ -296,7 +296,7 @@ fn build_demo_scene() -> anyhow::Result<Entity> {
                     Ok(())
                 }
 
-                node {
+                node "ground" {
                     + Shape::from_triangles(ground_triangles());
                     with(mut transform: Transform) {
                         transform.set_position(Vector3::new(0.0, 0.0, 0.0));
@@ -330,7 +330,7 @@ fn build_demo_scene() -> anyhow::Result<Entity> {
                     }
                 }
 
-                node {
+                node "tri1" {
                     + Shape::from_triangles(triangle_triangles());
                     with(mut transform: Transform) {
                         transform.set_position(Vector3::new(0.0, 0.5, -4.0));
@@ -340,7 +340,7 @@ fn build_demo_scene() -> anyhow::Result<Entity> {
                     }
                 }
 
-                node {
+                node "tri2" {
                     + Shape::from_triangles(triangle_triangles());
                     with(mut transform: Transform) {
                         transform.set_position(Vector3::new(-2.5, 0.9, -6.0));
@@ -350,7 +350,7 @@ fn build_demo_scene() -> anyhow::Result<Entity> {
                     }
                 }
 
-                node {
+                node "cube" {
                     + Shape::from_triangles(cube_triangles());
 
                     + Material::new(bamboo, Vec::new()) => resource(bamboo = "textures/bamboo.png") |_, mut mat| -> anyhow::Result<()> {
@@ -370,7 +370,7 @@ fn build_demo_scene() -> anyhow::Result<Entity> {
             }
 
             // UI Layer：在屏幕左上角显示带阴影的文字。
-            node as ui_layer {
+            node "HUD" as ui_layer {
                 + Layer::new();
                 + Scene2D::new() => |e, mut scene| -> anyhow::Result<()> {
                     // 让 1 世界单位 = 1 像素，方便用像素尺寸摆放 UI。
@@ -402,7 +402,7 @@ fn build_demo_scene() -> anyhow::Result<Entity> {
 
                 * UiHelloLogic::new(ui_text);
 
-                node as ui_text {
+                node "text" as ui_text {
                     + Shape::from_triangles(text_triangles);
                     + Material::new(text.resource.clone(), text_patches);
 

@@ -313,6 +313,8 @@ impl RenderSystem {
                 continue;
             }
 
+            let _profile_scope = context.caches.profiler.entity_scope(group.entity());
+
             let (material_regions, bind_group) = match renderables.material(group.entity()) {
                 Some(descriptor) => {
                     let handle = descriptor.resource().clone();

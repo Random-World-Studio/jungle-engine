@@ -1,8 +1,10 @@
 use super::scene2d::{Scene2DDepthCache, Scene2DMaterialCache, Scene2DPipelineCache};
 use super::scene3d::{Scene3DDepthCache, Scene3DMaterialCache, Scene3DPipelineCache};
 use super::{background::BackgroundPipelineCache, background::BackgroundTextureCache};
+use super::profile::RenderProfiler;
 
 pub(in crate::game::system::render) struct LayerRendererCache {
+    pub(in crate::game::system::render) profiler: RenderProfiler,
     pub(in crate::game::system::render) scene2d: Scene2DPipelineCache,
     pub(in crate::game::system::render) scene2d_materials: Scene2DMaterialCache,
     pub(in crate::game::system::render) scene2d_depth: Scene2DDepthCache,
@@ -24,6 +26,7 @@ pub(in crate::game::system::render) struct LayerViewportPixels {
 impl Default for LayerRendererCache {
     fn default() -> Self {
         Self {
+            profiler: RenderProfiler::from_env(),
             scene2d: Scene2DPipelineCache::default(),
             scene2d_materials: Scene2DMaterialCache::default(),
             scene2d_depth: Scene2DDepthCache::default(),

@@ -383,6 +383,8 @@ impl RenderSystem {
                 continue;
             }
 
+            let _profile_scope = context.caches.profiler.entity_scope(bundle.entity());
+
             let material_descriptor = bundle.material();
             let regions = material_descriptor.map(|descriptor| descriptor.regions());
             let mut vertex_data = Vec::with_capacity(triangles.len() * 27);

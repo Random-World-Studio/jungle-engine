@@ -1,5 +1,6 @@
 mod background;
 mod cache;
+mod profile;
 mod scene2d;
 mod scene3d;
 mod util;
@@ -71,6 +72,16 @@ impl RenderSystem {
                 "skip rendering for entity missing Layer component"
             );
         }
+    }
+
+    /// 标记一帧渲染开始。
+    pub fn begin_frame(&mut self) {
+        self.caches.profiler.begin_frame();
+    }
+
+    /// 标记一帧渲染结束。
+    pub fn end_frame(&mut self) {
+        self.caches.profiler.end_frame();
     }
 
     fn render_layer_entity(entity: Entity, context: &mut LayerRenderContext<'_, '_>) {

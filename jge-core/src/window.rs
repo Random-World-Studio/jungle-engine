@@ -148,6 +148,9 @@ impl GameWindow {
             "begin frame"
         );
 
+        // Profiling（仅 debug + JGE_PROFILE=1）：按帧初始化/刷入渲染耗时样本。
+        self.renderer.begin_frame();
+
         let layer_roots = Self::collect_layer_roots(*root);
         trace!(
             target: "jge-core",
@@ -195,6 +198,8 @@ impl GameWindow {
 
         self.queue.submit(Some(encoder.finish()));
         output.present();
+
+        self.renderer.end_frame();
 
         Ok(())
     }
