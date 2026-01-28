@@ -348,7 +348,7 @@ impl Game {
     fn dispatch_event(&self, event: GameEvent) {
         trace!(target: "jge-core", "dispatch event: {:?}", event);
         let logic_targets = Game::collect_logic_handle_chunks();
-        let hdl = self.runtime.spawn(async move {
+        self.runtime.spawn(async move {
             let mut join_set = JoinSet::new();
 
             for chunk in logic_targets {
@@ -373,13 +373,19 @@ impl Game {
                 }
             }
         });
-        self.runtime.block_on(async { hdl.await.unwrap() });
     }
 }
 
 impl ApplicationHandler for Game {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         self.ensure_window_created(event_loop);
+    }
+
+    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+        // 在事件循环即将等待时请求重绘，确保高刷新率下能及时准备下一帧
+        if let Some(window) = &self.window {
+            window.window.request_redraw();
+        }
     }
 
     fn window_event(
@@ -466,8 +472,8 @@ impl Game {
 
     /// 处理 `winit` 的重绘请求：执行一帧渲染，并异步调度 `GameLogic::on_render`。
     ///
-    /// 注意：该方法会请求下一帧重绘（`request_redraw`），形成持续渲染；同时 `on_render` 的调度
-    /// 与渲染本身解耦，不会阻塞当前 `winit` 回调。
+    /// 注意：`on_render` 的调度与渲染本身解耦，不会阻塞当前 `winit` 回调。
+    /// 重绘请求通过 `AboutToWait` 事件触发，以确保在高刷新率VSync下能及时准备下一帧。
     fn handle_redraw_requested(&mut self) {
         let delta = self.last_redraw.elapsed();
         self.last_redraw = Instant::now();
@@ -477,8 +483,6 @@ impl Game {
 
             gwin.resize_surface_if_needed();
 
-            gwin.window.pre_present_notify();
-
             match gwin.render(&self.root, delta) {
                 Ok(_) => {}
                 // 展示平面的上下文丢失
@@ -486,8 +490,6 @@ impl Game {
                 // 所有其他错误
                 Err(e) => warn!(target: "jge-core", "{:?}", e),
             }
-
-            gwin.window.request_redraw();
         }
 
         self.dispatch_on_render(delta);

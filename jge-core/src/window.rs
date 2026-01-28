@@ -91,7 +91,7 @@ impl GameWindow {
             present_mode,
             alpha_mode: caps.alpha_modes[0],
             view_formats: vec![],
-            desired_maximum_frame_latency: 2,
+            desired_maximum_frame_latency: 1,
         };
         surface.configure(&device, &surf_config);
 
