@@ -94,8 +94,9 @@ pub use game::Game;
 /// ```
 pub use jge_macros::scene;
 
-/// 资源 DSL 宏：用 YAML 描述一棵“资源树”，并在编译期展开成一串
-/// [`resource::Resource::register`](crate::resource::Resource::register) 调用。
+/// 资源 DSL 宏：用 YAML 描述一棵“资源树”，并在编译期展开成一串资源注册调用：
+/// [`resource::Resource::register`](crate::resource::Resource::register) /
+/// [`resource::Resource::register_dir`](crate::resource::Resource::register_dir)。
 ///
 /// 该宏由 `jge-core` 重导出，因此游戏项目只需要依赖 `jge-core` 即可使用。
 ///
@@ -132,7 +133,7 @@ pub use jge_macros::scene;
 /// - <res_name>: bin
 ///   bin: |\n...      # bin 必须（多个空格/换行分隔的两位十六进制字节，不含 0x 前缀）
 /// - <res_name>: dir
-///   from: <dir_path>  # dir 必须（文件系统路径，宏在编译期读取目录并注册目录下所有文件）
+///   from: <dir_path>  # dir 必须（文件系统路径；宏只注册“运行时目录映射”节点，不会在编译期遍历/检查目录内容）
 /// ```
 ///
 /// 约束：
@@ -140,12 +141,16 @@ pub use jge_macros::scene;
 /// - 同一个宏展开内的逻辑路径不能重复。
 /// - `embed`/`fs` 不允许出现 `txt` 字段；`txt` 不允许出现 `from` 字段。
 ///
-/// # 四种资源类型
+/// # 五种资源类型
 ///
 /// - `embed`：编译期嵌入（`include_bytes!`），适合纹理/着色器等随二进制分发的资源。
 /// - `fs`：磁盘懒加载（`Resource::from_file`），适合开发期热改或超大文件。
 /// - `txt`：内联文本（写在 YAML 里），适合小配置/小片段。
 /// - `bin`：内联二进制（写在 YAML 里），适合小型二进制 blob（例如调试用纹理/自定义表）。
+/// - `dir`：运行时目录映射（`Resource::register_dir`）。
+///   - 不会在编译期/注册期扫描磁盘。
+///   - 访问 `dir/...` 下的具体文件时（[`resource::Resource::from`](crate::resource::Resource::from)），才会按需探测并惰性注册为 `fs` 资源。
+///   - 对映射目录调用 [`resource::Resource::list_children`](crate::resource::Resource::list_children) 会读取磁盘目录并把一级子项懒注册到资源树。
 ///
 /// # 示例：内联 YAML
 ///

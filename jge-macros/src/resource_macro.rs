@@ -165,8 +165,8 @@ pub fn expand_resource(input: TokenStream) -> TokenStream {
     // - 否则视为内联 YAML
     //
     // 重要：当从文件读取 YAML 时：
-    // - embed/dir 的 `from:` 相对路径相对该 YAML 文件的目录（保持 include_* / 编译期遍历可用）。
-    // - fs 的 `from:` 若为相对路径，则在**运行时**按进程当前工作目录（cwd）解析。
+    // - embed 的 `from:` 相对路径相对该 YAML 文件的目录（便于 include_* 在编译期定位文件）。
+    // - fs/dir 的 `from:` 若为相对路径，则在**运行时**按进程当前工作目录（cwd）解析。
     let (yaml_src, dep_include, yaml_dir_for_from) =
         match maybe_read_yaml_file(&lit, &raw, &callsite_dir) {
             Ok(v) => v,
@@ -406,8 +406,8 @@ fn parse_node(
     let mut res_name: Option<String> = None;
     let mut kind: Option<ResourceKind> = None;
     // 注意：from 在解析阶段先保持“原始字符串”。
-    // - 对 embed/dir：后续会根据 YAML 文件目录做一次相对路径解析（保持旧语义）。
-    // - 对 fs：保持原样，让运行时按 cwd 解析。
+    // - 对 embed：后续会根据 YAML 文件目录做一次相对路径解析，便于 include_* 在编译期定位文件。
+    // - 对 fs/dir：保持原样，让运行时按 cwd 解析。
     let mut from: Option<String> = None;
     let mut txt: Option<String> = None;
     let mut bin: Option<Vec<u8>> = None;
