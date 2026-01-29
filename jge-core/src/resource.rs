@@ -1,11 +1,11 @@
 use std::{
     fmt::Display,
     mem,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Arc, OnceLock},
 };
 
-use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+use parking_lot::{RwLock, RwLockWriteGuard};
 
 /// 资源本体。
 ///
@@ -138,6 +138,12 @@ enum NodeData {
 pub struct ResourceNode {
     name: String,
     data: NodeData,
+
+    /// 若存在，则该目录节点表示一个“运行时从文件系统映射的子树”。
+    ///
+    /// - 相对路径：按进程当前工作目录（cwd）解析。
+    /// - 绝对路径：直接使用。
+    fs_root: Option<PathBuf>,
 }
 
 /// 资源系统错误。
@@ -267,12 +273,14 @@ impl Resource {
                     list.push(Box::new(ResourceNode {
                         name: s.clone(),
                         data: NodeData::Resource(resource),
+                        fs_root: None,
                     }));
                     return Ok(());
                 } else {
                     list.push(Box::new(ResourceNode {
                         name: s.clone(),
                         data: NodeData::Directory(RwLock::new(Vec::new())),
+                        fs_root: None,
                     }));
                     node = Some(&list.last().unwrap().data);
                 };
@@ -294,85 +302,226 @@ impl Resource {
         Self::register_inner(Self::resources().write(), path, resource)
     }
 
+    /// 注册一个“运行时从文件系统映射的目录子树”。
+    ///
+    /// 语义：
+    /// - 只注册目录节点本身，不会在编译期/注册期遍历文件系统。
+    /// - 运行时：
+    ///   - [`Self::from`] 在命中该目录（或其后代）时，会按需检查磁盘并惰性创建资源节点。
+    ///   - [`Self::list_children`] 会读取该目录并把一级子项懒注册到资源树。
+    pub fn register_dir(path: ResourcePath, fs_root: PathBuf) -> Result<(), ResourceError> {
+        fn find_or_insert_dir_node_mut<'a>(
+            list: &'a mut Vec<Box<ResourceNode>>,
+            segment: &str,
+        ) -> Result<&'a mut ResourceNode, ResourceError> {
+            if let Some(pos) = list.iter().position(|n| n.name == segment) {
+                return Ok(&mut list[pos]);
+            }
+            list.push(Box::new(ResourceNode {
+                name: segment.to_string(),
+                data: NodeData::Directory(RwLock::new(Vec::new())),
+                fs_root: None,
+            }));
+            Ok(list.last_mut().expect("just pushed"))
+        }
+
+        fn register_dir_in_list(
+            list: &mut Vec<Box<ResourceNode>>,
+            segments: &[String],
+            index: usize,
+            fs_root: &PathBuf,
+        ) -> Result<(), ResourceError> {
+            let seg = segments.get(index).ok_or(ResourceError::PathConflict)?;
+            let node = find_or_insert_dir_node_mut(list, seg)?;
+
+            if index + 1 == segments.len() {
+                match &node.data {
+                    NodeData::Directory(_) => {
+                        node.fs_root = Some(fs_root.clone());
+                        return Ok(());
+                    }
+                    NodeData::Resource(_) => return Err(ResourceError::PathConflict),
+                }
+            }
+
+            let NodeData::Directory(children) = &node.data else {
+                return Err(ResourceError::PathConflict);
+            };
+            let mut guard = children.write();
+            register_dir_in_list(&mut *guard, segments, index + 1, fs_root)
+        }
+
+        let ResourcePath(segments) = path;
+        if segments.is_empty() {
+            // 不允许把根当成映射目录（避免把整个资源树绑定到 cwd）。
+            return Err(ResourceError::PathConflict);
+        }
+        let mut root = Self::resources().write();
+        register_dir_in_list(&mut *root, &segments, 0, &fs_root)
+    }
+
+    fn ensure_child_from_fs(
+        list: &mut Vec<Box<ResourceNode>>,
+        parent_fs_root: &Path,
+        child_name: &str,
+    ) -> Option<usize> {
+        let child_path = parent_fs_root.join(child_name);
+        if child_path.is_dir() {
+            list.push(Box::new(ResourceNode {
+                name: child_name.to_string(),
+                data: NodeData::Directory(RwLock::new(Vec::new())),
+                fs_root: Some(child_path),
+            }));
+            return Some(list.len() - 1);
+        }
+        if child_path.is_file() {
+            list.push(Box::new(ResourceNode {
+                name: child_name.to_string(),
+                data: NodeData::Resource(Resource::from_file(child_path.as_path())),
+                fs_root: None,
+            }));
+            return Some(list.len() - 1);
+        }
+        None
+    }
+
+    fn maybe_inherit_fs_root(
+        node: &mut ResourceNode,
+        parent_fs_root: Option<&Path>,
+    ) -> Option<PathBuf> {
+        if let Some(root) = &node.fs_root {
+            return Some(root.clone());
+        }
+        let Some(parent) = parent_fs_root else {
+            return None;
+        };
+        let candidate = parent.join(&node.name);
+        if candidate.is_dir() {
+            node.fs_root = Some(candidate.clone());
+            Some(candidate)
+        } else {
+            None
+        }
+    }
+
+    fn from_in_list(
+        list: &mut Vec<Box<ResourceNode>>,
+        parent_fs_root: Option<PathBuf>,
+        segments: &[String],
+        index: usize,
+    ) -> Option<ResourceHandle> {
+        if index >= segments.len() {
+            return None;
+        }
+
+        let seg = &segments[index];
+
+        let mut node_index = list.iter().position(|n| n.name == *seg);
+        if node_index.is_none() {
+            if let Some(root) = parent_fs_root.as_deref() {
+                node_index = Self::ensure_child_from_fs(list, root, seg);
+            }
+        }
+        let node_index = node_index?;
+
+        let node = &mut list[node_index];
+        let next_root = if matches!(node.data, NodeData::Directory(_)) {
+            Self::maybe_inherit_fs_root(node, parent_fs_root.as_deref())
+        } else {
+            None
+        };
+
+        match &mut node.data {
+            NodeData::Directory(children) => {
+                if index + 1 == segments.len() {
+                    return None;
+                }
+                let mut guard = children.write();
+                Self::from_in_list(&mut *guard, next_root, segments, index + 1)
+            }
+            NodeData::Resource(handle) => {
+                if index + 1 == segments.len() {
+                    Some(Arc::clone(handle))
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
     /// 按资源路径获取已注册的资源句柄。
     ///
     /// - 返回 `None` 表示该路径未注册，或路径命中目录但不是最终资源节点。
     pub fn from(path: ResourcePath) -> Option<ResourceHandle> {
-        let transmute = |r: RwLockReadGuard<Vec<Box<ResourceNode>>>| -> RwLockReadGuard<'static, Vec<Box<ResourceNode>>>{
-            unsafe { mem::transmute(r) }
-        };
-
-        let mut list = transmute(Self::resources().read());
-
-        let l = path.len();
-        for (i, s) in path.into_iter().enumerate() {
-            let mut node = None;
-            for n in list.iter() {
-                if n.name == s {
-                    node = Some(&n.data);
-                    break;
-                }
-            }
-
-            if let None = node {
-                return None;
-            }
-
-            match node.unwrap() {
-                NodeData::Directory(resource_nodes) => list = transmute(resource_nodes.read()),
-                NodeData::Resource(resource) => {
-                    if i + 1 == l {
-                        return Some(Arc::clone(resource));
-                    } else {
-                        return None;
-                    }
-                }
-            }
-        }
-        None
+        let ResourcePath(segments) = path;
+        let mut root = Self::resources().write();
+        Self::from_in_list(&mut *root, None, &segments, 0)
     }
 
     /// 列出指定目录资源路径下的直接子项名称（不区分资源类型）。
     ///
     /// 返回 `None` 表示该路径未注册或路径不是目录。
     pub fn list_children(path: ResourcePath) -> Option<Vec<String>> {
-        let transmute = |r: RwLockReadGuard<Vec<Box<ResourceNode>>>| -> RwLockReadGuard<'static, Vec<Box<ResourceNode>>>{
-            unsafe { mem::transmute(r) }
-        };
+        fn list_children_in_list(
+            list: &mut Vec<Box<ResourceNode>>,
+            parent_fs_root: Option<PathBuf>,
+            segments: &[String],
+            index: usize,
+        ) -> Option<Vec<String>> {
+            if index == segments.len() {
+                // 当前 list 对应目标目录。
+                let mut names: Vec<String> = list.iter().map(|n| n.name.clone()).collect();
 
-        let mut list = transmute(Self::resources().read());
-
-        let l = path.len();
-        for (i, s) in path.into_iter().enumerate() {
-            let mut node = None;
-            for n in list.iter() {
-                if n.name == s {
-                    node = Some(&n.data);
-                    break;
+                if let Some(root) = parent_fs_root.as_deref() {
+                    if let Ok(rd) = std::fs::read_dir(root) {
+                        for entry in rd.flatten() {
+                            let Ok(name) = entry.file_name().into_string() else {
+                                continue;
+                            };
+                            if !names.iter().any(|n| n == &name) {
+                                // 懒注册一级节点（若磁盘项存在但不是文件/目录，ensure 会返回 None）
+                                let _ = Resource::ensure_child_from_fs(list, root, &name);
+                                names.push(name);
+                            }
+                        }
+                    }
                 }
+
+                names.sort_unstable();
+                names.dedup();
+                return Some(names);
             }
 
-            if let None = node {
-                return None;
-            }
-
-            match node.unwrap() {
-                NodeData::Directory(resource_nodes) => list = transmute(resource_nodes.read()),
-                NodeData::Resource(_) => {
-                    // 命中资源（而非目录）且不是最后一段，则说明路径不是目录
-                    if i + 1 == l {
-                        return None;
-                    } else {
-                        return None;
+            let seg = &segments[index];
+            let mut node_index = list.iter().position(|n| n.name == *seg);
+            if node_index.is_none() {
+                // list_children 需要目录：若磁盘上存在对应目录，则惰性创建。
+                if let Some(root) = parent_fs_root.as_deref() {
+                    let p = root.join(seg);
+                    if p.is_dir() {
+                        list.push(Box::new(ResourceNode {
+                            name: seg.clone(),
+                            data: NodeData::Directory(RwLock::new(Vec::new())),
+                            fs_root: Some(p),
+                        }));
+                        node_index = Some(list.len() - 1);
                     }
                 }
             }
+            let node_index = node_index?;
+
+            let node = &mut list[node_index];
+            let next_root = Resource::maybe_inherit_fs_root(node, parent_fs_root.as_deref());
+            let NodeData::Directory(children) = &node.data else {
+                return None;
+            };
+            let mut guard = children.write();
+            list_children_in_list(&mut *guard, next_root, segments, index + 1)
         }
 
-        // list 现在指向目标目录的 Vec<Box<ResourceNode>>
-        let mut names: Vec<String> = list.iter().map(|n| n.name.clone()).collect();
-        names.sort_unstable();
-        Some(names)
+        let ResourcePath(segments) = path;
+        let mut root = Self::resources().write();
+        list_children_in_list(&mut *root, None, &segments, 0)
     }
 
     pub fn data_loaded(&self) -> bool {
@@ -411,13 +560,26 @@ impl Resource {
         }
         unsafe { mem::transmute(&self.data) }
     }
+
+    /// 预加载资源确保其数据已缓存。
+    ///
+    /// 调用该方法会尝试加载资源数据并缓存，避免后续访问时的延迟。
+    pub fn preload(&mut self) {
+        let _ = self.get_data();
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
+    use std::sync::{Mutex, OnceLock};
     use tempfile::NamedTempFile;
+
+    fn cwd_mutex() -> &'static Mutex<()> {
+        static CWD_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
+        CWD_MUTEX.get_or_init(|| Mutex::new(()))
+    }
 
     #[test]
     fn resource_path_from_str_parses_segments() {
@@ -503,57 +665,69 @@ mod tests {
 
     #[test]
     fn resource_macro_dir_registers_files_and_list_children_works() -> anyhow::Result<()> {
-        crate::resource!("resource_testdata/resources_dir.yaml")?;
+        // `resource!` 的 fs/dir `from` 语义是“运行时相对 cwd”。
+        // 为避免不同执行方式导致 cwd 不同，这里串行化并临时切到 crate 根目录。
+        let _lock = cwd_mutex().lock().expect("cwd mutex poisoned");
+        let original_cwd = std::env::current_dir()?;
+        std::env::set_current_dir(env!("CARGO_MANIFEST_DIR"))?;
 
-        let hello = Resource::from(ResourcePath::from("dir_test/bundle/hello.txt"))
-            .expect("dir file should be registered");
+        let test_result: anyhow::Result<()> = (|| {
+            crate::resource!("resource_testdata/resources_dir.yaml")?;
 
-        let hello_fs_path = hello
-            .read()
-            .fs_path
-            .clone()
-            .expect("fs resource should have fs_path");
-        assert!(
-            std::path::Path::new(&hello_fs_path).exists(),
-            "expected hello.txt fs path to exist, got: {hello_fs_path}"
-        );
-        assert_eq!(std::fs::read(&hello_fs_path)?, b"hello\n".to_vec());
+            let hello = Resource::from(ResourcePath::from("dir_test/bundle/hello.txt"))
+                .expect("dir file should be registered");
 
-        {
-            let mut guard = hello.write();
-            let bytes = if guard.data_loaded() {
-                guard
-                    .try_get_data()
-                    .expect("cached data should be available")
-            } else {
-                guard.get_data()
-            };
-            assert_eq!(bytes.as_slice(), b"hello\n");
-        }
+            let hello_fs_path = hello
+                .read()
+                .fs_path
+                .clone()
+                .expect("fs resource should have fs_path");
+            assert!(
+                std::path::Path::new(&hello_fs_path).exists(),
+                "expected hello.txt fs path to exist, got: {hello_fs_path}"
+            );
+            assert_eq!(std::fs::read(&hello_fs_path)?, b"hello\n".to_vec());
 
-        let world = Resource::from(ResourcePath::from("dir_test/bundle/nested/world.txt"))
-            .expect("nested dir file should be registered");
-        {
-            let mut guard = world.write();
-            let bytes = if guard.data_loaded() {
-                guard
-                    .try_get_data()
-                    .expect("cached data should be available")
-            } else {
-                guard.get_data()
-            };
-            assert_eq!(bytes.as_slice(), b"world\n");
-        }
+            {
+                let mut guard = hello.write();
+                let bytes = if guard.data_loaded() {
+                    guard
+                        .try_get_data()
+                        .expect("cached data should be available")
+                } else {
+                    guard.get_data()
+                };
+                assert_eq!(bytes.as_slice(), b"hello\n");
+            }
 
-        assert_eq!(
-            Resource::list_children(ResourcePath::from("dir_test/bundle")).unwrap(),
-            vec!["hello.txt".to_string(), "nested".to_string()]
-        );
-        assert_eq!(
-            Resource::list_children(ResourcePath::from("dir_test/bundle/nested")).unwrap(),
-            vec!["world.txt".to_string()]
-        );
+            let world = Resource::from(ResourcePath::from("dir_test/bundle/nested/world.txt"))
+                .expect("nested dir file should be registered");
+            {
+                let mut guard = world.write();
+                let bytes = if guard.data_loaded() {
+                    guard
+                        .try_get_data()
+                        .expect("cached data should be available")
+                } else {
+                    guard.get_data()
+                };
+                assert_eq!(bytes.as_slice(), b"world\n");
+            }
 
-        Ok(())
+            assert_eq!(
+                Resource::list_children(ResourcePath::from("dir_test/bundle")).unwrap(),
+                vec!["hello.txt".to_string(), "nested".to_string()]
+            );
+            assert_eq!(
+                Resource::list_children(ResourcePath::from("dir_test/bundle/nested")).unwrap(),
+                vec!["world.txt".to_string()]
+            );
+
+            Ok(())
+        })();
+
+        // 尽力恢复 cwd；若失败则返回错误（保持测试环境干净）。
+        std::env::set_current_dir(original_cwd)?;
+        test_result
     }
 }

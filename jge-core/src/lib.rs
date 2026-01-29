@@ -112,8 +112,10 @@ pub use jge_macros::scene;
 ///
 /// - 资源逻辑路径：由 YAML 的目录层级拼接而成，使用 `/` 作为分隔符，例如 `textures/ui/button.png`。
 /// - `from` 相对路径：
-///   - **内联 YAML**：以 **宏调用点源代码文件的父目录** 为基准解析。
-///   - **从文件读取 YAML**：以该 **YAML 文件所在目录** 为基准解析。
+///   - `embed`：
+///     - **内联 YAML**：以 **宏调用点源代码文件的父目录** 为基准解析。
+///     - **从文件读取 YAML**：以该 **YAML 文件所在目录** 为基准解析。
+///   - `fs` / `dir`：若 `from` 不是绝对路径，则在**运行时**按进程的当前工作目录（cwd）解析。
 ///
 /// # YAML 语法（精简 BNF）
 ///
@@ -166,7 +168,8 @@ pub use jge_macros::scene;
 /// fn register_resources_from_file() -> ::anyhow::Result<()> {
 ///     // 说明：
 ///     // - YAML 文件路径（assets/resources.yaml）仍然相对“本行所在源文件的父目录”。
-///     // - YAML 里的 `from:` 相对路径则相对 YAML 文件自身所在目录。
+///     // - embed 的 `from:` 相对路径仍相对 YAML 文件自身所在目录。
+///     // - fs/dir 的 `from:` 相对路径改为运行时按 cwd 解析。
 ///     ::jge_core::resource!("assets/resources.yaml")?;
 ///     Ok(())
 /// }

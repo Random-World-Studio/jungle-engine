@@ -164,8 +164,9 @@ pub fn expand_resource(input: TokenStream) -> TokenStream {
     // - 若字符串像文件路径（.yaml/.yml）：读取该文件（必须存在）
     // - 否则视为内联 YAML
     //
-    // 重要：当从文件读取 YAML 时，`from:` 的相对路径应当相对该 YAML 文件的目录。
-    // 内联 YAML 则维持原语义（相对宏调用点源文件）。
+    // 重要：当从文件读取 YAML 时：
+    // - embed/dir 的 `from:` 相对路径相对该 YAML 文件的目录（保持 include_* / 编译期遍历可用）。
+    // - fs 的 `from:` 若为相对路径，则在**运行时**按进程当前工作目录（cwd）解析。
     let (yaml_src, dep_include, yaml_dir_for_from) =
         match maybe_read_yaml_file(&lit, &raw, &callsite_dir) {
             Ok(v) => v,
@@ -232,15 +233,8 @@ pub fn expand_resource(input: TokenStream) -> TokenStream {
                 let from_lit = LitStr::new(from, proc_macro2::Span::call_site());
                 quote! {
                     {
-                        let __file = ::std::path::Path::new(file!());
-                        // 在某些环境下 file!() 可能包含包目录前缀（例如 "jge-core/src/foo.rs"）。
-                        // 这里去掉该前缀，保证与 CARGO_MANIFEST_DIR 拼接后路径正确。
-                        let __file = __file.strip_prefix(env!("CARGO_PKG_NAME")).unwrap_or(__file);
-                        let __base = ::std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(__file);
-                        let __dir = __base
-                            .parent()
-                            .ok_or_else(|| ::anyhow::anyhow!("resource!: 无法解析调用点文件父目录：{}", file!()))?;
-                        let __path = __dir.join(#from_lit);
+                        // 约定：fs 的相对路径按运行时进程当前工作目录（cwd）解析。
+                        let __path = ::std::path::PathBuf::from(#from_lit);
                         #core_crate::resource::Resource::register(
                             #core_crate::resource::ResourcePath::from(#logical_path),
                             #core_crate::resource::Resource::from_file(__path.as_path()),
@@ -272,9 +266,15 @@ pub fn expand_resource(input: TokenStream) -> TokenStream {
                 }
             }
             ResourceKind::Dir => {
-                // dir entries are expanded at parse time into concrete fs entries;
-                // there should be no direct Dir entries to register here. Emit no-op.
-                quote! {}
+                let from = e.from.as_ref().expect("dir must have from");
+                let from_lit = LitStr::new(from, proc_macro2::Span::call_site());
+                quote! {
+                    #core_crate::resource::Resource::register_dir(
+                        #core_crate::resource::ResourcePath::from(#logical_path),
+                        ::std::path::PathBuf::from(#from_lit),
+                    )
+                    .with_context(|| format!("resource!: 注册目录映射失败（{}:{}）", #logical_path, #from_lit))?;
+                }
             }
         }
     });
@@ -405,6 +405,9 @@ fn parse_node(
     // 资源：一个“资源名: kind” + 根据 kind 的 from/txt
     let mut res_name: Option<String> = None;
     let mut kind: Option<ResourceKind> = None;
+    // 注意：from 在解析阶段先保持“原始字符串”。
+    // - 对 embed/dir：后续会根据 YAML 文件目录做一次相对路径解析（保持旧语义）。
+    // - 对 fs：保持原样，让运行时按 cwd 解析。
     let mut from: Option<String> = None;
     let mut txt: Option<String> = None;
     let mut bin: Option<Vec<u8>> = None;
@@ -413,9 +416,7 @@ fn parse_node(
         let Some(key) = as_plain_key(k) else { continue };
         match key.as_str() {
             "from" => {
-                from = v
-                    .as_str()
-                    .map(|s| resolve_from_for_yaml_file(s, yaml_dir_for_from));
+                from = v.as_str().map(|s| s.to_string());
             }
             "txt" => {
                 txt = parse_txt_value(v)?;
@@ -464,6 +465,12 @@ fn parse_node(
             "resource!: 资源节点缺少类型（embed/fs/txt/bin/dir）",
         ));
     };
+
+    // 对 embed：把 YAML 文件目录前缀折叠到 from 里（便于 include_* 在编译期定位文件）。
+    // 对 fs/dir：不改写，保持原始字符串；相对路径将按“当前工作目录（cwd）”语义使用。
+    if matches!(kind, ResourceKind::Embed) {
+        from = from.map(|s| resolve_from_for_yaml_file(&s, yaml_dir_for_from));
+    }
 
     match kind {
         ResourceKind::Embed | ResourceKind::Fs => {
@@ -527,8 +534,7 @@ fn parse_node(
             }
         }
         ResourceKind::Dir => {
-            // dir 在这里不直接产生单个 entry：宏在编译期读取目录结构，
-            // 并为目录下的每个文件注册为对应的 fs 资源条目（保持子目录层级）。
+            // dir：只注册一个“运行时目录映射”节点，不在编译期遍历/检查文件系统。
             let from_path = from.as_deref().unwrap_or("");
             if from_path.is_empty() {
                 return Err(syn::Error::new(
@@ -536,86 +542,18 @@ fn parse_node(
                     format!("resource!: {res_name}: dir 需要 from 字段"),
                 ));
             }
-            let dir = std::path::PathBuf::from(from_path);
-            let dir_fs_path = if dir.is_absolute() {
-                dir
-            } else {
-                callsite_dir.join(dir)
-            };
-
-            if !dir_fs_path.exists() || !dir_fs_path.is_dir() {
+            if txt.is_some() {
                 return Err(syn::Error::new(
                     proc_macro2::Span::call_site(),
-                    format!(
-                        "resource!: {res_name}: dir 指定的路径不存在或不是目录：{}",
-                        from_path
-                    ),
+                    format!("resource!: {res_name}: dir 不允许 txt 字段"),
                 ));
             }
-
-            // 遍历目录并把文件注册为 fs 资源，逻辑路径以当前节点为根。
-            fn push_dir_entries(
-                base_dir: &std::path::Path,
-                callsite_dir: &std::path::Path,
-                rel_prefix: &Vec<String>,
-                out: &mut Vec<ResourceEntry>,
-            ) -> Result<(), syn::Error> {
-                let mut entries = std::fs::read_dir(base_dir)
-                    .map_err(|e| {
-                        syn::Error::new(
-                            proc_macro2::Span::call_site(),
-                            format!("resource!: 无法读取目录 {}: {}", base_dir.display(), e),
-                        )
-                    })?
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(|e| {
-                        syn::Error::new(
-                            proc_macro2::Span::call_site(),
-                            format!("resource!: 读取目录项失败: {}", e),
-                        )
-                    })?;
-
-                entries.sort_by_key(|e| e.file_name().to_string_lossy().into_owned());
-
-                for entry in entries {
-                    let path = entry.path();
-                    let name = entry.file_name().into_string().map_err(|_| {
-                        syn::Error::new(
-                            proc_macro2::Span::call_site(),
-                            "resource!: 目录项名称不是有效 Unicode",
-                        )
-                    })?;
-                    if path.is_dir() {
-                        let mut next = rel_prefix.clone();
-                        next.push(name);
-                        push_dir_entries(&path, callsite_dir, &next, out)?;
-                    } else if path.is_file() {
-                        let mut segs = rel_prefix.clone();
-                        segs.push(name);
-                        let logical = segs.join("/");
-
-                        let from = match path.strip_prefix(callsite_dir) {
-                            Ok(rel) => rel.to_string_lossy().into_owned(),
-                            Err(_) => path.to_string_lossy().into_owned(),
-                        };
-
-                        out.push(ResourceEntry {
-                            logical_path: logical,
-                            kind: ResourceKind::Fs,
-                            from: Some(from),
-                            txt: None,
-                            bin: None,
-                        });
-                    }
-                }
-                Ok(())
+            if bin.is_some() {
+                return Err(syn::Error::new(
+                    proc_macro2::Span::call_site(),
+                    format!("resource!: {res_name}: dir 不允许 bin 字段"),
+                ));
             }
-
-            let mut base = prefix.clone();
-            base.push(res_name.clone());
-            push_dir_entries(&dir_fs_path, callsite_dir, &base, out)?;
-            // 已展开目录为具体文件条目，返回即可。
-            return Ok(());
         }
     }
 
@@ -649,7 +587,7 @@ fn validate_segment(seg: &str) -> Result<(), syn::Error> {
     if seg.contains('/') {
         return Err(syn::Error::new(
             proc_macro2::Span::call_site(),
-            format!("resource!: 路径段不允许包含 '/': {seg}"),
+            "resource!: 路径段不允许包含 '/'",
         ));
     }
     Ok(())
