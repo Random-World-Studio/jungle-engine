@@ -69,6 +69,39 @@ use crate::{
 ///     Ok(())
 /// }
 /// ```
+///
+/// # 运行 async 任务（推荐）
+///
+/// `Game` 内部已经持有 Tokio runtime。对于 `scene!`、`Node::attach/detach/set_logic` 这类返回 Future 的 API：
+///
+/// - **启动主循环前**：用 [`Game::block_on`] 驱动“场景构建/挂载”等初始化任务。
+/// - **主循环运行中**：用 [`Game::spawn`] / [`Game::spawn_blocking`] 启动后台任务。
+///
+/// 注意：不要在你的游戏项目里自行构造 `tokio::runtime::Runtime` 或 `Builder::new_current_thread()`。
+/// 这既没有必要，也容易引入多 runtime 嵌套/生命周期与阻塞语义问题。
+///
+/// ```no_run
+/// fn bootstrap_scene(game: &::jge_core::Game, engine_root: ::jge_core::game::entity::Entity) -> ::anyhow::Result<()> {
+///     game.block_on(async move {
+///         let bindings = ::jge_core::scene! {
+///             node "scene_root" as scene_root {
+///                 // ... 在这里挂 Layer/Scene/Renderable 等组件
+///             }
+///         }
+///         .await?;
+///
+///         let attach_future = {
+///             let mut root_node = engine_root
+///                 .get_component_mut::<::jge_core::game::component::node::Node>()
+///                 .expect("engine root should have Node");
+///             root_node.attach(bindings.scene_root)
+///         };
+///         attach_future.await?;
+///
+///         ::anyhow::Ok(())
+///     })
+/// }
+/// ```
 pub struct Game {
     config: GameConfig,
     window: Option<GameWindow>,
@@ -101,16 +134,26 @@ impl Game {
     /// 通常你会用 [`crate::scene!`] 来构建 `root`：
     ///
     /// ```no_run
-    /// fn build_root() -> ::anyhow::Result<::jge_core::game::entity::Entity> {
-    ///     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-    ///     rt.block_on(async move {
+    /// fn bootstrap_scene(game: &::jge_core::Game, engine_root: ::jge_core::game::entity::Entity) -> ::anyhow::Result<()> {
+    ///     // 注意：不要自行构造 tokio runtime。
+    ///     // `Game` 内部已经持有 runtime，可通过 `block_on/spawn` 执行 `scene!` / `Node::attach` 等 async API。
+    ///     game.block_on(async move {
     ///         let bindings = ::jge_core::scene! {
-    ///             node "root" as root {
+    ///             node "scene_root" as scene_root {
     ///                 // ... 在这里挂 Layer/Scene/Renderable 等组件
     ///             }
     ///         }
     ///         .await?;
-    ///         Ok(bindings.root)
+    ///
+    ///         let attach_future = {
+    ///             let mut root_node = engine_root
+    ///                 .get_component_mut::<::jge_core::game::component::node::Node>()
+    ///                 .expect("engine root should have Node");
+    ///             root_node.attach(bindings.scene_root)
+    ///         };
+    ///         attach_future.await?;
+    ///
+    ///         ::anyhow::Ok(())
     ///     })
     /// }
     /// ```
@@ -168,6 +211,9 @@ impl Game {
         })
     }
 
+    /// 在内部 Tokio runtime 上启动一个异步任务。
+    ///
+    /// 这是引擎推荐的“运行时并发入口”，通常优于你自己创建 tokio runtime。
     pub fn spawn<F>(&self, future: F) -> JoinHandle<F::Output>
     where
         F: Future + Send + 'static,
@@ -176,6 +222,7 @@ impl Game {
         self.runtime.spawn(future)
     }
 
+    /// 在内部 Tokio runtime 上启动一个阻塞任务。
     pub fn spawn_blocking<F, R>(&self, func: F) -> JoinHandle<R>
     where
         F: FnOnce() -> R + Send + 'static,
@@ -184,6 +231,9 @@ impl Game {
         self.runtime.spawn_blocking(func)
     }
 
+    /// 在内部 Tokio runtime 上阻塞执行一个 Future。
+    ///
+    /// 典型用途：在 `run()` 之前驱动 `scene!` / `Node::attach` 等初始化 Future。
     pub fn block_on<F, R>(&self, future: F) -> R
     where
         F: Future<Output = R>,
@@ -645,6 +695,7 @@ mod tests {
     use crate::game::component::node::Node;
     use crate::game::system::logic::GameLogic;
     use std::sync::{Arc, Mutex as StdMutex};
+    use std::time::Duration;
 
     struct TrackingLogic {
         label: &'static str,
@@ -672,16 +723,14 @@ mod tests {
         }
     }
 
-    #[test]
-    fn game_drop_detaches_tree_and_calls_root_on_detach() {
+    #[tokio::test]
+    async fn game_drop_detaches_tree_and_calls_root_on_detach() {
         let events = Arc::new(StdMutex::new(Vec::new()));
-
-        let rt = tokio::runtime::Runtime::new().expect("should create test runtime");
 
         let root = Entity::new().expect("should create root entity");
         root.register_component(Node::new("root").unwrap())
             .expect("should register root Node");
-        rt.block_on(async {
+        {
             let set_logic_future = {
                 let mut node = root.get_component_mut::<Node>().unwrap();
                 node.set_logic(TrackingLogic {
@@ -690,13 +739,13 @@ mod tests {
                 })
             };
             set_logic_future.await;
-        });
+        }
 
         let child = Entity::new().expect("should create child entity");
         child
             .register_component(Node::new("child").unwrap())
             .expect("should register child Node");
-        rt.block_on(async {
+        {
             let set_logic_future = {
                 let mut node = child.get_component_mut::<Node>().unwrap();
                 node.set_logic(TrackingLogic {
@@ -705,21 +754,62 @@ mod tests {
                 })
             };
             set_logic_future.await;
-        });
+        }
 
         let game = Game::new(GameConfig::default(), root).expect("should create game");
 
-        rt.block_on(async {
+        // 注意：在 tokio runtime 上下文中，Game::new 会将 root 的 on_attach
+        // 退化为 spawn 异步任务，因此这里等待它实际写入日志，避免竞态。
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if events.lock().unwrap().contains(&"root_attach") {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("root on_attach should complete");
+
+        {
             let attach_future = {
                 let mut root_node = root.get_component_mut::<Node>().unwrap();
                 root_node.attach(child)
             };
             attach_future.await.unwrap();
-        });
+        }
 
-        drop(rt);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if events.lock().unwrap().contains(&"child_attach") {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("child on_attach should complete");
 
-        drop(game);
+        tokio::task::spawn_blocking(move || {
+            std::thread::spawn(move || drop(game))
+                .join()
+                .expect("drop thread should not panic");
+        })
+        .await
+        .expect("should be able to drop Game off runtime context");
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let log = events.lock().unwrap();
+                if log.contains(&"child_detach") && log.contains(&"root_detach") {
+                    break;
+                }
+                drop(log);
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("on_detach should complete");
 
         let log = events.lock().unwrap().clone();
         assert_eq!(

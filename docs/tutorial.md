@@ -49,6 +49,7 @@ use nalgebra::Vector3;
 use jge_core::{
     Game,
     config::GameConfig,
+    game::{component::node::Node, entity::Entity},
     game::component::{
         camera::Camera,
         light::{Light, ParallelLight, PointLight},
@@ -63,15 +64,19 @@ use jge_core::{
 fn main() -> anyhow::Result<()> {
     logger::init()?;
 
-    let root = build_scene().context("构建场景失败")?;
+    // 注意：不要自行构造 tokio runtime。
+    // `Game` 内部已经持有 runtime，并提供 `block_on/spawn` 来运行 async 任务。
+    let engine_root = Entity::new()?;
+    let game = Game::new(GameConfig::default(), engine_root)?;
 
-    let game = Game::new(GameConfig::default(), root)?;
+    // 在启动主循环前，用 Game 的 runtime 构建并挂载场景子树。
+    game.block_on(build_scene(engine_root)).context("构建场景失败")?;
     game.run()
 }
 
-fn build_scene() -> anyhow::Result<jge_core::game::entity::Entity> {
+async fn build_scene(engine_root: Entity) -> anyhow::Result<()> {
     let bindings = scene! {
-        node "root" as root {
+        node "scene_root" as scene_root {
             // 这个节点是一个 3D layer：挂 Scene3D 后会自动补齐 Layer/Renderable/Transform
             node "layer" as layer {
                 + Scene3D::new();
@@ -150,9 +155,18 @@ fn build_scene() -> anyhow::Result<jge_core::game::entity::Entity> {
                 }
             }
         }
-    }?;
+    }
+    .await?;
 
-    Ok(bindings.root)
+    let attach_future = {
+        let mut root_node = engine_root
+            .get_component_mut::<Node>()
+            .expect("引擎根实体应持有 Node 组件");
+        root_node.attach(bindings.scene_root)
+    };
+    attach_future.await.context("挂载场景根节点失败")?;
+
+    Ok(())
 }
 ```
 
@@ -172,7 +186,9 @@ cargo run
 你也可以把 DSL 写到文件里，然后用 `scene!("...")` 加载：
 
 ```rust
-let bindings = scene!("assets/levels/intro.jgs")?;
+// 该宏返回 Future，因此需要在 async 上下文中 `.await`。
+// 在本教程的结构里，建议放进 `game.block_on(async { ... })` 或 `game.spawn(async { ... })` 里执行。
+let bindings = scene!("assets/levels/intro.jgs").await?;
 ```
 
 ## 5. 添加游戏逻辑（GameLogic）
@@ -181,6 +197,8 @@ let bindings = scene!("assets/levels/intro.jgs")?;
 
 - `update(entity, delta)`：每帧回调
 - `on_event(entity, event)`：每个事件回调
+- `on_attach(entity)`：当节点被挂载到父节点下时回调（异步）
+- `on_detach(entity)`：当节点从父节点脱离时回调（异步）
 
 通常你会把逻辑挂在某个 Node 上：
 
@@ -220,21 +238,16 @@ impl GameLogic for Rotator {
 }
 
 // 在 scene! 里挂逻辑：
-fn attach_logic_example() -> anyhow::Result<Entity> {
+async fn attach_logic_example() -> anyhow::Result<Entity> {
     let bindings = jge_core::scene! {
         node "root" as root {
             node "spin" as spin {
                 // 推荐语法：直接用 `*` 给当前节点挂逻辑
                 * Rotator { speed: 1.2 };
-
-                // 等价写法（更显式）：
-                // with(mut node: Node) {
-                //     node.set_logic(Rotator { speed: 1.2 });
-                //     Ok(())
-                // }
             }
         }
-    }?;
+    }
+    .await?;
     Ok(bindings.root)
 }
 ```
@@ -496,7 +509,7 @@ if let Some(mut health) = entity.get_component_mut::<Health>() {
 
 - `jge_core::event::Event`：统一事件类型（支持 `Event::custom(T)` + downcast）。
 - `jge_core::game::system::logic::GameLogic`：每帧更新与事件回调接口。
-- `jge_core::game::component::node::Node::set_logic(...)`：把逻辑挂到节点上（见本教程第 5 节）。
+- `jge_core::game::component::node::Node::set_logic(...)`：把逻辑挂到节点上（返回 Future，需要 `.await`；见本教程第 5 节）。
 
 ### 9.7 本次文档覆盖范围与后续可补点
 

@@ -89,7 +89,7 @@ mod tests {
     use crate::resource::Resource;
     use nalgebra::{Vector2, Vector3};
 
-    fn detach_node(entity: Entity) {
+    async fn detach_node(entity: Entity) {
         if entity.get_component::<Node>().is_some() {
             let detach_future = {
                 let mut node = entity
@@ -97,21 +97,17 @@ mod tests {
                     .expect("node component disappeared");
                 node.detach()
             };
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("should build tokio runtime for tests");
-            let _ = runtime.block_on(detach_future);
+            let _ = detach_future.await;
         }
     }
 
-    fn prepare_entity(name: &str) -> Entity {
+    async fn prepare_entity(name: &str) -> Entity {
         let entity = Entity::new().expect("应能创建实体");
         let _ = entity.unregister_component::<Material>();
         let _ = entity.unregister_component::<Shape>();
         let _ = entity.unregister_component::<Transform>();
         let _ = entity.unregister_component::<Renderable>();
-        detach_node(entity);
+        detach_node(entity).await;
         let _ = entity.unregister_component::<Node>();
 
         let _ = entity
@@ -136,8 +132,8 @@ mod tests {
         Resource::from_memory(vec![1, 2, 3])
     }
 
-    #[test]
-    fn material_requires_shape_dependency() {
+    #[tokio::test]
+    async fn material_requires_shape_dependency() {
         let entity = Entity::new().expect("应能创建实体");
         let resource = mock_resource();
         let inserted = entity
@@ -159,7 +155,7 @@ mod tests {
         );
         assert!(entity.get_component::<Node>().is_some(), "Node 应被注册");
 
-        let entity = prepare_entity("material_dependency");
+        let entity = prepare_entity("material_dependency").await;
         let resource = mock_resource();
         let material = Material::new(
             resource.clone(),

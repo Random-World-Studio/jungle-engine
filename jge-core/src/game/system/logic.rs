@@ -90,7 +90,6 @@ mod tests {
     use super::*;
     use crate::game::entity::EntityId;
     use std::sync::{Arc, Mutex as StdMutex};
-    use tokio::runtime::Builder;
 
     struct CounterLogic {
         counter: Arc<StdMutex<u32>>,
@@ -116,39 +115,36 @@ mod tests {
         assert!(boxed.is_ok());
     }
 
-    #[test]
-    fn handle_clone_shares_same_logic_instance() {
-        let rt = Builder::new_current_thread().enable_all().build().unwrap();
-        rt.block_on(async {
-            let counter = Arc::new(StdMutex::new(0u32));
-            let handle = GameLogicHandle::new(CounterLogic {
-                counter: counter.clone(),
-            });
-            let cloned = handle.clone();
-
-            {
-                let mut logic = handle.lock().await;
-                logic
-                    .update(
-                        Entity::from(EntityId::new()),
-                        std::time::Duration::from_millis(1),
-                    )
-                    .await
-                    .unwrap();
-            }
-            {
-                let mut logic = cloned.lock().await;
-                logic
-                    .update(
-                        Entity::from(EntityId::new()),
-                        std::time::Duration::from_millis(1),
-                    )
-                    .await
-                    .unwrap();
-            }
-
-            assert_eq!(*counter.lock().unwrap(), 2);
+    #[tokio::test]
+    async fn handle_clone_shares_same_logic_instance() {
+        let counter = Arc::new(StdMutex::new(0u32));
+        let handle = GameLogicHandle::new(CounterLogic {
+            counter: counter.clone(),
         });
+        let cloned = handle.clone();
+
+        {
+            let mut logic = handle.lock().await;
+            logic
+                .update(
+                    Entity::from(EntityId::new()),
+                    std::time::Duration::from_millis(1),
+                )
+                .await
+                .unwrap();
+        }
+        {
+            let mut logic = cloned.lock().await;
+            logic
+                .update(
+                    Entity::from(EntityId::new()),
+                    std::time::Duration::from_millis(1),
+                )
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(*counter.lock().unwrap(), 2);
     }
 
     #[test]

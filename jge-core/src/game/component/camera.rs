@@ -268,7 +268,7 @@ mod tests {
     use crate::game::component::{node::Node, renderable::Renderable};
     use crate::game::entity::Entity;
 
-    fn detach_node(entity: Entity) {
+    async fn detach_node(entity: Entity) {
         if entity.get_component::<Node>().is_some() {
             let detach_future = {
                 let mut node = entity
@@ -276,19 +276,15 @@ mod tests {
                     .expect("node component disappeared");
                 node.detach()
             };
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("should build tokio runtime for tests");
-            let _ = runtime.block_on(detach_future);
+            let _ = detach_future.await;
         }
     }
 
-    fn prepare_entity(entity: &Entity, node_name: &str) {
+    async fn prepare_entity(entity: &Entity, node_name: &str) {
         let _ = entity.unregister_component::<Camera>();
         let _ = entity.unregister_component::<Transform>();
         let _ = entity.unregister_component::<Renderable>();
-        detach_node(*entity);
+        detach_node(*entity).await;
         let _ = entity.unregister_component::<Node>();
 
         let _ = entity
@@ -302,13 +298,13 @@ mod tests {
             .expect("应能插入 Transform");
     }
 
-    #[test]
-    fn camera_requires_transform_dependency() {
+    #[tokio::test]
+    async fn camera_requires_transform_dependency() {
         let entity = Entity::new().expect("应能创建实体");
         let _ = entity.unregister_component::<Camera>();
         let _ = entity.unregister_component::<Transform>();
         let _ = entity.unregister_component::<Renderable>();
-        detach_node(entity);
+        detach_node(entity).await;
         let _ = entity.unregister_component::<Node>();
 
         let inserted = entity
@@ -334,17 +330,17 @@ mod tests {
             .expect("重复插入应返回旧的 Camera");
         assert!(previous.is_some());
 
-        prepare_entity(&entity, "camera_node");
+        prepare_entity(&entity, "camera_node").await;
         let reinserted = entity
             .register_component(Camera::new())
             .expect("满足依赖后应能插入 Camera");
         assert!(reinserted.is_none());
     }
 
-    #[test]
-    fn camera_property_validations() {
+    #[tokio::test]
+    async fn camera_property_validations() {
         let entity = Entity::new().expect("应能创建实体");
-        prepare_entity(&entity, "camera_props");
+        prepare_entity(&entity, "camera_props").await;
 
         let mut camera = Camera::new();
         assert!(camera.set_vertical_fov(MIN_VERTICAL_FOV / 2.0).is_err());
@@ -378,10 +374,10 @@ mod tests {
         );
     }
 
-    #[test]
-    fn camera_vertical_fov_respects_aspect_ratio() {
+    #[tokio::test]
+    async fn camera_vertical_fov_respects_aspect_ratio() {
         let entity = Entity::new().expect("应能创建实体");
-        prepare_entity(&entity, "camera_fov");
+        prepare_entity(&entity, "camera_fov").await;
 
         let camera = Camera::new();
         let vertical_base = camera

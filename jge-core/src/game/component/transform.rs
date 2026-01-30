@@ -124,7 +124,7 @@ mod tests {
     use nalgebra::{Point3, Rotation3, Translation3, Vector3, Vector4};
     use std::f32::consts::FRAC_PI_2;
 
-    fn detach_node(entity: Entity) {
+    async fn detach_node(entity: Entity) {
         if entity.get_component::<Node>().is_some() {
             let detach_future = {
                 let mut node = entity
@@ -132,25 +132,21 @@ mod tests {
                     .expect("node component disappeared");
                 node.detach()
             };
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("should build tokio runtime for tests");
-            let _ = runtime.block_on(detach_future);
+            let _ = detach_future.await;
         }
     }
 
-    fn clear_components(entity: &Entity) {
+    async fn clear_components(entity: &Entity) {
         let _ = entity.unregister_component::<Transform>();
         let _ = entity.unregister_component::<Renderable>();
-        detach_node(*entity);
+        detach_node(*entity).await;
         let _ = entity.unregister_component::<Node>();
     }
 
-    #[test]
-    fn transform_requires_node_dependency() {
+    #[tokio::test]
+    async fn transform_requires_node_dependency() {
         let entity = Entity::new().expect("应能创建实体");
-        clear_components(&entity);
+        clear_components(&entity).await;
 
         let inserted = entity
             .register_component(Transform::new())

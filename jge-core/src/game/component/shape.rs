@@ -137,7 +137,7 @@ mod tests {
     };
     use nalgebra::Vector3;
 
-    fn detach_node(entity: Entity) {
+    async fn detach_node(entity: Entity) {
         if entity.get_component::<Node>().is_some() {
             let detach_future = {
                 let mut node = entity
@@ -145,19 +145,15 @@ mod tests {
                     .expect("node component disappeared");
                 node.detach()
             };
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("should build tokio runtime for tests");
-            let _ = runtime.block_on(detach_future);
+            let _ = detach_future.await;
         }
     }
 
-    fn ensure_transform(entity: &Entity, name: &str) {
+    async fn ensure_transform(entity: &Entity, name: &str) {
         let _ = entity.unregister_component::<Shape>();
         let _ = entity.unregister_component::<Transform>();
         let _ = entity.unregister_component::<Renderable>();
-        detach_node(*entity);
+        detach_node(*entity).await;
         let _ = entity.unregister_component::<Node>();
 
         let _ = entity
@@ -171,13 +167,13 @@ mod tests {
             .expect("应能插入 Transform");
     }
 
-    #[test]
-    fn shape_requires_transform_dependency() {
+    #[tokio::test]
+    async fn shape_requires_transform_dependency() {
         let entity = Entity::new().expect("应能创建实体");
         let _ = entity.unregister_component::<Shape>();
         let _ = entity.unregister_component::<Transform>();
         let _ = entity.unregister_component::<Renderable>();
-        detach_node(entity);
+        detach_node(entity).await;
         let _ = entity.unregister_component::<Node>();
 
         let inserted = entity
@@ -203,10 +199,10 @@ mod tests {
         let _ = entity.unregister_component::<Shape>();
     }
 
-    #[test]
-    fn triangles_iterates_triplets() {
+    #[tokio::test]
+    async fn triangles_iterates_triplets() {
         let entity = Entity::new().expect("应能创建实体");
-        ensure_transform(&entity, "shape_triangles");
+        ensure_transform(&entity, "shape_triangles").await;
 
         let shape = Shape::new(
             vec![

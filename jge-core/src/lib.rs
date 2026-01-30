@@ -61,28 +61,27 @@ pub use game::Game;
 /// # 示例
 ///
 /// ```no_run
-/// fn build_root() -> ::anyhow::Result<::jge_core::game::entity::Entity> {
-///     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-///     rt.block_on(async move {
-///         let bindings = ::jge_core::scene! {
-///             node "root" as root {
-///                 node "camera" as camera {
-///                     + ::jge_core::game::component::renderable::Renderable::new();
-///                     + ::jge_core::game::component::transform::Transform::new();
-///                     + ::jge_core::game::component::camera::Camera::new();
-///                 }
+/// async fn build_root() -> ::anyhow::Result<::jge_core::game::entity::Entity> {
+///     // `scene!` 返回 Future，需要在某个 async 上下文中 `.await`。
+///     // 在实际游戏项目中，推荐通过 `Game::block_on` 或 `Game::spawn` 来驱动这些 async 构建任务。
+///     let bindings = ::jge_core::scene! {
+///         node "root" as root {
+///             node "camera" as camera {
+///                 + ::jge_core::game::component::renderable::Renderable::new();
+///                 + ::jge_core::game::component::transform::Transform::new();
+///                 + ::jge_core::game::component::camera::Camera::new();
+///             }
 ///
-///                 // 写命令式逻辑时用 with() { ... }。
-///                 with() {
-///                     let _ = (e, root, camera);
-///                     Ok(())
-///                 }
+///             // 写命令式逻辑时用 with() { ... }。
+///             with() {
+///                 let _ = (e, root, camera);
+///                 Ok(())
 ///             }
 ///         }
-///         .await?;
+///     }
+///     .await?;
 ///
-///         Ok(bindings.root)
-///     })
+///     Ok(bindings.root)
 /// }
 /// ```
 ///

@@ -19,9 +19,7 @@
 //!     entity::Entity,
 //! };
 //!
-//! # fn main() -> anyhow::Result<()> {
-//! # let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-//! # rt.block_on(async move {
+//! # async fn demo() -> anyhow::Result<()> {
 //! // 创建一个 Layer 根实体
 //! let root = Entity::new()?;
 //! root.register_component(Layer::new())?;
@@ -39,7 +37,6 @@
 //! };
 //! attach_future.await?;
 //! Ok(())
-//! # })
 //! # }
 //! ```
 
