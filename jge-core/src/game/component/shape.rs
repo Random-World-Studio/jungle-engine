@@ -138,8 +138,18 @@ mod tests {
     use nalgebra::Vector3;
 
     fn detach_node(entity: Entity) {
-        if let Some(mut node) = entity.get_component_mut::<Node>() {
-            let _ = node.detach();
+        if entity.get_component::<Node>().is_some() {
+            let detach_future = {
+                let mut node = entity
+                    .get_component_mut::<Node>()
+                    .expect("node component disappeared");
+                node.detach()
+            };
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("should build tokio runtime for tests");
+            let _ = runtime.block_on(detach_future);
         }
     }
 

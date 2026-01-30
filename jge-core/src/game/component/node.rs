@@ -388,8 +388,8 @@ impl Node {
         if let Some(handle) = logic {
             let mut guard = handle.lock().await;
             let result = match event {
-                NodeLogicEvent::Attach => guard.on_attach(entity),
-                NodeLogicEvent::Detach => guard.on_detach(entity),
+                NodeLogicEvent::Attach => guard.on_attach(entity).await,
+                NodeLogicEvent::Detach => guard.on_detach(entity).await,
             };
 
             if let Err(err) = result {

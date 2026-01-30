@@ -825,7 +825,7 @@ struct CubeLogic;
 
 #[async_trait]
 impl GameLogic for CubeLogic {
-    fn on_attach(&mut self, _entity: Entity) -> anyhow::Result<()> {
+    async fn on_attach(&mut self, _entity: Entity) -> anyhow::Result<()> {
         Ok(())
     }
 
@@ -841,7 +841,7 @@ impl GameLogic for CubeLogic {
         Ok(())
     }
 
-    fn on_detach(&mut self, _entity: Entity) -> anyhow::Result<()> {
+    async fn on_detach(&mut self, _entity: Entity) -> anyhow::Result<()> {
         info!("Cube 节点 on_detach 被调用");
         Ok(())
     }

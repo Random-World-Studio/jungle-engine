@@ -131,7 +131,7 @@ impl Game {
                     runtime.spawn(async move {
                         let result = {
                             let mut logic = handle.lock().await;
-                            logic.on_attach(root_entity)
+                            logic.on_attach(root_entity).await
                         }
                         .with_context(|| "root on_attach failed");
 
@@ -143,7 +143,7 @@ impl Game {
                     let result = runtime
                         .block_on(async move {
                             let mut logic = handle.lock().await;
-                            logic.on_attach(root_entity)
+                            logic.on_attach(root_entity).await
                         })
                         .with_context(|| "root on_attach failed");
 
@@ -257,7 +257,7 @@ impl Game {
                 if let Some(handle) = root_node.logic().cloned() {
                     let result = {
                         let mut logic = handle.lock().await;
-                        logic.on_detach(root)
+                        logic.on_detach(root).await
                     }
                     .with_context(|| "root on_detach failed");
 
@@ -653,7 +653,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl GameLogic for TrackingLogic {
-        fn on_attach(&mut self, _e: Entity) -> anyhow::Result<()> {
+        async fn on_attach(&mut self, _e: Entity) -> anyhow::Result<()> {
             self.events.lock().unwrap().push(if self.label == "root" {
                 "root_attach"
             } else {
@@ -662,7 +662,7 @@ mod tests {
             Ok(())
         }
 
-        fn on_detach(&mut self, _e: Entity) -> anyhow::Result<()> {
+        async fn on_detach(&mut self, _e: Entity) -> anyhow::Result<()> {
             self.events.lock().unwrap().push(if self.label == "root" {
                 "root_detach"
             } else {

@@ -12,7 +12,7 @@ use crate::game::entity::Entity;
 /// - `new_boxed`：异步构造函数，返回一个 `Box<dyn GameLogic>` 的实例。
 /// - `on_attach`：当节点被挂载到父节点下时调用（异步）。
 /// - `update`：每个游戏刻调用一次（异步）。
-/// - `on_render`：每帧调用一次（同步）。
+/// - `on_render`：每帧调用一次（异步）。
 /// - `on_event`：发生事件时调用（异步）。
 /// - `on_detach`：节点被卸载时调用（异步）。
 #[async_trait]
@@ -25,8 +25,8 @@ pub trait GameLogic: Send + Sync {
         Ok(Box::new(EmptyGameLogic {}))
     }
 
-    /// 当刚被挂载到父节点下时调用，默认不做任何事。
-    fn on_attach(&mut self, _e: Entity) -> Result<()> {
+    /// 当刚被挂载到父节点下时调用（异步），默认不做任何事。
+    async fn on_attach(&mut self, _e: Entity) -> Result<()> {
         Ok(())
     }
 
@@ -46,7 +46,7 @@ pub trait GameLogic: Send + Sync {
     }
 
     /// 当节点被卸载时调用（异步），默认不做任何事。
-    fn on_detach(&mut self, _e: Entity) -> Result<()> {
+    async fn on_detach(&mut self, _e: Entity) -> Result<()> {
         Ok(())
     }
 }

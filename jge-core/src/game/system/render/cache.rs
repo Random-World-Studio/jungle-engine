@@ -1,7 +1,7 @@
+use super::profile::RenderProfiler;
 use super::scene2d::{Scene2DDepthCache, Scene2DMaterialCache, Scene2DPipelineCache};
 use super::scene3d::{Scene3DDepthCache, Scene3DMaterialCache, Scene3DPipelineCache};
 use super::{background::BackgroundPipelineCache, background::BackgroundTextureCache};
-use super::profile::RenderProfiler;
 
 pub(in crate::game::system::render) struct LayerRendererCache {
     pub(in crate::game::system::render) profiler: RenderProfiler,
