@@ -250,6 +250,13 @@ fn map_key_event_to_camera_action(event: &KeyEvent) -> Option<CameraAction> {
 }
 
 async fn build_demo_scene() -> anyhow::Result<Entity> {
+    let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel::<f64>(64);
+    let progress_handle = tokio::spawn(async move {
+        while let Some(p) = progress_rx.recv().await {
+            info!(target: "jge-demo", progress = p, "scene build progress");
+        }
+    });
+
     let text = render_text_to_material_texture(
         "Hello Jungle Engine\n你好， Jungle 引擎",
         &Font::System("Sarasa UI SC".to_string()),
@@ -270,6 +277,7 @@ async fn build_demo_scene() -> anyhow::Result<Entity> {
     let text_patches = quad_uv_patches();
 
     let bindings = scene! {
+        progress progress_tx;
         node {
             node "scene" as scene3d_layer {
                 + Layer::new() => |_, mut layer| -> anyhow::Result<()> {
@@ -434,6 +442,9 @@ async fn build_demo_scene() -> anyhow::Result<Entity> {
         }
     }
     .await?;
+
+    // 确保进度打印任务在返回前收尾。
+    let _ = progress_handle.await;
 
     Ok(bindings.root)
 }

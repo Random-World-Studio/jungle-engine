@@ -37,6 +37,10 @@ pub use game::Game;
 ///
 /// # 基本结构（概览）
 ///
+/// - （可选）在最外层声明 `progress tx;`，其中 `tx` 为 `tokio::sync::mpsc::Sender<f64>`，用于汇报构造进度。
+///   - 进度值范围：`0.0` 到 `1.0`
+///   - 语义：单调不减；宏会尽力在开始时发送 `0.0`，结束时发送 `1.0`
+///   - 可靠性：best-effort（接收端关闭/队列满等导致发送失败会被忽略，不会让场景构造失败）
 /// - 根必须且仅能有一个 `node { ... }`。
 /// - `node` 支持可选项（顺序不限）：
 ///   - `node "name" { ... }`：节点名（任意 `Into<String>` 表达式）
@@ -57,6 +61,31 @@ pub use game::Game;
 ///
 /// 注意：由于 `attach` 在最后阶段才发生，在 `with(...) { ... }` 等初始化块内，节点的父子关系尚未建立。
 /// 如果你依赖 `Node::parent/children` 或 `GameLogic::on_attach` 的时机，请把相关逻辑放在宏返回之后（或在运行时由逻辑系统驱动）。
+///
+/// ## 示例：进度接收端打印日志
+///
+/// ```no_run
+/// use tracing::info;
+///
+/// # async fn demo() -> anyhow::Result<()> {
+/// let (tx, mut rx) = tokio::sync::mpsc::channel::<f64>(64);
+/// tokio::spawn(async move {
+///     while let Some(p) = rx.recv().await {
+///         info!(progress = p, "scene build progress");
+///     }
+/// });
+///
+/// let _bindings = jge_core::scene! {
+///     progress tx;
+///     node "root" {
+///         node "a" { }
+///         node "b" { }
+///     }
+/// }
+/// .await?;
+/// # Ok(())
+/// # }
+/// ```
 ///
 /// # 示例
 ///

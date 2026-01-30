@@ -181,6 +181,45 @@ cargo run
 > - `as ident` 绑定是“先收集并填充”的，因此你可以在任意位置引用同一个 `scene!` 块里导出的实体名（包括前向引用）。
 > - 节点树的 `attach` 会在宏的最后阶段集中完成：在 `with(...) { ... }` 等初始化块内，`Node::parent/children` 关系尚未建立。
 
+### （可选）构造进度上报：`progress tx;`
+
+当场景比较大时，你可能希望在构造期间汇报进度（例如加载关卡、生成复杂几何、批量注册组件）。
+`scene!` 支持在最外层可选地声明：
+
+```rust
+progress tx;
+```
+
+其中 `tx` 是一个 `tokio::sync::mpsc::Sender<f64>` 变量。宏会在构造流程推进时发送进度值：
+
+- 范围：`0.0` 到 `1.0`
+- 语义：单调不减，最后会尽力发送 `1.0`
+- 可靠性：发送是 best-effort（接收端关闭时会被忽略，不会导致构造失败）
+
+示例：接收端打印日志
+
+```rust
+use tracing::info;
+
+let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel::<f64>(64);
+tokio::spawn(async move {
+    while let Some(p) = progress_rx.recv().await {
+        info!(progress = p, "scene build progress");
+    }
+});
+
+let _bindings = scene! {
+    progress progress_tx;
+    node "root" {
+        node "a" { }
+        node "b" { }
+    }
+}
+.await?;
+```
+
+> 说明：进度的“步数划分”是宏的内部实现细节（创建/初始化/挂载等步骤），不要依赖具体发送次数；只建议用来做 UI/日志展示。
+
 ## 4.（可选）把场景 DSL 放到 `.jgs` 文件
 
 你也可以把 DSL 写到文件里，然后用 `scene!("...")` 加载：

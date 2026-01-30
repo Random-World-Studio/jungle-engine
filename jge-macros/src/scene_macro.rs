@@ -32,8 +32,30 @@ mod scene_dsl {
     syn::custom_keyword!(node);
     syn::custom_keyword!(with);
     syn::custom_keyword!(resource);
+    syn::custom_keyword!(progress);
+
+    #[derive(Clone)]
+    struct ProgressCtx {
+        tx: Ident,
+        step: Ident,
+        total: Ident,
+    }
+
+    fn progress_tick(ctx: &ProgressCtx, span: proc_macro2::Span) -> proc_macro2::TokenStream {
+        let tx = &ctx.tx;
+        let step = &ctx.step;
+        let total = &ctx.total;
+        quote_spanned! {span=>
+            #step += 1;
+            if let Some(__tx) = &#tx {
+                let __p = (#step as f64) / (#total as f64);
+                let _ = __tx.send(__p).await;
+            }
+        }
+    }
 
     pub struct SceneInput {
+        pub progress_tx: Option<Ident>,
         pub root: NodeDecl,
     }
 
@@ -42,11 +64,22 @@ mod scene_dsl {
             if input.is_empty() {
                 return Err(input.error("scene! 需要且仅需要一个根 node {...}"));
             }
+
+            // 可选：顶层进度汇报 `progress tx;`
+            let progress_tx = if input.peek(progress) {
+                let _: progress = input.parse()?;
+                let tx: Ident = input.parse()?;
+                input.parse::<Token![;]>()?;
+                Some(tx)
+            } else {
+                None
+            };
+
             let root: NodeDecl = input.parse()?;
             if !input.is_empty() {
-                return Err(input.error("scene! 顶层只允许一个根 node"));
+                return Err(input.error("scene! 顶层只允许：可选的 `progress tx;` + 一个根 node"));
             }
-            Ok(Self { root })
+            Ok(Self { progress_tx, root })
         }
     }
 
@@ -359,6 +392,21 @@ mod scene_dsl {
         let entity_ty = quote!(#core_crate::game::entity::Entity);
         let node_ty = quote!(#core_crate::game::component::node::Node);
 
+        let node_count = count_nodes(&scene.root);
+        let edge_count = count_edges(&scene.root);
+        let init_count = count_init_steps(&scene.root);
+        let progress_total_steps = node_count + edge_count + init_count;
+
+        let progress_tx_ident = format_ident!("__jge_scene_progress_tx");
+        let progress_step_ident = format_ident!("__jge_scene_progress_step");
+        let progress_total_ident = format_ident!("__jge_scene_progress_total");
+
+        let progress_ctx = scene.progress_tx.as_ref().map(|_| ProgressCtx {
+            tx: progress_tx_ident.clone(),
+            step: progress_step_ident.clone(),
+            total: progress_total_ident.clone(),
+        });
+
         let mut create_stmts: Vec<proc_macro2::TokenStream> = Vec::new();
         let mut init_stmts: Vec<proc_macro2::TokenStream> = Vec::new();
         let mut binds: Vec<Ident> = Vec::new();
@@ -376,6 +424,7 @@ mod scene_dsl {
             &core_crate,
             &entity_ty,
             &node_ty,
+            progress_ctx.as_ref(),
         )?;
 
         // 预声明 `as ident` 绑定，允许后续初始化阶段（with/组件配置等）跨节点前向引用。
@@ -417,10 +466,28 @@ mod scene_dsl {
 
         let bindings_ctor_fields = unique_binds.iter().map(|b| quote!(#b: #b));
 
+        let progress_prelude = if let Some(tx_ident) = &scene.progress_tx {
+            quote! {
+                let _: ::tokio::sync::mpsc::Sender<f64> = #tx_ident.clone();
+                let #progress_total_ident: usize = #progress_total_steps;
+                let mut #progress_step_ident: usize = 0;
+                let #progress_tx_ident: ::core::option::Option<::tokio::sync::mpsc::Sender<f64>> =
+                    ::core::option::Option::Some(#tx_ident.clone());
+
+                if let ::core::option::Option::Some(__tx) = &#progress_tx_ident {
+                    let _ = __tx.send(0.0).await;
+                }
+            }
+        } else {
+            quote! {}
+        };
+
         Ok(quote! {
             async move {
                 use ::anyhow::Context as _;
                 #bindings_struct
+
+                #progress_prelude
 
                 #(#bind_decls)*
                 #(#create_stmts)*
@@ -433,6 +500,48 @@ mod scene_dsl {
                 })
             }
         })
+    }
+
+    fn count_nodes(node: &NodeDecl) -> usize {
+        1 + node
+            .items
+            .iter()
+            .map(|item| match item {
+                NodeItem::Child(child) => count_nodes(child),
+                _ => 0,
+            })
+            .sum::<usize>()
+    }
+
+    fn count_edges(node: &NodeDecl) -> usize {
+        let direct_children = node
+            .items
+            .iter()
+            .filter(|item| matches!(item, NodeItem::Child(_)))
+            .count();
+        direct_children
+            + node
+                .items
+                .iter()
+                .map(|item| match item {
+                    NodeItem::Child(child) => count_edges(child),
+                    _ => 0,
+                })
+                .sum::<usize>()
+    }
+
+    fn count_init_steps(node: &NodeDecl) -> usize {
+        let mut count = 0;
+        if node.name.is_some() {
+            count += 1;
+        }
+        for item in &node.items {
+            match item {
+                NodeItem::Child(child) => count += count_init_steps(child),
+                NodeItem::With(_) | NodeItem::Component(_) | NodeItem::Logic(_) => count += 1,
+            }
+        }
+        count
     }
 
     fn collect_binds(node: &NodeDecl, out: &mut Vec<Ident>) {
@@ -456,6 +565,7 @@ mod scene_dsl {
         core_crate: &proc_macro2::TokenStream,
         entity_ty: &proc_macro2::TokenStream,
         node_ty: &proc_macro2::TokenStream,
+        progress: Option<&ProgressCtx>,
     ) -> syn::Result<proc_macro2::TokenStream> {
         let span = node.span;
         let create_stmt = if let Some(id_expr) = &node.id {
@@ -478,8 +588,14 @@ mod scene_dsl {
             });
         }
 
+        // 进度：每创建一个实体算一步。
+        if let Some(ctx) = progress {
+            create_stmts.push(progress_tick(ctx, span));
+        }
+
         // 初始化阶段：设置节点名称（若用户提供 name，则覆盖默认名）
         if let Some(name_expr) = &node.name {
+            let tick = progress.map(|ctx| progress_tick(ctx, span));
             init_stmts.push(quote_spanned! {span=>
                 {
                     let mut __node = #out_var
@@ -488,6 +604,7 @@ mod scene_dsl {
                     __node
                         .set_name(#name_expr)
                         .with_context(|| "scene!: 设置 Node 名称失败")?;
+                    #tick
                 }
             });
         }
@@ -511,6 +628,7 @@ mod scene_dsl {
                         core_crate,
                         entity_ty,
                         node_ty,
+                        progress,
                     )?;
                     child_vars_in_order.push((child_var, child.span));
                     child_attach_tokens.push(attach_subtree);
@@ -518,6 +636,7 @@ mod scene_dsl {
                 NodeItem::With(with_item) => {
                     let with_span = with_item.span;
                     let block = &with_item.block;
+                    let tick = progress.map(|ctx| progress_tick(ctx, with_span));
                     let binding_stmts = with_item.bindings.iter().map(|b| {
                         let name = &b.name;
                         let ty = &b.ty;
@@ -547,6 +666,7 @@ mod scene_dsl {
                             let _ = e;
                             #(#binding_stmts)*
                             (|| -> ::anyhow::Result<()> #block)()?;
+                            #tick
                         }
                     });
                 }
@@ -587,6 +707,7 @@ mod scene_dsl {
                         let comp_tmp = format_ident!("__jge_scene_comp{}", *counter);
                         let apply_fn = format_ident!("__jge_scene_apply_cfg{}", *counter);
                         if wants_mut_ref {
+                            let tick = progress.map(|ctx| progress_tick(ctx, comp_span));
                             init_stmts.push(quote_spanned! {comp_span=>
                                 {
                                     #(#resources)*
@@ -601,9 +722,11 @@ mod scene_dsl {
                                     let _ = #out_var
                                         .register_component(#comp_tmp)
                                         .with_context(|| format!("scene!: 注册组件失败：{}", stringify!(#comp_expr)))?;
+                                    #tick
                                 }
                             });
                         } else {
+                            let tick = progress.map(|ctx| progress_tick(ctx, comp_span));
                             init_stmts.push(quote_spanned! {comp_span=>
                                 {
                                     #(#resources)*
@@ -618,15 +741,18 @@ mod scene_dsl {
                                     let _ = #out_var
                                         .register_component(#comp_tmp)
                                         .with_context(|| format!("scene!: 注册组件失败：{}", stringify!(#comp_expr)))?;
+                                    #tick
                                 }
                             });
                         }
                     } else {
+                        let tick = progress.map(|ctx| progress_tick(ctx, comp_span));
                         init_stmts.push(quote_spanned! {comp_span=>
                             {
                                 let _ = #out_var
                                     .register_component(#comp_expr)
                                     .with_context(|| format!("scene!: 注册组件失败：{}", stringify!(#comp_expr)))?;
+                                #tick
                             }
                         });
                     }
@@ -634,6 +760,7 @@ mod scene_dsl {
                 NodeItem::Logic(logic_item) => {
                     let logic_span = logic_item.span;
                     let logic_expr = &logic_item.expr;
+                    let tick = progress.map(|ctx| progress_tick(ctx, logic_span));
                     init_stmts.push(quote_spanned! {logic_span=>
                         {
                             let __set_logic_future = {
@@ -643,6 +770,7 @@ mod scene_dsl {
                                 __node.set_logic(#logic_expr)
                             };
                             __set_logic_future.await;
+                            #tick
                         }
                     });
                 }
@@ -653,6 +781,7 @@ mod scene_dsl {
         // 这里按“父 -> 直接子 -> 子树”的顺序 attach，确保树在 attach 完成后稳定可遍历。
         let direct_attach = child_vars_in_order.iter().map(|(child_var, child_span)| {
             let child_span = *child_span;
+            let tick = progress.map(|ctx| progress_tick(ctx, child_span));
             quote_spanned! {child_span=>
                 {
                     let __attach_future = {
@@ -664,6 +793,7 @@ mod scene_dsl {
                     __attach_future
                         .await
                         .with_context(|| "scene!: 挂载子节点失败")?;
+                    #tick
                 }
             }
         });
