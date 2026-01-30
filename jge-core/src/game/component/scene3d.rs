@@ -777,25 +777,34 @@ mod tests {
     use crate::game::entity::Entity;
     use lodtree::{coords::OctVec, traits::LodVec};
 
-    fn detach_node(entity: Entity) {
-        if let Some(mut node) = entity.get_component_mut::<Node>() {
-            let _ = node.detach();
+    async fn detach_node(entity: Entity) {
+        if entity.get_component::<Node>().is_some() {
+            let detach_future = {
+                let mut node = entity
+                    .get_component_mut::<Node>()
+                    .expect("node component disappeared");
+                node.detach()
+            };
+            let _ = detach_future.await;
         }
     }
 
-    fn attach_node(entity: Entity, parent: Entity, message: &str) {
-        let mut parent_node = parent
-            .get_component_mut::<Node>()
-            .expect("父实体应持有 Node 组件");
-        parent_node.attach(entity).expect(message);
+    async fn attach_node(entity: Entity, parent: Entity, message: &str) {
+        let attach_future = {
+            let mut parent_node = parent
+                .get_component_mut::<Node>()
+                .expect("父实体应持有 Node 组件");
+            parent_node.attach(entity)
+        };
+        attach_future.await.expect(message);
     }
 
-    fn prepare_scene_entity(entity: &Entity, name: &str) {
+    async fn prepare_scene_entity(entity: &Entity, name: &str) {
         let _ = entity.unregister_component::<Scene3D>();
         let _ = entity.unregister_component::<Layer>();
         let _ = entity.unregister_component::<Renderable>();
         let _ = entity.unregister_component::<Transform>();
-        detach_node(*entity);
+        detach_node(*entity).await;
         let _ = entity.unregister_component::<Node>();
 
         let _ = entity
@@ -812,17 +821,17 @@ mod tests {
             .expect("应能插入 Layer");
     }
 
-    fn prepare_child(entity: &Entity, name: &str, parent: Entity) {
-        prepare_scene_entity(entity, name);
+    async fn prepare_child(entity: &Entity, name: &str, parent: Entity) {
+        prepare_scene_entity(entity, name).await;
         let _ = entity.unregister_component::<Layer>();
-        attach_node(*entity, parent, "应能挂载到父节点");
+        attach_node(*entity, parent, "应能挂载到父节点").await;
     }
 
-    fn prepare_camera_entity(entity: &Entity, name: &str) {
+    async fn prepare_camera_entity(entity: &Entity, name: &str) {
         let _ = entity.unregister_component::<Camera>();
         let _ = entity.unregister_component::<Transform>();
         let _ = entity.unregister_component::<Renderable>();
-        detach_node(*entity);
+        detach_node(*entity).await;
         let _ = entity.unregister_component::<Node>();
 
         let _ = entity
@@ -836,14 +845,14 @@ mod tests {
             .expect("应能插入 Transform");
     }
 
-    #[test]
-    fn scene3d_requires_layer_dependency() {
+    #[tokio::test]
+    async fn scene3d_requires_layer_dependency() {
         let entity = Entity::new().expect("应能创建实体");
         let _ = entity.unregister_component::<Scene3D>();
         let _ = entity.unregister_component::<Layer>();
         let _ = entity.unregister_component::<Renderable>();
         let _ = entity.unregister_component::<Transform>();
-        detach_node(entity);
+        detach_node(entity).await;
         let _ = entity.unregister_component::<Node>();
 
         let inserted = entity
@@ -889,14 +898,14 @@ mod tests {
         let _ = entity.unregister_component::<Layer>();
         let _ = entity.unregister_component::<Renderable>();
         let _ = entity.unregister_component::<Transform>();
-        detach_node(entity);
+        detach_node(entity).await;
         let _ = entity.unregister_component::<Node>();
     }
 
-    #[test]
-    fn scene3d_view_property_constraints() {
+    #[tokio::test]
+    async fn scene3d_view_property_constraints() {
         let entity = Entity::new().expect("应能创建实体");
-        prepare_scene_entity(&entity, "scene3d_props");
+        prepare_scene_entity(&entity, "scene3d_props").await;
         entity
             .register_component(Scene3D::new())
             .expect("应能插入 Scene3D");
@@ -920,14 +929,14 @@ mod tests {
         let _ = entity.unregister_component::<Layer>();
         let _ = entity.unregister_component::<Renderable>();
         let _ = entity.unregister_component::<Transform>();
-        detach_node(entity);
+        detach_node(entity).await;
         let _ = entity.unregister_component::<Node>();
     }
 
-    #[test]
-    fn scene3d_vertical_fov_depends_on_aspect() {
+    #[tokio::test]
+    async fn scene3d_vertical_fov_depends_on_aspect() {
         let entity = Entity::new().expect("应能创建实体");
-        prepare_scene_entity(&entity, "scene3d_fov");
+        prepare_scene_entity(&entity, "scene3d_fov").await;
         entity
             .register_component(Scene3D::new())
             .expect("应能插入 Scene3D");
@@ -950,20 +959,20 @@ mod tests {
         let _ = entity.unregister_component::<Layer>();
         let _ = entity.unregister_component::<Renderable>();
         let _ = entity.unregister_component::<Transform>();
-        detach_node(entity);
+        detach_node(entity).await;
         let _ = entity.unregister_component::<Node>();
     }
 
-    #[test]
-    fn scene3d_visible_renderables_culls_geometry() {
+    #[tokio::test]
+    async fn scene3d_visible_renderables_culls_geometry() {
         let scene = Entity::new().expect("应能创建实体");
-        prepare_scene_entity(&scene, "scene3d_cull_root");
+        prepare_scene_entity(&scene, "scene3d_cull_root").await;
         scene
             .register_component(Scene3D::new())
             .expect("应能插入 Scene3D");
 
         let inside = Entity::new().expect("应能创建实体");
-        prepare_child(&inside, "inside", scene);
+        prepare_child(&inside, "inside", scene).await;
         inside
             .register_component(Shape::from_triangles(vec![[
                 // Camera 默认朝向为 -Z，因此 z<0 在视野前方。
@@ -974,7 +983,7 @@ mod tests {
             .expect("应能插入 Shape");
 
         let outside = Entity::new().expect("应能创建实体");
-        prepare_child(&outside, "outside", scene);
+        prepare_child(&outside, "outside", scene).await;
         outside
             .register_component(Shape::from_triangles(vec![[
                 // z>0 在相机后方，应被剔除。
@@ -1005,7 +1014,7 @@ mod tests {
         drop(scene_component);
 
         let camera = Entity::new().expect("应能创建实体");
-        prepare_scene_entity(&camera, "camera_node");
+        prepare_scene_entity(&camera, "camera_node").await;
         camera
             .register_component(Camera::new())
             .expect("应能插入 Camera");
@@ -1025,7 +1034,7 @@ mod tests {
         let _ = camera.unregister_component::<Layer>();
         let _ = camera.unregister_component::<Renderable>();
         let _ = camera.unregister_component::<Transform>();
-        detach_node(camera);
+        detach_node(camera).await;
         let _ = camera.unregister_component::<Node>();
 
         let _ = inside.unregister_component::<Shape>();
@@ -1033,7 +1042,7 @@ mod tests {
         let _ = inside.unregister_component::<Layer>();
         let _ = inside.unregister_component::<Renderable>();
         let _ = inside.unregister_component::<Transform>();
-        detach_node(inside);
+        detach_node(inside).await;
         let _ = inside.unregister_component::<Node>();
 
         let _ = outside.unregister_component::<Shape>();
@@ -1041,21 +1050,21 @@ mod tests {
         let _ = outside.unregister_component::<Layer>();
         let _ = outside.unregister_component::<Renderable>();
         let _ = outside.unregister_component::<Transform>();
-        detach_node(outside);
+        detach_node(outside).await;
         let _ = outside.unregister_component::<Node>();
 
         let _ = scene.unregister_component::<Scene3D>();
         let _ = scene.unregister_component::<Layer>();
         let _ = scene.unregister_component::<Renderable>();
         let _ = scene.unregister_component::<Transform>();
-        detach_node(scene);
+        detach_node(scene).await;
         let _ = scene.unregister_component::<Node>();
     }
 
-    #[test]
-    fn scene3d_accesses_layer_spatial_index() {
+    #[tokio::test]
+    async fn scene3d_accesses_layer_spatial_index() {
         let entity = Entity::new().expect("应能创建实体");
-        prepare_scene_entity(&entity, "scene3d_spatial");
+        prepare_scene_entity(&entity, "scene3d_spatial").await;
         entity
             .register_component(Scene3D::new())
             .expect("依赖满足后应能插入 Scene3D");
@@ -1096,21 +1105,21 @@ mod tests {
         let _ = entity.unregister_component::<Layer>();
         let _ = entity.unregister_component::<Renderable>();
         let _ = entity.unregister_component::<Transform>();
-        detach_node(entity);
+        detach_node(entity).await;
         let _ = entity.unregister_component::<Node>();
     }
 
-    #[test]
-    fn scene3d_attaches_and_syncs_camera_transform() {
+    #[tokio::test]
+    async fn scene3d_attaches_and_syncs_camera_transform() {
         let scene = Entity::new().expect("应能创建实体");
-        prepare_scene_entity(&scene, "scene3d_attach_root");
+        prepare_scene_entity(&scene, "scene3d_attach_root").await;
         scene
             .register_component(Scene3D::new())
             .expect("应能插入 Scene3D");
 
         let camera = Entity::new().expect("应能创建实体");
-        prepare_camera_entity(&camera, "camera_attach");
-        attach_node(camera, scene, "应能将摄像机挂载到场景");
+        prepare_camera_entity(&camera, "camera_attach").await;
+        attach_node(camera, scene, "应能将摄像机挂载到场景").await;
         let _ = camera
             .register_component(Camera::new())
             .expect("应能插入 Camera");
@@ -1166,28 +1175,28 @@ mod tests {
         let _ = camera.unregister_component::<Camera>();
         let _ = camera.unregister_component::<Transform>();
         let _ = camera.unregister_component::<Renderable>();
-        detach_node(camera);
+        detach_node(camera).await;
         let _ = camera.unregister_component::<Node>();
 
         let _ = scene.unregister_component::<Scene3D>();
         let _ = scene.unregister_component::<Layer>();
         let _ = scene.unregister_component::<Renderable>();
         let _ = scene.unregister_component::<Transform>();
-        detach_node(scene);
+        detach_node(scene).await;
         let _ = scene.unregister_component::<Node>();
     }
 
-    #[test]
-    fn scene3d_detach_camera_clears_attachment() {
+    #[tokio::test]
+    async fn scene3d_detach_camera_clears_attachment() {
         let scene = Entity::new().expect("应能创建实体");
-        prepare_scene_entity(&scene, "scene3d_detach_root");
+        prepare_scene_entity(&scene, "scene3d_detach_root").await;
         scene
             .register_component(Scene3D::new())
             .expect("应能插入 Scene3D");
 
         let camera = Entity::new().expect("应能创建实体");
-        prepare_camera_entity(&camera, "camera_detach");
-        attach_node(camera, scene, "应能将摄像机挂载到场景");
+        prepare_camera_entity(&camera, "camera_detach").await;
+        attach_node(camera, scene, "应能将摄像机挂载到场景").await;
         let _ = camera
             .register_component(Camera::new())
             .expect("应能插入 Camera");
@@ -1212,14 +1221,14 @@ mod tests {
         let _ = camera.unregister_component::<Camera>();
         let _ = camera.unregister_component::<Transform>();
         let _ = camera.unregister_component::<Renderable>();
-        detach_node(camera);
+        detach_node(camera).await;
         let _ = camera.unregister_component::<Node>();
 
         let _ = scene.unregister_component::<Scene3D>();
         let _ = scene.unregister_component::<Layer>();
         let _ = scene.unregister_component::<Renderable>();
         let _ = scene.unregister_component::<Transform>();
-        detach_node(scene);
+        detach_node(scene).await;
         let _ = scene.unregister_component::<Node>();
     }
 }

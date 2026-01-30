@@ -20,6 +20,8 @@
 //! };
 //!
 //! # fn main() -> anyhow::Result<()> {
+//! # let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+//! # rt.block_on(async move {
 //! // 创建一个 Layer 根实体
 //! let root = Entity::new()?;
 //! root.register_component(Layer::new())?;
@@ -31,8 +33,13 @@
 //! // child.register_component(Shape::from_triangles(...))?;
 //!
 //! // 维护节点关系
-//! root.get_component_mut::<Node>().unwrap().attach(child)?;
+//! let attach_future = {
+//!     let mut root_node = root.get_component_mut::<Node>().unwrap();
+//!     root_node.attach(child)
+//! };
+//! attach_future.await?;
 //! Ok(())
+//! # })
 //! # }
 //! ```
 
@@ -819,38 +826,47 @@ mod tests {
     use lodtree::{coords::OctVec, traits::LodVec};
     use nalgebra::Vector2;
 
-    fn detach_node(entity: Entity) {
-        if let Some(mut node) = entity.get_component_mut::<Node>() {
-            let _ = node.detach();
+    async fn detach_node(entity: Entity) {
+        if entity.get_component::<Node>().is_some() {
+            let detach_future = {
+                let mut node = entity
+                    .get_component_mut::<Node>()
+                    .expect("node component disappeared");
+                node.detach()
+            };
+            let _ = detach_future.await;
         }
     }
 
-    fn attach_node(entity: Entity, parent: Entity, message: &str) {
-        let mut parent_node = parent
-            .get_component_mut::<Node>()
-            .expect("父实体应持有 Node 组件");
-        parent_node.attach(entity).expect(message);
+    async fn attach_node(entity: Entity, parent: Entity, message: &str) {
+        let attach_future = {
+            let mut parent_node = parent
+                .get_component_mut::<Node>()
+                .expect("父实体应持有 Node 组件");
+            parent_node.attach(entity)
+        };
+        attach_future.await.expect(message);
     }
 
-    fn prepare_node(entity: &Entity, name: &str) {
+    async fn prepare_node(entity: &Entity, name: &str) {
         let _ = entity.unregister_component::<Layer>();
         let _ = entity.unregister_component::<Renderable>();
-        detach_node(*entity);
+        detach_node(*entity).await;
         let _ = entity.unregister_component::<Node>();
         let _ = entity
             .register_component(Node::new(name).expect("应能创建节点"))
             .expect("应能注册 Node");
     }
 
-    fn cleanup(entity: &Entity) {
+    async fn cleanup(entity: &Entity) {
         let _ = entity.unregister_component::<Layer>();
         let _ = entity.unregister_component::<Renderable>();
-        detach_node(*entity);
+        detach_node(*entity).await;
         let _ = entity.unregister_component::<Node>();
     }
 
-    #[test]
-    fn layer_requires_renderable_dependency() {
+    #[tokio::test]
+    async fn layer_requires_renderable_dependency() {
         let entity = Entity::new().expect("应能创建实体");
         let inserted = entity
             .register_component(Layer::new())
@@ -871,7 +887,7 @@ mod tests {
             .expect("重复插入应返回旧的 Layer");
         assert!(previous_auto.is_some());
 
-        prepare_node(&entity, "layer_root");
+        prepare_node(&entity, "layer_root").await;
         let _ = entity
             .register_component(Renderable::new())
             .expect("应能插入 Renderable");
@@ -881,28 +897,28 @@ mod tests {
             .expect("满足依赖后应能插入 Layer");
         assert!(reinserted.is_none());
 
-        cleanup(&entity);
+        cleanup(&entity).await;
     }
 
-    #[test]
-    fn renderable_entities_skip_nested_layers() {
+    #[tokio::test]
+    async fn renderable_entities_skip_nested_layers() {
         let root = Entity::new().expect("应能创建 root 实体");
         let child_a = Entity::new().expect("应能创建 child_a 实体");
         let child_b = Entity::new().expect("应能创建 child_b 实体");
         let nested_root = Entity::new().expect("应能创建 nested_root 实体");
         let nested_child = Entity::new().expect("应能创建 nested_child 实体");
 
-        prepare_node(&root, "root");
-        prepare_node(&child_a, "child_a");
-        prepare_node(&child_b, "child_b");
-        prepare_node(&nested_root, "nested_root");
-        prepare_node(&nested_child, "nested_child");
+        prepare_node(&root, "root").await;
+        prepare_node(&child_a, "child_a").await;
+        prepare_node(&child_b, "child_b").await;
+        prepare_node(&nested_root, "nested_root").await;
+        prepare_node(&nested_child, "nested_child").await;
 
         // 构建节点树
-        attach_node(child_a, root, "应能挂载 child_a");
-        attach_node(child_b, root, "应能挂载 child_b");
-        attach_node(nested_root, child_b, "应能挂载 nested_root");
-        attach_node(nested_child, nested_root, "应能挂载 nested_child");
+        attach_node(child_a, root, "应能挂载 child_a").await;
+        attach_node(child_b, root, "应能挂载 child_b").await;
+        attach_node(nested_root, child_b, "应能挂载 nested_root").await;
+        attach_node(nested_child, nested_root, "应能挂载 nested_child").await;
 
         // 注册可渲染组件
         let _ = root
@@ -938,28 +954,28 @@ mod tests {
         assert!(nested_renderables.is_empty());
 
         // 清理（按照叶 -> 根顺序）
-        cleanup(&nested_child);
-        cleanup(&nested_root);
-        cleanup(&child_b);
-        cleanup(&child_a);
-        cleanup(&root);
+        cleanup(&nested_child).await;
+        cleanup(&nested_root).await;
+        cleanup(&child_b).await;
+        cleanup(&child_a).await;
+        cleanup(&root).await;
     }
 
-    #[test]
-    fn point_light_entities_skip_nested_layers() {
+    #[tokio::test]
+    async fn point_light_entities_skip_nested_layers() {
         let root = Entity::new().expect("应能创建 root 实体");
         let nested_root = Entity::new().expect("应能创建 nested_root 实体");
         let light_a = Entity::new().expect("应能创建 light_a 实体");
         let light_b = Entity::new().expect("应能创建 light_b 实体");
 
-        prepare_node(&root, "root");
-        prepare_node(&nested_root, "nested_root");
-        prepare_node(&light_a, "light_a");
-        prepare_node(&light_b, "light_b");
+        prepare_node(&root, "root").await;
+        prepare_node(&nested_root, "nested_root").await;
+        prepare_node(&light_a, "light_a").await;
+        prepare_node(&light_b, "light_b").await;
 
-        attach_node(light_a, root, "应能挂载光源 A 到根");
-        attach_node(nested_root, root, "应能挂载 nested_root");
-        attach_node(light_b, nested_root, "应能挂载光源 B 到嵌套 Layer");
+        attach_node(light_a, root, "应能挂载光源 A 到根").await;
+        attach_node(nested_root, root, "应能挂载 nested_root").await;
+        attach_node(light_b, nested_root, "应能挂载光源 B 到嵌套 Layer").await;
 
         let _ = root
             .register_component(Renderable::new())
@@ -1032,27 +1048,27 @@ mod tests {
             "嵌套 Layer 的光源应由自身渲染时处理"
         );
 
-        cleanup(&light_b);
-        cleanup(&nested_root);
-        cleanup(&light_a);
-        cleanup(&root);
+        cleanup(&light_b).await;
+        cleanup(&nested_root).await;
+        cleanup(&light_a).await;
+        cleanup(&root).await;
     }
 
-    #[test]
-    fn parallel_light_entities_skip_nested_layers() {
+    #[tokio::test]
+    async fn parallel_light_entities_skip_nested_layers() {
         let root = Entity::new().expect("应能创建 root 实体");
         let nested_root = Entity::new().expect("应能创建 nested_root 实体");
         let light_a = Entity::new().expect("应能创建平行光实体 A");
         let light_b = Entity::new().expect("应能创建平行光实体 B");
 
-        prepare_node(&root, "root_parallel");
-        prepare_node(&nested_root, "nested_parallel");
-        prepare_node(&light_a, "parallel_a");
-        prepare_node(&light_b, "parallel_b");
+        prepare_node(&root, "root_parallel").await;
+        prepare_node(&nested_root, "nested_parallel").await;
+        prepare_node(&light_a, "parallel_a").await;
+        prepare_node(&light_b, "parallel_b").await;
 
-        attach_node(light_a, root, "应能挂载平行光 A");
-        attach_node(nested_root, root, "应能挂载 nested_root");
-        attach_node(light_b, nested_root, "应能挂载平行光 B 到嵌套 Layer");
+        attach_node(light_a, root, "应能挂载平行光 A").await;
+        attach_node(nested_root, root, "应能挂载 nested_root").await;
+        attach_node(light_b, nested_root, "应能挂载平行光 B 到嵌套 Layer").await;
 
         let _ = root
             .register_component(Renderable::new())
@@ -1110,14 +1126,14 @@ mod tests {
             "嵌套 Layer 的平行光应由其自身处理"
         );
 
-        cleanup(&light_b);
-        cleanup(&nested_root);
-        cleanup(&light_a);
-        cleanup(&root);
+        cleanup(&light_b).await;
+        cleanup(&nested_root).await;
+        cleanup(&light_a).await;
+        cleanup(&root).await;
     }
 
-    #[test]
-    fn layer_shader_attachment_cycle() {
+    #[tokio::test]
+    async fn layer_shader_attachment_cycle() {
         let mut layer = Layer::new();
 
         let glsl_resource: ResourceHandle = Resource::from_memory(b"glsl".to_vec());
@@ -1159,10 +1175,10 @@ mod tests {
         assert!(layer.shader(RenderPipelineStage::Vertex).is_none());
     }
 
-    #[test]
-    fn layer_spatial_index_supports_octree_updates() {
+    #[tokio::test]
+    async fn layer_spatial_index_supports_octree_updates() {
         let entity = Entity::new().expect("应能创建实体");
-        prepare_node(&entity, "layer_spatial_root");
+        prepare_node(&entity, "layer_spatial_root").await;
         let _ = entity
             .register_component(Renderable::new())
             .expect("应能插入 Renderable");
@@ -1203,17 +1219,17 @@ mod tests {
         assert!(neighbors.contains(&center), "邻居结果应包含自身");
 
         drop(layer);
-        cleanup(&entity);
+        cleanup(&entity).await;
     }
 
-    #[test]
-    fn world_renderables_collects_triangles_and_materials() {
+    #[tokio::test]
+    async fn world_renderables_collects_triangles_and_materials() {
         let root = Entity::new().expect("应能创建渲染根实体");
         let child = Entity::new().expect("应能创建渲染子实体");
 
-        prepare_node(&root, "renderables_root");
-        prepare_node(&child, "renderables_child");
-        attach_node(child, root, "应能挂载子实体到根");
+        prepare_node(&root, "renderables_root").await;
+        prepare_node(&child, "renderables_child").await;
+        attach_node(child, root, "应能挂载子实体到根").await;
 
         let _ = root
             .register_component(Renderable::new())
@@ -1286,7 +1302,7 @@ mod tests {
         let _ = child.unregister_component::<Shape>();
         let _ = child.unregister_component::<Transform>();
         let _ = child.unregister_component::<Renderable>();
-        cleanup(&child);
-        cleanup(&root);
+        cleanup(&child).await;
+        cleanup(&root).await;
     }
 }

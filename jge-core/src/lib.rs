@@ -48,7 +48,7 @@ pub use game::Game;
 ///   - `+ CompExpr => |e, mut c| { ... };`：注册前配置组件（`c` 为 `&mut T`）
 ///   - `resource(name = path, ...) |e, c| { ... }`：在配置闭包前注入资源句柄
 ///   - `with(...) { ... }`：在块内自动执行 `get_component/get_component_mut` 并提供引用
-///   - `* LogicExpr;`：为当前节点挂载 `GameLogic`（等价于 `with(mut node: Node) { node.set_logic(LogicExpr); Ok(()) }`）
+///   - `* LogicExpr;`：为当前节点挂载 `GameLogic`（宏会在内部把逻辑设置与 `attach` 阶段的生命周期回调衔接起来）
 ///
 /// `scene!` 会展开成一段普通 Rust 语句块，但为了支持 `as ident` 的前向引用，展开是“分阶段”的：
 /// - 先创建所有节点实体并填充 `as ident` 绑定；
@@ -62,23 +62,27 @@ pub use game::Game;
 ///
 /// ```no_run
 /// fn build_root() -> ::anyhow::Result<::jge_core::game::entity::Entity> {
-///     let bindings = ::jge_core::scene! {
-///         node "root" as root {
-///             node "camera" as camera {
-///                 + ::jge_core::game::component::renderable::Renderable::new();
-///                 + ::jge_core::game::component::transform::Transform::new();
-///                 + ::jge_core::game::component::camera::Camera::new();
-///             }
+///     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+///     rt.block_on(async move {
+///         let bindings = ::jge_core::scene! {
+///             node "root" as root {
+///                 node "camera" as camera {
+///                     + ::jge_core::game::component::renderable::Renderable::new();
+///                     + ::jge_core::game::component::transform::Transform::new();
+///                     + ::jge_core::game::component::camera::Camera::new();
+///                 }
 ///
-///             // 写命令式逻辑时用 with() { ... }。
-///             with() {
-///                 let _ = (e, root, camera);
-///                 Ok(())
+///                 // 写命令式逻辑时用 with() { ... }。
+///                 with() {
+///                     let _ = (e, root, camera);
+///                     Ok(())
+///                 }
 ///             }
 ///         }
-///     }?;
+///         .await?;
 ///
-///     Ok(bindings.root)
+///         Ok(bindings.root)
+///     })
 /// }
 /// ```
 ///
@@ -88,7 +92,8 @@ pub use game::Game;
 /// use jge_core::scene;
 ///
 /// fn build() -> anyhow::Result<()> {
-///     let _bindings = scene!("assets/levels/intro.jgs")?;
+///     // scene! 现在返回 Future，因此需要在 async runtime 中 await
+///     // let _bindings = scene!("assets/levels/intro.jgs").await?;
 ///     Ok(())
 /// }
 /// ```

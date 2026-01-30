@@ -20,10 +20,10 @@ use jge_core::{
         component::{
             background::Background,
             camera::Camera,
-            layer::LayerShader,
-            layer::{Layer, LayerViewport, ShaderLanguage},
+            layer::{Layer, LayerShader, LayerViewport, ShaderLanguage},
             light::{Light, ParallelLight, PointLight},
             material::Material,
+            node::Node,
             renderable::Renderable,
             scene2d::Scene2D,
             scene3d::Scene3D,
@@ -36,7 +36,7 @@ use jge_core::{
     logger, scene,
     text::{Font, TextRenderOptions, TextShadow, render_text_to_material_texture},
 };
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 use winit::dpi::PhysicalPosition;
 use winit::event::MouseScrollDelta;
 use winit::window::CursorGrabMode;
@@ -59,7 +59,7 @@ fn main() -> anyhow::Result<()> {
 
     jge_core::resource!("resources.yaml")?;
 
-    let root = build_demo_scene().context("构建测试场景失败")?;
+    let root = Entity::new()?;
 
     let mouse_state = Arc::new(StdMutex::new(MouseState {
         window: None,
@@ -193,6 +193,24 @@ fn main() -> anyhow::Result<()> {
             },
         ));
 
+    game.spawn(async move {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let scene = build_demo_scene().await.context("构建测试场景失败")?;
+        if root.get_component::<Node>().is_some() {
+            let attach_future = {
+                let mut node = root
+                    .get_component_mut::<Node>()
+                    .expect("root missing Node component");
+                node.attach(scene)
+            };
+
+            if let Err(e) = attach_future.await {
+                error!(target: "jge-demo", error = %e, "附加场景失败");
+            }
+        }
+        anyhow::Result::<()>::Ok(())
+    });
+
     game.run()
 }
 
@@ -231,7 +249,7 @@ fn map_key_event_to_camera_action(event: &KeyEvent) -> Option<CameraAction> {
     }
 }
 
-fn build_demo_scene() -> anyhow::Result<Entity> {
+async fn build_demo_scene() -> anyhow::Result<Entity> {
     let text = render_text_to_material_texture(
         "Hello Jungle Engine\n你好， Jungle 引擎",
         &Font::System("Sarasa UI SC".to_string()),
@@ -414,9 +432,10 @@ fn build_demo_scene() -> anyhow::Result<Entity> {
                 }
             }
         }
-    };
+    }
+    .await?;
 
-    Ok(bindings?.root)
+    Ok(bindings.root)
 }
 
 fn quad_triangles(width: f32, height: f32, z: f32) -> Vec<[Vector3<f32>; 3]> {

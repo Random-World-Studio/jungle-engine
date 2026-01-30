@@ -602,26 +602,35 @@ mod tests {
     use lodtree::{coords::OctVec, traits::LodVec};
     use nalgebra::{Vector2, Vector3};
 
-    fn detach_node(entity: Entity) {
-        if let Some(mut node) = entity.get_component_mut::<Node>() {
-            let _ = node.detach();
+    async fn detach_node(entity: Entity) {
+        if entity.get_component::<Node>().is_some() {
+            let detach_future = {
+                let mut node = entity
+                    .get_component_mut::<Node>()
+                    .expect("node component disappeared");
+                node.detach()
+            };
+            let _ = detach_future.await;
         }
     }
 
-    fn attach_node(entity: Entity, parent: Entity, message: &str) {
-        let mut parent_node = parent
-            .get_component_mut::<Node>()
-            .expect("父实体应持有 Node 组件");
-        parent_node.attach(entity).expect(message);
+    async fn attach_node(entity: Entity, parent: Entity, message: &str) {
+        let attach_future = {
+            let mut parent_node = parent
+                .get_component_mut::<Node>()
+                .expect("父实体应持有 Node 组件");
+            parent_node.attach(entity)
+        };
+        attach_future.await.expect(message);
     }
 
-    #[test]
-    fn scene2d_requires_layer_dependency() {
+    #[tokio::test]
+    async fn scene2d_requires_layer_dependency() {
         let entity = Entity::new().expect("应能创建实体");
         let _ = entity.unregister_component::<Scene2D>();
         let _ = entity.unregister_component::<Layer>();
         let _ = entity.unregister_component::<Renderable>();
-        detach_node(entity);
+        detach_node(entity).await;
         let _ = entity.unregister_component::<Node>();
 
         let inserted = entity
@@ -666,12 +675,12 @@ mod tests {
         let _ = entity.unregister_component::<Scene2D>();
         let _ = entity.unregister_component::<Layer>();
         let _ = entity.unregister_component::<Renderable>();
-        detach_node(entity);
+        detach_node(entity).await;
         let _ = entity.unregister_component::<Node>();
     }
 
-    #[test]
-    fn scene2d_offset_and_scale_configuration() {
+    #[tokio::test]
+    async fn scene2d_offset_and_scale_configuration() {
         let mut scene = Scene2D::new();
         scene.set_offset(Vector2::new(3.0, -2.0));
         scene.set_pixels_per_unit(64.0);
@@ -684,8 +693,8 @@ mod tests {
         assert!((scene.pixels_per_unit() - 64.0).abs() < f32::EPSILON);
     }
 
-    #[test]
-    fn scene2d_visible_world_bounds_defaults_to_center_origin() {
+    #[tokio::test]
+    async fn scene2d_visible_world_bounds_defaults_to_center_origin() {
         let mut scene = Scene2D::new();
         scene.set_framebuffer_size((200, 100));
         let bounds = scene
@@ -700,8 +709,8 @@ mod tests {
         assert!((bounds.max.y - (0.5)).abs() < 1.0e-6);
     }
 
-    #[test]
-    fn scene2d_visible_world_bounds_uses_layer_viewport_when_attached() {
+    #[tokio::test]
+    async fn scene2d_visible_world_bounds_uses_layer_viewport_when_attached() {
         let entity = Entity::new().expect("应能创建实体");
 
         // Layer + Scene2D 需要 Renderable 依赖（Scene2D 依赖 Layer，Layer 依赖 Renderable）。
@@ -741,8 +750,8 @@ mod tests {
         assert!((bounds.max.y - 0.25).abs() < 1.0e-6);
     }
 
-    #[test]
-    fn scene2d_visible_world_bounds_respects_offset_and_pixels_per_unit_when_attached() {
+    #[tokio::test]
+    async fn scene2d_visible_world_bounds_respects_offset_and_pixels_per_unit_when_attached() {
         let entity = Entity::new().expect("应能创建实体");
         entity
             .register_component(Renderable::new())
@@ -776,8 +785,8 @@ mod tests {
         assert!((bounds.max.y - (-2.0)).abs() < 1.0e-6);
     }
 
-    #[test]
-    fn scene2d_pixel_to_world_respects_framebuffer_size_and_axis_directions() {
+    #[tokio::test]
+    async fn scene2d_pixel_to_world_respects_framebuffer_size_and_axis_directions() {
         let mut scene = Scene2D::new();
         scene.set_framebuffer_size((200, 100));
         scene.set_offset(Vector2::new(0.0, 0.0));
@@ -803,8 +812,8 @@ mod tests {
         assert!((br.y - (-0.5)).abs() < 1.0e-6);
     }
 
-    #[test]
-    fn scene2d_pixel_to_world_uses_layer_viewport_when_attached() {
+    #[tokio::test]
+    async fn scene2d_pixel_to_world_uses_layer_viewport_when_attached() {
         let entity = Entity::new().expect("应能创建实体");
         entity
             .register_component(Renderable::new())
@@ -844,11 +853,11 @@ mod tests {
         assert!(center.y.abs() < 1.0e-6);
     }
 
-    fn register_layer_scene(entity: Entity) {
+    async fn register_layer_scene(entity: Entity) {
         let _ = Scene2D::remove(entity);
         let _ = Layer::remove(entity);
         let _ = Renderable::remove(entity);
-        detach_node(entity);
+        detach_node(entity).await;
 
         let _ = entity
             .register_component(Renderable::new())
@@ -878,11 +887,15 @@ mod tests {
         drop(layer);
     }
 
-    fn register_shape(entity: Entity, triangles: &[[Vector3<f32>; 3]], translation: Vector3<f32>) {
+    async fn register_shape(
+        entity: Entity,
+        triangles: &[[Vector3<f32>; 3]],
+        translation: Vector3<f32>,
+    ) {
         let _ = Shape::remove(entity);
         let _ = Transform::remove(entity);
         let _ = Renderable::remove(entity);
-        detach_node(entity);
+        detach_node(entity).await;
 
         let _ = entity
             .register_component(Renderable::new())
@@ -897,10 +910,10 @@ mod tests {
         let _ = entity.register_component(shape).expect("应能插入 Shape");
     }
 
-    #[test]
-    fn visible_faces_excludes_fully_occluded_triangles() {
+    #[tokio::test]
+    async fn visible_faces_excludes_fully_occluded_triangles() {
         let root = Entity::new().expect("应能创建根实体");
-        register_layer_scene(root);
+        register_layer_scene(root).await;
         activate_root_chunk(root);
 
         let back = Entity::new().expect("应能创建后景实体");
@@ -917,11 +930,11 @@ mod tests {
             Vector3::new(0.0, 0.25, 0.5),
         ];
 
-        register_shape(back, &[far_triangle], Vector3::zeros());
-        register_shape(front, &[near_triangle], Vector3::zeros());
+        register_shape(back, &[far_triangle], Vector3::zeros()).await;
+        register_shape(front, &[near_triangle], Vector3::zeros()).await;
 
-        attach_node(back, root, "应能挂载后景");
-        attach_node(front, root, "应能挂载前景");
+        attach_node(back, root, "应能挂载后景").await;
+        attach_node(front, root, "应能挂载前景").await;
 
         let visible = {
             let scene = root
@@ -933,8 +946,8 @@ mod tests {
         assert_eq!(visible[0].faces().len(), 1, "仅有一个三角面应可见");
         assert_eq!(visible[0].faces()[0], near_triangle);
 
-        detach_node(front);
-        detach_node(back);
+        detach_node(front).await;
+        detach_node(back).await;
         let _ = Scene2D::remove(root);
         let _ = Layer::remove(root);
         let _ = Renderable::remove(root);
@@ -947,10 +960,10 @@ mod tests {
         let _ = Renderable::remove(back);
     }
 
-    #[test]
-    fn visible_faces_keep_partially_occluded_triangles() {
+    #[tokio::test]
+    async fn visible_faces_keep_partially_occluded_triangles() {
         let root = Entity::new().expect("应能创建根实体");
-        register_layer_scene(root);
+        register_layer_scene(root).await;
         activate_root_chunk(root);
 
         let partial = Entity::new().expect("应能创建部分遮挡实体");
@@ -967,11 +980,11 @@ mod tests {
             Vector3::new(0.0, 0.3, 0.0),
         ];
 
-        register_shape(partial, &[partial_triangle], Vector3::zeros());
-        register_shape(ground, &[ground_triangle], Vector3::zeros());
+        register_shape(partial, &[partial_triangle], Vector3::zeros()).await;
+        register_shape(ground, &[ground_triangle], Vector3::zeros()).await;
 
-        attach_node(partial, root, "应能挂载部分遮挡实体");
-        attach_node(ground, root, "应能挂载背景实体");
+        attach_node(partial, root, "应能挂载部分遮挡实体").await;
+        attach_node(ground, root, "应能挂载背景实体").await;
 
         let visible = {
             let scene = root
@@ -985,8 +998,8 @@ mod tests {
         assert_eq!(visible[1].faces().len(), 1);
         assert_eq!(visible[1].faces()[0], ground_triangle);
 
-        detach_node(ground);
-        detach_node(partial);
+        detach_node(ground).await;
+        detach_node(partial).await;
         let _ = Scene2D::remove(root);
         let _ = Layer::remove(root);
         let _ = Renderable::remove(root);
@@ -999,10 +1012,10 @@ mod tests {
         let _ = Renderable::remove(partial);
     }
 
-    #[test]
-    fn visible_faces_ignores_disabled_renderables() {
+    #[tokio::test]
+    async fn visible_faces_ignores_disabled_renderables() {
         let root = Entity::new().expect("应能创建根实体");
-        register_layer_scene(root);
+        register_layer_scene(root).await;
         activate_root_chunk(root);
 
         let visible_entity = Entity::new().expect("应能创建可见实体");
@@ -1019,11 +1032,11 @@ mod tests {
             Vector3::new(0.0, 0.2, 0.6),
         ];
 
-        register_shape(visible_entity, &[visible_triangle], Vector3::zeros());
-        register_shape(hidden_entity, &[hidden_triangle], Vector3::zeros());
+        register_shape(visible_entity, &[visible_triangle], Vector3::zeros()).await;
+        register_shape(hidden_entity, &[hidden_triangle], Vector3::zeros()).await;
 
-        attach_node(visible_entity, root, "应能挂载可见实体");
-        attach_node(hidden_entity, root, "应能挂载隐藏实体");
+        attach_node(visible_entity, root, "应能挂载可见实体").await;
+        attach_node(hidden_entity, root, "应能挂载隐藏实体").await;
 
         {
             let mut hidden_renderable = hidden_entity
@@ -1042,8 +1055,8 @@ mod tests {
         assert_eq!(visible[0].faces().len(), 1);
         assert_eq!(visible[0].faces()[0], visible_triangle);
 
-        detach_node(hidden_entity);
-        detach_node(visible_entity);
+        detach_node(hidden_entity).await;
+        detach_node(visible_entity).await;
         let _ = Scene2D::remove(root);
         let _ = Layer::remove(root);
         let _ = Renderable::remove(root);

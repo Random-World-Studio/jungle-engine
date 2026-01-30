@@ -417,20 +417,22 @@ mod scene_dsl {
 
         let bindings_ctor_fields = unique_binds.iter().map(|b| quote!(#b: #b));
 
-        Ok(quote! {{
-            use ::anyhow::Context as _;
-            #bindings_struct
+        Ok(quote! {
+            async move {
+                use ::anyhow::Context as _;
+                #bindings_struct
 
-            #(#bind_decls)*
-            #(#create_stmts)*
-            #(#init_stmts)*
-            #attach_stmts
+                #(#bind_decls)*
+                #(#create_stmts)*
+                #(#init_stmts)*
+                #attach_stmts
 
-            ::core::result::Result::<SceneBindings, ::anyhow::Error>::Ok(SceneBindings {
-                root: #root_var,
-                #(#bindings_ctor_fields,)*
-            })
-        }})
+                ::core::result::Result::<SceneBindings, ::anyhow::Error>::Ok(SceneBindings {
+                    root: #root_var,
+                    #(#bindings_ctor_fields,)*
+                })
+            }
+        })
     }
 
     fn collect_binds(node: &NodeDecl, out: &mut Vec<Ident>) {
@@ -634,10 +636,13 @@ mod scene_dsl {
                     let logic_expr = &logic_item.expr;
                     init_stmts.push(quote_spanned! {logic_span=>
                         {
-                            let mut __node = #out_var
-                                .get_component_mut::<#node_ty>()
-                                .with_context(|| "scene!: 实体缺少 Node 组件（无法挂载 GameLogic）")?;
-                            __node.set_logic(#logic_expr);
+                            let __set_logic_future = {
+                                let mut __node = #out_var
+                                    .get_component_mut::<#node_ty>()
+                                    .with_context(|| "scene!: 实体缺少 Node 组件（无法挂载 GameLogic）")?;
+                                __node.set_logic(#logic_expr)
+                            };
+                            __set_logic_future.await;
                         }
                     });
                 }
@@ -650,11 +655,14 @@ mod scene_dsl {
             let child_span = *child_span;
             quote_spanned! {child_span=>
                 {
-                    let mut __parent_node = #out_var
-                        .get_component_mut::<#node_ty>()
-                        .with_context(|| "scene!: 父节点缺少 Node 组件（无法挂载子节点）")?;
-                    __parent_node
-                        .attach(#child_var)
+                    let __attach_future = {
+                        let mut __parent_node = #out_var
+                            .get_component_mut::<#node_ty>()
+                            .with_context(|| "scene!: 父节点缺少 Node 组件（无法挂载子节点）")?;
+                        __parent_node.attach(#child_var)
+                    };
+                    __attach_future
+                        .await
                         .with_context(|| "scene!: 挂载子节点失败")?;
                 }
             }
@@ -671,9 +679,11 @@ pub fn expand_scene(input: TokenStream) -> TokenStream {
     // 支持空输入：scene!() / scene!{} / scene! —— 直接生成 Ok(())。
     // 目的：允许调用方统一在末尾写 `?`，并在“可选场景”情况下把该宏当作 no-op。
     if input.is_empty() {
-        return quote! {{
-            ::core::result::Result::<(), ::anyhow::Error>::Ok(())
-        }}
+        return quote! {
+            async move {
+                ::core::result::Result::<(), ::anyhow::Error>::Ok(())
+            }
+        }
         .into();
     }
 
@@ -686,16 +696,19 @@ pub fn expand_scene(input: TokenStream) -> TokenStream {
         if is_rust_analyzer_env() {
             // RA 环境下：不读取文件、不解析 DSL、不生成节点树，仅返回最小占位实现。
             // 这能让编辑器不再报“路径不存在”，但 bindings 字段信息不会反映真实 .jgs。
-            return quote!({
-                ::core::result::Result::<_, ::anyhow::Error>::Ok({
-                    struct __SceneBindings {
-                        pub root: ::jge_core::game::entity::Entity,
-                    }
-                    __SceneBindings {
-                        root: ::jge_core::game::entity::Entity::new(),
-                    }
-                })
-            })
+            return quote! {
+                async move {
+                    ::core::result::Result::<_, ::anyhow::Error>::Ok({
+                        struct __SceneBindings {
+                            pub root: ::jge_core::game::entity::Entity,
+                        }
+                        __SceneBindings {
+                            root: ::jge_core::game::entity::Entity::new()
+                                .expect("scene!: rust-analyzer placeholder should create entity"),
+                        }
+                    })
+                }
+            }
             .into();
         }
         return expand_scene_from_file(path_lit, callsite_file);

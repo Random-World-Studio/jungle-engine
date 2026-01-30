@@ -2,8 +2,8 @@ use anyhow::Context as _;
 
 use crate::game::component::node::Node;
 
-#[test]
-fn scene_macro_allows_forward_reference_to_as_binding_and_preserves_child_order()
+#[tokio::test]
+async fn scene_macro_allows_forward_reference_to_as_binding_and_preserves_child_order()
 -> anyhow::Result<()> {
     let bindings = crate::scene! {
         node "root" {
@@ -18,7 +18,8 @@ fn scene_macro_allows_forward_reference_to_as_binding_and_preserves_child_order(
             }
             node "b" as b { }
         }
-    }?;
+    }
+    .await?;
 
     let root_node = bindings
         .root

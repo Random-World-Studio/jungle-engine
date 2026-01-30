@@ -9,14 +9,10 @@ use tracing::warn;
 /// 节点组件：用于构建实体之间的树形层级（父子关系）并携带节点名称。
 ///
 /// 你可以把 `Node` 理解为“场景树”里的一个节点。
-/// 常见用途：
-/// - 把实体挂到某个 `Layer` 的子树下参与渲染；
-/// - 组织 UI/场景的层级关系；
-/// - 通过 [`path`](Self::path) 生成一个便于调试的层级路径字符串。
 ///
 /// 约定：
 /// - [`Entity::new`](crate::game::entity::Entity::new) 会自动注册一个默认 `Node`。
-/// - 维护父子关系使用 `Node::attach` / `Node::detach`（实际 API 在 `ComponentWrite<Node>` 上）。
+/// - 维护父子关系使用 `attach` / `detach`。
 ///
 /// 名称约束：
 /// - 不能为空字符串；
@@ -28,14 +24,18 @@ use tracing::warn;
 /// ```no_run
 /// use jge_core::game::{component::node::Node, entity::Entity};
 ///
-/// # fn main() -> anyhow::Result<()> {
+/// # async fn demo() -> anyhow::Result<()> {
 /// let parent = Entity::new()?;
 /// let child = Entity::new()?;
 ///
-/// // 把 child 挂到 parent 下
-/// parent.get_component_mut::<Node>().unwrap().attach(child)?;
+/// // 把 child 挂到 parent 下（注意：attach 返回 Future）
+/// let attach_future = {
+///     let mut parent_node = parent.get_component_mut::<Node>().unwrap();
+///     parent_node.attach(child)
+/// };
+/// attach_future.await?;
 ///
-/// // 也可以在 child 上获取当前 path（根到自身）
+/// // 获取当前 path（根到自身）
 /// let path = child.get_component::<Node>().unwrap().path()?;
 /// println!("{path}");
 /// Ok(())
@@ -163,76 +163,12 @@ impl Node {
         Ok(None)
     }
 
-    pub(crate) fn attach_internal(&mut self, child: Entity) -> Result<(), NodeHierarchyError> {
-        let parent_entity = self.entity();
-        if child == parent_entity {
-            return Err(NodeHierarchyError::SelfAttachment(child));
-        }
-
-        Self::ensure_exists(child)?;
-
-        if self.has_ancestor(child)? {
-            return Err(NodeHierarchyError::HierarchyCycle {
-                ancestor: parent_entity,
-                descendant: child,
-            });
-        }
-
-        if child.get_component::<Layer>().is_some() {
-            if let Some(ancestor_layer) =
-                Self::nearest_layer_ancestor_with_hint(parent_entity, self.parent)?
-            {
-                warn!(
-                    child_id = %child.id(),
-                    parent_id = %parent_entity.id(),
-                    ancestor_layer_id = %ancestor_layer.id(),
-                    "尝试在已有 Layer 树中挂载子 Layer，子 Layer 将在遍历时被忽略"
-                );
-            }
-        }
-
-        let mut child_node = Self::storage()
-            .get_mut(child.id())
-            .ok_or(NodeHierarchyError::MissingNode(child))?;
-        let child_logic = child_node.logic.clone();
-
-        if child_node.parent == Some(parent_entity) {
-            drop(child_node);
-            if !self.children.contains(&child) {
-                self.children.push(child);
-            }
-            return Ok(());
-        }
-
-        let previous_parent = child_node.parent;
-
-        if let Some(old_parent) = previous_parent {
-            if let Some(mut old_parent_node) = Self::storage().get_mut(old_parent.id()) {
-                old_parent_node
-                    .children
-                    .retain(|existing| *existing != child);
-            } else {
-                return Err(NodeHierarchyError::MissingNode(old_parent));
-            }
-        }
-
-        child_node.parent = Some(parent_entity);
-        drop(child_node);
-
-        if !self.children.contains(&child) {
-            self.children.push(child);
-        }
-
-        if previous_parent.is_some() {
-            Self::notify_logic(child, child_logic.clone(), NodeLogicEvent::Detach);
-        }
-        Self::notify_logic(child, child_logic, NodeLogicEvent::Attach);
-
-        Ok(())
-    }
-
-    fn has_ancestor(&self, candidate: Entity) -> Result<bool, NodeHierarchyError> {
-        let found = Self::walk_ancestor_chain(self.parent, self.entity(), |id| {
+    fn has_ancestor_with_hint(
+        entity: Entity,
+        parent_hint: Option<Entity>,
+        candidate: Entity,
+    ) -> Result<bool, NodeHierarchyError> {
+        let found = Self::walk_ancestor_chain(parent_hint, entity, |id| {
             if id == candidate {
                 return Ok(ControlFlow::Break(()));
             }
@@ -245,59 +181,105 @@ impl Node {
         Ok(found.is_some())
     }
 
+    async fn attach_impl(
+        parent_entity: Entity,
+        parent_hint: Option<Entity>,
+        child: Entity,
+    ) -> Result<(), NodeHierarchyError> {
+        if child == parent_entity {
+            return Err(NodeHierarchyError::SelfAttachment(child));
+        }
+
+        Self::ensure_exists(child)?;
+
+        if Self::has_ancestor_with_hint(parent_entity, parent_hint, child)? {
+            return Err(NodeHierarchyError::HierarchyCycle {
+                ancestor: parent_entity,
+                descendant: child,
+            });
+        }
+
+        if child.get_component::<Layer>().is_some() {
+            if let Some(ancestor_layer) =
+                Self::nearest_layer_ancestor_with_hint(parent_entity, parent_hint)?
+            {
+                warn!(
+                    child_id = %child.id(),
+                    parent_id = %parent_entity.id(),
+                    ancestor_layer_id = %ancestor_layer.id(),
+                    "尝试在已有 Layer 树中挂载子 Layer，子 Layer 将在遍历时被忽略"
+                );
+            }
+        }
+
+        let (child_logic, previous_parent) = {
+            let mut child_node = Self::storage()
+                .get_mut(child.id())
+                .ok_or(NodeHierarchyError::MissingNode(child))?;
+            let child_logic = child_node.logic.clone();
+            let previous_parent = child_node.parent;
+
+            if previous_parent == Some(parent_entity) {
+                drop(child_node);
+                let mut parent_node = Self::storage()
+                    .get_mut(parent_entity.id())
+                    .ok_or(NodeHierarchyError::MissingNode(parent_entity))?;
+                if !parent_node.children.contains(&child) {
+                    parent_node.children.push(child);
+                }
+                return Ok(());
+            }
+
+            child_node.parent = Some(parent_entity);
+            (child_logic, previous_parent)
+        };
+
+        if let Some(old_parent) = previous_parent {
+            if let Some(mut old_parent_node) = Self::storage().get_mut(old_parent.id()) {
+                old_parent_node
+                    .children
+                    .retain(|existing| *existing != child);
+            } else {
+                return Err(NodeHierarchyError::MissingNode(old_parent));
+            }
+        }
+
+        {
+            let mut parent_node = Self::storage()
+                .get_mut(parent_entity.id())
+                .ok_or(NodeHierarchyError::MissingNode(parent_entity))?;
+            if !parent_node.children.contains(&child) {
+                parent_node.children.push(child);
+            }
+        }
+
+        if previous_parent.is_some() {
+            Self::notify_logic(child, child_logic.clone(), NodeLogicEvent::Detach).await;
+        }
+        Self::notify_logic(child, child_logic, NodeLogicEvent::Attach).await;
+        Ok(())
+    }
+
     /// 将当前节点与父节点解除关联。
     ///
     /// 调用后该节点会成为一棵子树的根（其 children 保持不变）。
-    pub fn detach(&mut self) -> Result<(), NodeHierarchyError> {
-        self.detach_from_parent()
-    }
-
-    /// 为节点设置或替换 `GameLogic` 实例。
-    ///
-    /// 通常用于给某个实体挂上逻辑脚本/回调。
-    pub fn set_logic(&mut self, logic: impl GameLogic + 'static) {
-        self.set_logic_handle(GameLogicHandle::new(logic));
-    }
-
-    /// 为节点设置或替换 `GameLogic` 句柄。
-    ///
-    /// 仅在你需要复用/转移同一个逻辑实例（例如在节点间移动）时使用；
-    /// 一般情况下建议直接调用 [`Node::set_logic`] 传入具体逻辑类型。
-    pub fn set_logic_handle(&mut self, logic: GameLogicHandle) {
+    pub fn detach(
+        &mut self,
+    ) -> impl std::future::Future<Output = Result<(), NodeHierarchyError>> + Send + 'static {
         let entity = self.entity();
-        let is_attached = self.parent.is_some();
-        let previous_logic = self.logic.replace(logic.clone());
-
-        if is_attached {
-            if let Some(old_logic) = previous_logic {
-                Self::notify_logic(entity, Some(old_logic), NodeLogicEvent::Detach);
-            }
-            Self::notify_logic(entity, Some(logic), NodeLogicEvent::Attach);
-        }
+        async move { Self::detach_impl(entity).await }
     }
 
-    /// 从节点移除并返回 `GameLogic`（若存在）。
-    pub fn take_logic(&mut self) -> Option<GameLogicHandle> {
-        let entity = self.entity();
-        let is_attached = self.parent.is_some();
-        let logic = self.logic.take();
+    async fn detach_impl(entity: Entity) -> Result<(), NodeHierarchyError> {
+        let (previous_parent, logic_handle) = {
+            let mut node = Self::storage()
+                .get_mut(entity.id())
+                .ok_or(NodeHierarchyError::MissingNode(entity))?;
+            let previous_parent = node.parent.take();
+            let logic_handle = node.logic.clone();
+            (previous_parent, logic_handle)
+        };
 
-        if is_attached {
-            Self::notify_logic(entity, logic.clone(), NodeLogicEvent::Detach);
-        }
-
-        logic
-    }
-
-    /// 判断节点是否有 `GameLogic`。
-    pub fn has_logic(&self) -> bool {
-        self.logic.is_some()
-    }
-
-    fn detach_from_parent(&mut self) -> Result<(), NodeHierarchyError> {
-        let entity = self.entity();
-        let logic_handle = self.logic.clone();
-        let previous_parent = self.parent.take();
         if let Some(parent) = previous_parent {
             let mut parent_guard = Self::storage()
                 .get_mut(parent.id())
@@ -306,10 +288,56 @@ impl Node {
         }
 
         if previous_parent.is_some() {
-            Self::notify_logic(entity, logic_handle, NodeLogicEvent::Detach);
+            Self::notify_logic(entity, logic_handle, NodeLogicEvent::Detach).await;
         }
-
         Ok(())
+    }
+
+    /// 为节点设置或替换 `GameLogic` 实例。
+    pub fn set_logic(
+        &mut self,
+        logic: impl GameLogic + 'static,
+    ) -> impl std::future::Future<Output = ()> + Send + 'static {
+        self.set_logic_handle(GameLogicHandle::new(logic))
+    }
+
+    /// 为节点设置或替换 `GameLogic` 句柄。
+    pub fn set_logic_handle(
+        &mut self,
+        logic: GameLogicHandle,
+    ) -> impl std::future::Future<Output = ()> + Send + 'static {
+        let entity = self.entity();
+        let is_attached = self.parent.is_some();
+        let previous_logic = self.logic.replace(logic.clone());
+
+        async move {
+            if is_attached {
+                if let Some(old_logic) = previous_logic {
+                    Self::notify_logic(entity, Some(old_logic), NodeLogicEvent::Detach).await;
+                }
+                Self::notify_logic(entity, Some(logic), NodeLogicEvent::Attach).await;
+            }
+        }
+    }
+
+    /// 从节点移除并返回 `GameLogic`（若存在）。
+    pub fn take_logic(
+        &mut self,
+    ) -> impl std::future::Future<Output = Option<GameLogicHandle>> + Send + 'static {
+        let entity = self.entity();
+        let is_attached = self.parent.is_some();
+        let logic = self.logic.take();
+        async move {
+            if is_attached {
+                Self::notify_logic(entity, logic.clone(), NodeLogicEvent::Detach).await;
+            }
+            logic
+        }
+    }
+
+    /// 判断节点是否有 `GameLogic`。
+    pub fn has_logic(&self) -> bool {
+        self.logic.is_some()
     }
 
     fn ensure_exists(entity: Entity) -> Result<(), NodeHierarchyError> {
@@ -341,14 +369,11 @@ impl Node {
             return Ok(Some(entity));
         }
 
-        let start_parent = parent_hint;
-        Self::walk_ancestor_chain(start_parent, entity, |id| {
-            if id == entity {
-                return Ok(ControlFlow::Continue(start_parent));
-            }
+        Self::walk_ancestor_chain(parent_hint, entity, |id| {
             if id.get_component::<Layer>().is_some() {
                 return Ok(ControlFlow::Break(id));
             }
+
             let parent = {
                 let node_guard = id
                     .get_component::<Node>()
@@ -358,39 +383,10 @@ impl Node {
             Ok(ControlFlow::Continue(parent))
         })
     }
-}
 
-impl ComponentWrite<Node> {
-    /// 将 `child` 挂到当前节点下。
-    ///
-    /// - 若 `child` 已经有父节点，会先从旧父节点下移除，再挂到当前节点下。
-    /// - 若会产生层级环，会返回错误。
-    ///
-    /// 典型用法见 [`Node`] 的示例。
-    pub fn attach(&mut self, child: Entity) -> Result<(), NodeHierarchyError> {
-        Node::attach_internal(&mut *self, child)
-    }
-}
-
-#[derive(Clone, Copy)]
-enum NodeLogicEvent {
-    Attach,
-    Detach,
-}
-
-impl NodeLogicEvent {
-    fn label(self) -> &'static str {
-        match self {
-            NodeLogicEvent::Attach => "attach",
-            NodeLogicEvent::Detach => "detach",
-        }
-    }
-}
-
-impl Node {
-    fn notify_logic(entity: Entity, logic: Option<GameLogicHandle>, event: NodeLogicEvent) {
+    async fn notify_logic(entity: Entity, logic: Option<GameLogicHandle>, event: NodeLogicEvent) {
         if let Some(handle) = logic {
-            let mut guard = handle.blocking_lock();
+            let mut guard = handle.lock().await;
             let result = match event {
                 NodeLogicEvent::Attach => guard.on_attach(entity),
                 NodeLogicEvent::Detach => guard.on_detach(entity),
@@ -405,6 +401,33 @@ impl Node {
                     "GameLogic lifecycle callback failed"
                 );
             }
+        }
+    }
+}
+
+impl ComponentWrite<Node> {
+    /// 将 `child` 挂到当前节点下。
+    pub fn attach(
+        &mut self,
+        child: Entity,
+    ) -> impl std::future::Future<Output = Result<(), NodeHierarchyError>> + Send + 'static {
+        let parent_entity = self.entity();
+        let parent_hint = self.parent;
+        async move { Node::attach_impl(parent_entity, parent_hint, child).await }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum NodeLogicEvent {
+    Attach,
+    Detach,
+}
+
+impl NodeLogicEvent {
+    fn label(self) -> &'static str {
+        match self {
+            NodeLogicEvent::Attach => "attach",
+            NodeLogicEvent::Detach => "detach",
         }
     }
 }
@@ -443,8 +466,8 @@ pub enum NodeHierarchyError {
     },
 }
 
-impl std::fmt::Display for NodeHierarchyError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for NodeHierarchyError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             NodeHierarchyError::MissingNode(entity) => {
                 write!(f, "实体 {} 未注册 Node 组件", entity.id())
@@ -472,7 +495,6 @@ impl std::error::Error for NodeHierarchyError {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::game::component::layer::Layer;
 
     fn prepare_node(entity: &Entity, name: &str) {
         let _ = entity
@@ -480,18 +502,31 @@ mod tests {
             .expect("应能注册节点");
     }
 
-    #[test]
-    fn attach_sets_parent_and_child() {
+    async fn attach(parent: Entity, child: Entity, message: &str) {
+        let attach_future = {
+            let mut parent_node = parent.get_component_mut::<Node>().expect("父节点应存在");
+            parent_node.attach(child)
+        };
+        attach_future.await.expect(message);
+    }
+
+    async fn detach(entity: Entity, message: &str) {
+        let detach_future = {
+            let mut node = entity.get_component_mut::<Node>().expect("节点应存在");
+            node.detach()
+        };
+        detach_future.await.expect(message);
+    }
+
+    #[tokio::test]
+    async fn attach_sets_parent_and_child() {
         let parent = Entity::new().expect("应能创建父实体");
         let child = Entity::new().expect("应能创建子实体");
 
         prepare_node(&parent, "node_parent");
         prepare_node(&child, "node_child");
 
-        {
-            let mut parent_node = parent.get_component_mut::<Node>().expect("父节点应存在");
-            parent_node.attach(child).expect("应当可以挂载子节点");
-        }
+        attach(parent, child, "应当可以挂载子节点").await;
 
         let parent_node = parent.get_component::<Node>().expect("父节点应存在");
         assert_eq!(parent_node.children(), &[child]);
@@ -501,26 +536,18 @@ mod tests {
         let child_node = child.get_component::<Node>().expect("子节点应存在");
         assert_eq!(child_node.parent(), Some(parent));
         assert_eq!(child_node.name(), "node_child");
-        drop(child_node);
     }
 
-    #[test]
-    fn detach_removes_relationship() {
+    #[tokio::test]
+    async fn detach_removes_relationship() {
         let parent = Entity::new().expect("应能创建父实体");
         let child = Entity::new().expect("应能创建子实体");
 
         prepare_node(&parent, "node_parent");
         prepare_node(&child, "node_child");
 
-        {
-            let mut parent_node = parent.get_component_mut::<Node>().unwrap();
-            parent_node.attach(child).unwrap();
-        }
-
-        {
-            let mut child_node = child.get_component_mut::<Node>().unwrap();
-            child_node.detach().expect("应能将子节点脱离父节点");
-        }
+        attach(parent, child, "应当可以挂载子节点").await;
+        detach(child, "应能将子节点脱离父节点").await;
 
         let parent_node = parent.get_component::<Node>().unwrap();
         assert!(parent_node.children().is_empty());
@@ -528,11 +555,10 @@ mod tests {
 
         let child_node = child.get_component::<Node>().unwrap();
         assert_eq!(child_node.parent(), None);
-        drop(child_node);
     }
 
-    #[test]
-    fn reattach_moves_child_between_parents() {
+    #[tokio::test]
+    async fn reattach_moves_child_between_parents() {
         let parent_a = Entity::new().expect("应能创建第一个父实体");
         let parent_b = Entity::new().expect("应能创建第二个父实体");
         let child = Entity::new().expect("应能创建子实体");
@@ -541,15 +567,8 @@ mod tests {
         prepare_node(&parent_b, "node_b");
         prepare_node(&child, "node_child");
 
-        {
-            let mut parent_node = parent_a.get_component_mut::<Node>().unwrap();
-            parent_node.attach(child).unwrap();
-        }
-
-        {
-            let mut parent_node = parent_b.get_component_mut::<Node>().unwrap();
-            parent_node.attach(child).expect("重新挂载应成功");
-        }
+        attach(parent_a, child, "挂载到 parent_a 应成功").await;
+        attach(parent_b, child, "重新挂载到 parent_b 应成功").await;
 
         let old_parent = parent_a.get_component::<Node>().unwrap();
         assert!(old_parent.children().is_empty());
@@ -561,130 +580,30 @@ mod tests {
 
         let child_component = child.get_component::<Node>().unwrap();
         assert_eq!(child_component.parent(), Some(parent_b));
-        drop(child_component);
     }
 
-    #[test]
-    fn attach_detects_cycle() {
+    #[tokio::test]
+    async fn attach_detects_cycle() {
         let parent = Entity::new().expect("应能创建父实体");
         let child = Entity::new().expect("应能创建子实体");
 
         prepare_node(&parent, "node_parent");
         prepare_node(&child, "node_child");
 
-        {
-            let mut parent_node = parent.get_component_mut::<Node>().unwrap();
-            parent_node.attach(child).unwrap();
-        }
+        attach(parent, child, "首次挂载应成功").await;
 
-        let result = {
+        let attach_cycle_future = {
             let mut child_node = child.get_component_mut::<Node>().unwrap();
             child_node.attach(parent)
         };
-        assert!(matches!(
-            result,
-            Err(NodeHierarchyError::HierarchyCycle { ancestor, descendant })
-                if ancestor == child && descendant == parent
-        ));
+        let result = attach_cycle_future
+            .await
+            .expect_err("挂载应当检测到层级循环");
+        assert!(matches!(result, NodeHierarchyError::HierarchyCycle { .. }));
     }
 
-    #[test]
-    fn nearest_layer_ancestor_detects_cycle() {
-        let entity = Entity::new().expect("应能创建实体");
-        prepare_node(&entity, "cycle_node");
-
-        {
-            let mut node = entity.get_component_mut::<Node>().expect("节点应存在");
-            node.parent = Some(entity);
-        }
-
-        let error =
-            Node::nearest_layer_ancestor_with_hint(entity, Some(entity)).expect_err("应检测到循环");
-        assert!(matches!(
-            error,
-            NodeHierarchyError::HierarchyCycle { ancestor, descendant }
-                if ancestor == entity && descendant == entity
-        ));
-    }
-
-    #[test]
-    fn nearest_layer_ancestor_with_hint_handles_cycle_while_locked() {
-        let entity = Entity::new().expect("应能创建实体");
-        prepare_node(&entity, "cycle_hint_node");
-
-        let mut node = entity.get_component_mut::<Node>().expect("节点应存在");
-        node.parent = Some(entity);
-        let parent_hint = node.parent;
-
-        let error =
-            Node::nearest_layer_ancestor_with_hint(entity, parent_hint).expect_err("应检测到循环");
-        assert!(matches!(
-            error,
-            NodeHierarchyError::HierarchyCycle { ancestor, descendant }
-                if ancestor == entity && descendant == entity
-        ));
-    }
-
-    #[test]
-    fn path_reports_cycle_error() {
-        let entity = Entity::new().expect("应能创建实体");
-        prepare_node(&entity, "loop_node");
-
-        {
-            let mut node = entity.get_component_mut::<Node>().expect("节点应存在");
-            node.parent = Some(entity);
-        }
-
-        let guard = entity.get_component::<Node>().expect("节点应存在");
-        let error = guard.path().expect_err("路径计算应发现循环");
-        assert!(matches!(
-            error,
-            NodeHierarchyError::HierarchyCycle { ancestor, descendant }
-                if ancestor == entity && descendant == entity
-        ));
-    }
-
-    #[test]
-    fn has_ancestor_detects_cycle() {
-        let root = Entity::new().expect("应能创建根节点");
-        let loop_a = Entity::new().expect("应能创建循环节点 A");
-        let loop_b = Entity::new().expect("应能创建循环节点 B");
-        let candidate = Entity::new().expect("应能创建候选节点");
-        prepare_node(&root, "root_node");
-        prepare_node(&loop_a, "loop_a");
-        prepare_node(&loop_b, "loop_b");
-        prepare_node(&candidate, "candidate");
-
-        {
-            let mut root_node = root.get_component_mut::<Node>().expect("根节点应存在");
-            root_node.parent = Some(loop_a);
-        }
-        {
-            let mut loop_a_node = loop_a
-                .get_component_mut::<Node>()
-                .expect("循环节点 A 应存在");
-            loop_a_node.parent = Some(loop_b);
-        }
-        {
-            let mut loop_b_node = loop_b
-                .get_component_mut::<Node>()
-                .expect("循环节点 B 应存在");
-            loop_b_node.parent = Some(loop_a);
-        }
-
-        let guard = root.get_component::<Node>().expect("根节点应存在");
-        let error = guard
-            .has_ancestor(candidate)
-            .expect_err("祖先检测应在循环中失败");
-        assert!(matches!(
-            error,
-            NodeHierarchyError::HierarchyCycle { ancestor, descendant }
-                if ancestor == loop_a && descendant == root
-        ));
-    }
-
-    #[test]
-    fn node_name_validation_rules() {
+    #[tokio::test]
+    async fn node_name_validation_rules() {
         assert!(matches!(Node::new(""), Err(NodeNameError::Empty)));
         assert!(matches!(
             Node::new("has space"),
@@ -695,285 +614,5 @@ mod tests {
             Err(NodeNameError::ContainsSlash)
         ));
         assert!(Node::new("valid_name").is_ok());
-    }
-
-    #[test]
-    fn path_builds_hierarchy_identifier() {
-        let root = Entity::new().expect("应能创建根实体");
-        let branch = Entity::new().expect("应能创建中间实体");
-        let leaf = Entity::new().expect("应能创建叶子实体");
-
-        prepare_node(&root, "root");
-        prepare_node(&branch, "branch");
-        prepare_node(&leaf, "leaf");
-
-        {
-            let mut root_node = root.get_component_mut::<Node>().unwrap();
-            root_node.attach(branch).unwrap();
-        }
-        {
-            let mut branch_node = branch.get_component_mut::<Node>().unwrap();
-            branch_node.attach(leaf).unwrap();
-        }
-
-        let root_node = root.get_component::<Node>().unwrap();
-        assert_eq!(root_node.path().unwrap(), "root");
-        drop(root_node);
-        let branch_node = branch.get_component::<Node>().unwrap();
-        assert_eq!(branch_node.path().unwrap(), "root/branch");
-        drop(branch_node);
-        let leaf_node = leaf.get_component::<Node>().unwrap();
-        assert_eq!(leaf_node.path().unwrap(), "root/branch/leaf");
-    }
-
-    #[test]
-    fn logic_callbacks_fire_on_attach_and_detach() {
-        use std::sync::{Arc, Mutex as StdMutex};
-
-        use crate::game::system::logic::GameLogic;
-
-        struct TrackingLogic {
-            events: Arc<StdMutex<Vec<&'static str>>>,
-        }
-
-        #[async_trait::async_trait]
-        impl GameLogic for TrackingLogic {
-            fn on_attach(&mut self, _e: Entity) -> anyhow::Result<()> {
-                self.events.lock().unwrap().push("attach");
-                Ok(())
-            }
-
-            fn on_detach(&mut self, _e: Entity) -> anyhow::Result<()> {
-                self.events.lock().unwrap().push("detach");
-                Ok(())
-            }
-        }
-
-        let parent = Entity::new().expect("应能创建父实体");
-        let child = Entity::new().expect("应能创建子实体");
-
-        prepare_node(&parent, "logic_parent");
-        prepare_node(&child, "logic_child");
-
-        let events = Arc::new(StdMutex::new(Vec::new()));
-        let logic = TrackingLogic {
-            events: events.clone(),
-        };
-
-        {
-            let mut child_node = child.get_component_mut::<Node>().unwrap();
-            child_node.set_logic(logic);
-        }
-
-        {
-            let mut parent_node = parent.get_component_mut::<Node>().unwrap();
-            parent_node.attach(child).unwrap();
-        }
-
-        {
-            let log = events.lock().unwrap();
-            assert_eq!(log.as_slice(), &["attach"]);
-        }
-
-        {
-            let mut child_node = child.get_component_mut::<Node>().unwrap();
-            child_node.detach().unwrap();
-        }
-
-        let log = events.lock().unwrap();
-        assert_eq!(log.as_slice(), &["attach", "detach"]);
-    }
-
-    #[test]
-    fn logic_callbacks_fire_when_logic_set_after_attachment() {
-        use std::sync::{Arc, Mutex as StdMutex};
-
-        use crate::game::system::logic::GameLogic;
-
-        struct TrackingLogic {
-            events: Arc<StdMutex<Vec<&'static str>>>,
-        }
-
-        #[async_trait::async_trait]
-        impl GameLogic for TrackingLogic {
-            fn on_attach(&mut self, _e: Entity) -> anyhow::Result<()> {
-                self.events.lock().unwrap().push("attach");
-                Ok(())
-            }
-
-            fn on_detach(&mut self, _e: Entity) -> anyhow::Result<()> {
-                self.events.lock().unwrap().push("detach");
-                Ok(())
-            }
-        }
-
-        let parent = Entity::new().expect("应能创建父实体");
-        let child = Entity::new().expect("应能创建子实体");
-
-        prepare_node(&parent, "logic_parent_after");
-        prepare_node(&child, "logic_child_after");
-
-        {
-            let mut parent_node = parent.get_component_mut::<Node>().unwrap();
-            parent_node.attach(child).unwrap();
-        }
-
-        let events = Arc::new(StdMutex::new(Vec::new()));
-        let logic = TrackingLogic {
-            events: events.clone(),
-        };
-
-        {
-            let mut child_node = child.get_component_mut::<Node>().unwrap();
-            child_node.set_logic(logic);
-        }
-
-        {
-            let log = events.lock().unwrap();
-            assert_eq!(log.as_slice(), &["attach"]);
-        }
-
-        {
-            let mut child_node = child.get_component_mut::<Node>().unwrap();
-            let _ = child_node.take_logic();
-        }
-
-        let log = events.lock().unwrap();
-        assert_eq!(log.as_slice(), &["attach", "detach"]);
-    }
-
-    #[test]
-    fn set_logic_handle_attaches_when_node_is_attached() {
-        use std::sync::{Arc, Mutex as StdMutex};
-
-        use crate::game::system::logic::GameLogic;
-
-        struct TrackingLogic {
-            events: Arc<StdMutex<Vec<&'static str>>>,
-        }
-
-        #[async_trait::async_trait]
-        impl GameLogic for TrackingLogic {
-            fn on_attach(&mut self, _e: Entity) -> anyhow::Result<()> {
-                self.events.lock().unwrap().push("attach");
-                Ok(())
-            }
-        }
-
-        let parent = Entity::new().expect("应能创建父实体");
-        let child = Entity::new().expect("应能创建子实体");
-
-        prepare_node(&parent, "logic_parent_handle");
-        prepare_node(&child, "logic_child_handle");
-
-        {
-            let mut parent_node = parent.get_component_mut::<Node>().unwrap();
-            parent_node.attach(child).unwrap();
-        }
-
-        let events = Arc::new(StdMutex::new(Vec::new()));
-        let handle = GameLogicHandle::new(TrackingLogic {
-            events: events.clone(),
-        });
-
-        {
-            let mut child_node = child.get_component_mut::<Node>().unwrap();
-            child_node.set_logic_handle(handle);
-        }
-
-        let log = events.lock().unwrap();
-        assert_eq!(log.as_slice(), &["attach"]);
-    }
-
-    #[test]
-    fn replacing_logic_on_attached_node_detaches_old_then_attaches_new() {
-        use std::sync::{Arc, Mutex as StdMutex};
-
-        use crate::game::system::logic::GameLogic;
-
-        struct RecordingLogic {
-            label: &'static str,
-            events: Arc<StdMutex<Vec<&'static str>>>,
-        }
-
-        #[async_trait::async_trait]
-        impl GameLogic for RecordingLogic {
-            fn on_attach(&mut self, _e: Entity) -> anyhow::Result<()> {
-                self.events.lock().unwrap().push(if self.label == "a" {
-                    "attach_a"
-                } else {
-                    "attach_b"
-                });
-                Ok(())
-            }
-
-            fn on_detach(&mut self, _e: Entity) -> anyhow::Result<()> {
-                self.events.lock().unwrap().push(if self.label == "a" {
-                    "detach_a"
-                } else {
-                    "detach_b"
-                });
-                Ok(())
-            }
-        }
-
-        let parent = Entity::new().expect("应能创建父实体");
-        let child = Entity::new().expect("应能创建子实体");
-
-        prepare_node(&parent, "logic_parent_replace");
-        prepare_node(&child, "logic_child_replace");
-
-        {
-            let mut parent_node = parent.get_component_mut::<Node>().unwrap();
-            parent_node.attach(child).unwrap();
-        }
-
-        let events = Arc::new(StdMutex::new(Vec::new()));
-
-        {
-            let mut child_node = child.get_component_mut::<Node>().unwrap();
-            child_node.set_logic(RecordingLogic {
-                label: "a",
-                events: events.clone(),
-            });
-            child_node.set_logic(RecordingLogic {
-                label: "b",
-                events: events.clone(),
-            });
-        }
-
-        let log = events.lock().unwrap();
-        assert_eq!(log.as_slice(), &["attach_a", "detach_a", "attach_b"]);
-    }
-
-    #[test]
-    fn attach_layer_child_under_existing_layer_tree() {
-        let root = Entity::new().expect("应能创建根节点");
-        let parent = Entity::new().expect("应能创建父节点");
-        let child = Entity::new().expect("应能创建子节点");
-
-        prepare_node(&root, "layer_root");
-        prepare_node(&parent, "layer_parent");
-        prepare_node(&child, "layer_child");
-
-        let _ = root
-            .register_component(Layer::new())
-            .expect("应能为根节点注册 Layer");
-        let _ = child
-            .register_component(Layer::new())
-            .expect("应能为子节点注册 Layer");
-
-        {
-            let mut root_node = root.get_component_mut::<Node>().expect("根节点应存在");
-            root_node.attach(parent).expect("应能挂载父节点");
-        }
-
-        {
-            let mut parent_node = parent.get_component_mut::<Node>().expect("父节点应存在");
-            parent_node.attach(child).expect("应能挂载子 Layer");
-        }
-
-        let child_node = child.get_component::<Node>().expect("子节点应存在");
-        assert_eq!(child_node.parent(), Some(parent));
     }
 }
