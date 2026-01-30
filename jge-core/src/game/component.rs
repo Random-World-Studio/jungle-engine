@@ -19,6 +19,17 @@
 //! 2. 可变访问使用 `entity.get_component_mut::<T>()`。
 //! 3. 避免在 `Entity` 之外使用 `Component::read`/`Component::write`：直接访问存储会绕过依赖记账，并可能导致缓存（例如变换/场景）不同步。
 //!
+//! ## 关于在 async 中跨 `.await` 持有 guard（重要）
+//!
+//! `ComponentRead`/`ComponentWrite` 是锁 guard。
+//!
+//! - 目前它们是 `Send`，因此**在需要 `Future: Send` 的场景**（例如 `tokio::spawn`）里也可以跨 `.await` 存活。
+//! - 但依然强烈建议：**尽量缩短持锁时间**，避免在持有写 guard 时执行耗时 `.await`，否则会造成其它任务无法读写该组件。
+//! - 更重要的是：**不要在持有 guard 时 `.await` 可能回到 ECS/节点树的 Future**（例如 `Node::attach/detach/set_logic`、或会触发 `GameLogic` 回调的流程），
+//!   否则非常容易形成锁顺序反转导致死锁。
+//!
+//! 推荐模式：先构造要 await 的 Future（或先拷贝出必要数据），立即 `drop(guard)`，再 `await`。
+//!
 //! ## 示例
 //!
 //! ```rust
@@ -73,7 +84,7 @@ const CHUNK_SIZE: usize = 16;
 /// - 自定义组件建议优先使用 `#[component]` / `#[component_impl]` 宏生成实现。
 /// - **不要**在游戏代码里直接调用 `insert/read/write/remove/storage`。
 ///   统一使用 [`Entity`] 的 API（`register_component`/`get_component`/`get_component_mut`）。
-pub trait Component: Sized + 'static {
+pub trait Component: Send + Sync + Sized + 'static {
     /// 返回该组件类型的全局存储。
     ///
     /// 这是底层存储入口，一般不直接使用。
@@ -558,6 +569,9 @@ mod tests {
     use std::error::Error as StdError;
     use std::io::{Error as IoError, ErrorKind};
 
+    fn assert_send<T: Send>() {}
+    fn assert_sync<T: Sync>() {}
+
     #[component]
     #[derive(Debug, PartialEq)]
     struct TestComponent {
@@ -618,6 +632,42 @@ mod tests {
     #[derive(Debug, PartialEq, Eq)]
     struct ChunkProbeSkipComponent {
         index: usize,
+    }
+
+    #[test]
+    fn component_guards_are_send_and_sync_when_component_is_threadsafe() {
+        assert_send::<TestComponent>();
+        assert_sync::<TestComponent>();
+        assert_send::<ComponentRead<TestComponent>>();
+        assert_send::<ComponentWrite<TestComponent>>();
+    }
+
+    fn assert_future_send<F: std::future::Future + Send>(future: F) -> F {
+        future
+    }
+
+    #[tokio::test]
+    async fn component_write_can_cross_await_in_send_future() {
+        let entity = Entity::new().expect("应能创建实体");
+        entity
+            .register_component(TestComponent { value: 0 })
+            .expect("应能注册测试组件");
+
+        let fut = async move {
+            let mut guard = entity
+                .get_component_mut::<TestComponent>()
+                .expect("应能获取写 guard");
+            tokio::task::yield_now().await;
+            guard.value += 1;
+        };
+
+        let fut = assert_future_send(fut);
+        fut.await;
+
+        let guard = entity
+            .get_component::<TestComponent>()
+            .expect("应能获取读 guard");
+        assert_eq!(guard.value, 1);
     }
 
     #[component_impl(ChunkProbeSkipComponent)]

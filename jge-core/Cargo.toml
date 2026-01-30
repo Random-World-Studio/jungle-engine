@@ -11,7 +11,7 @@ tracing = { version = "0.1.43", features = ["log"] }
 tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
 wgpu = { version = "27.0.1", features = ["glsl"] }
 winit = "0.30.12"
-parking_lot = { version = "0.12", features = ["arc_lock"] }
+parking_lot = { version = "0.12", features = ["arc_lock", "send_guard"] }
 jge-macros = { path = "../jge-macros" }
 async-trait = "0.1"
 tempfile = "3.10"

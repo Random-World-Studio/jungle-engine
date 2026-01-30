@@ -120,6 +120,9 @@ impl Entity {
     /// 读取组件（共享借用）。
     ///
     /// 返回的 [`ComponentRead`] 是一个读 guard，生命周期内会保持一致性。
+    ///
+    /// 该 guard 是 `Send`，因此在需要 `Future: Send` 的 async 任务里也可以跨 `.await` 存活。
+    /// 但仍建议尽量缩短持锁时间，并避免在持有 guard 时 `.await` 可能回到 ECS/节点树的 Future（避免死锁）。
     pub fn get_component<C: Component>(&self) -> Option<ComponentRead<C>> {
         C::read(*self)
     }
@@ -127,6 +130,9 @@ impl Entity {
     /// 读取组件（可变借用）。
     ///
     /// 返回的 [`ComponentWrite`] 是一个写 guard。
+    ///
+    /// 该 guard 是 `Send`，因此在需要 `Future: Send` 的 async 任务里也可以跨 `.await` 存活。
+    /// 但在持有写 guard 时执行耗时 `.await` 会阻塞其它读写；同时请避免在持有 guard 时 `.await` 可能回到 ECS/节点树的 Future（避免死锁）。
     pub fn get_component_mut<C: Component>(&self) -> Option<ComponentWrite<C>> {
         C::write(*self)
     }
