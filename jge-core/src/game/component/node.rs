@@ -4,6 +4,7 @@ use super::layer::Layer;
 use super::{Component, ComponentWrite, component, component_impl};
 use crate::game::system::logic::GameLogic;
 use crate::game::{entity::Entity, system::logic::GameLogicHandle};
+use crate::game::{is_reachable_from_engine_root, set_subtree_reachable};
 use tracing::warn;
 
 /// 节点组件：用于构建实体之间的树形层级（父子关系）并携带节点名称。
@@ -253,6 +254,11 @@ impl Node {
             }
         }
 
+        // 可达性：子树是否“对引擎根可达”由 parent 是否可达决定。
+        // 这会直接影响 Renderable 的实际可见性。
+        let reachable = is_reachable_from_engine_root(parent_entity);
+        set_subtree_reachable(child, reachable);
+
         if previous_parent.is_some() {
             Self::notify_logic(child, child_logic.clone(), NodeLogicEvent::Detach).await;
         }
@@ -285,6 +291,9 @@ impl Node {
                 .get_mut(parent.id())
                 .ok_or(NodeHierarchyError::MissingNode(parent))?;
             parent_guard.children.retain(|child| *child != entity);
+
+            // 只有确实从树上卸载时才会失去可达性；根节点（无 parent）不受影响。
+            set_subtree_reachable(entity, false);
         }
 
         if previous_parent.is_some() {

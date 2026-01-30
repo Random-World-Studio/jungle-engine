@@ -18,7 +18,7 @@ use anyhow::Context;
 use std::{
     collections::HashSet,
     sync::{
-        Arc,
+        Arc, OnceLock,
         atomic::{AtomicBool, Ordering},
     },
     time::{Duration, Instant},
@@ -48,6 +48,69 @@ use crate::{
     },
     window::GameWindow,
 };
+
+use parking_lot::RwLock;
+
+static ENGINE_ROOTS: OnceLock<RwLock<HashSet<crate::game::entity::EntityId>>> = OnceLock::new();
+
+fn engine_roots() -> &'static RwLock<HashSet<crate::game::entity::EntityId>> {
+    ENGINE_ROOTS.get_or_init(|| RwLock::new(HashSet::new()))
+}
+
+pub(crate) fn register_engine_root(root: Entity) {
+    engine_roots().write().insert(root.id());
+}
+
+pub(crate) fn unregister_engine_root(root: Entity) {
+    engine_roots().write().remove(&root.id());
+}
+
+pub(crate) fn is_reachable_from_engine_root(entity: Entity) -> bool {
+    let roots = engine_roots().read();
+    if roots.is_empty() {
+        // 在未创建 Game 的单测/工具场景下，不引入“全局根节点”约束。
+        return true;
+    }
+
+    let mut visited = HashSet::new();
+    let mut current = Some(entity);
+    while let Some(e) = current {
+        if !visited.insert(e) {
+            return false;
+        }
+        if roots.contains(&e.id()) {
+            return true;
+        }
+        let parent = e.get_component::<Node>().map(|n| n.parent());
+        current = match parent {
+            Some(p) => p,
+            None => return false,
+        };
+    }
+    false
+}
+
+pub(crate) fn set_subtree_reachable(root: Entity, reachable: bool) {
+    use crate::game::component::renderable::Renderable;
+
+    let mut stack = vec![root];
+    let mut visited = HashSet::new();
+    while let Some(entity) = stack.pop() {
+        if !visited.insert(entity) {
+            continue;
+        }
+
+        if let Some(mut renderable) = entity.get_component_mut::<Renderable>() {
+            renderable.set_reachable(reachable);
+        }
+
+        let children = match entity.get_component::<Node>() {
+            Some(node) => node.children().to_vec(),
+            None => Vec::new(),
+        };
+        stack.extend(children);
+    }
+}
 
 /// 引擎运行时入口。
 ///
@@ -122,6 +185,8 @@ impl Drop for Game {
     fn drop(&mut self) {
         // 停止调度循环，避免退出阶段仍然并发执行 update/on_event。
         self.stopped.store(true, Ordering::Release);
+        unregister_engine_root(self.root);
+        set_subtree_reachable(self.root, false);
         self.detach_node_tree(self.root);
     }
 }
@@ -198,6 +263,11 @@ impl Game {
         } else {
             error!(target: "jge-core", "根实体缺少 Node 组件");
         }
+
+        // 标记该 root 为引擎根节点，并把其子树内的 Renderable 设为“可达”。
+        // 这样当用户在 Game::new 之前就构建并挂载了一棵场景树时，可见性也能正确恢复。
+        register_engine_root(root);
+        set_subtree_reachable(root, true);
 
         Ok(Self {
             config,
@@ -635,11 +705,22 @@ impl Game {
             for chunk in logic_targets {
                 let logic_delta = delta;
                 join_set.spawn(async move {
+                    use crate::game::component::renderable::Renderable;
+
                     for (entity_id, handle) in chunk {
+                        let entity = Entity::from(entity_id);
+
+                        // Renderable 的“实际可见性”需要直接影响 on_render 调度。
+                        // - 有 Renderable：不可见则跳过。
+                        // - 无 Renderable：保持原语义，仍调度。
+                        if let Some(renderable) = entity.get_component::<Renderable>() {
+                            if !renderable.is_enabled() {
+                                continue;
+                            }
+                        }
+
                         let mut logic = handle.lock().await;
-                        if let Err(err) =
-                            logic.on_render(Entity::from(entity_id), logic_delta).await
-                        {
+                        if let Err(err) = logic.on_render(entity, logic_delta).await {
                             warn!(
                                 target: "jge-core",
                                 error = %err,
