@@ -386,11 +386,17 @@ fn register_resources() -> anyhow::Result<()> {
 }
 ```
 
-### 7.2 三种资源类型
+### 7.2 资源类型
 
-- `embed`：编译期嵌入（`include_bytes!`），适合纹理/着色器等随二进制分发的资源。
+- `embed`：编译期嵌入单个文件（`include_bytes!`）。
+- `embeddir`：编译期递归嵌入目录内所有文件（每个文件按 `embed` 方式注册到对应逻辑路径）。
+    - 注意：目录内新增/删除文件不一定会自动触发重新编译/重新展开；如发现资源列表未更新，请手动触发一次重新编译。
+    - 编译期提示说明：该宏会故意触发一个带自定义文案的 `unused_must_use` 警告作为提示（并不代表你的代码真的写错了）。
+    - 关闭编译期提示：在调用点包一层 `#[allow(unused_must_use)] { jge_core::resource!(...) ?; }`，或设置环境变量 `JGE_RESOURCE_EMBEDDIR_SILENCE=1`。
 - `fs`：磁盘懒加载（`Resource::from_file`），适合开发期热改或超大文件。
+- `dir`：运行时目录映射（注册目录节点；访问子路径时才按需从磁盘惰性注册）。
 - `txt`：内联文本（写在 YAML 里）。注意：`txt` 必须是 **YAML 字符串标量**，推荐使用 `|` 块标量：
+- `bin`：内联二进制（写在 YAML 里；以空格/换行分隔的两位十六进制字节，且不含 0x 前缀）。
 
 ```yaml
 - config:
@@ -406,10 +412,10 @@ fn register_resources() -> anyhow::Result<()> {
 
 1) `resource!("...")` 这个 **YAML 文件路径**：相对“宏调用点所在源文件”的目录解析。
 
-2) YAML 中每个节点的 `from:` **资源文件路径**：
+2) YAML 中每个节点的 `from:` **资源文件/目录路径**：
 
-- 当使用 `resource!(r#"..."#)` **内联 YAML** 时，`from:` 相对“宏调用点所在源文件”的目录。
-- 当使用 `resource!("path/to/resources.yaml")` **从文件读取 YAML** 时，`from:` 相对该 YAML 文件自身所在目录。
+- 当使用 `resource!(r#"..."#)` **内联 YAML** 时，`from:`（`embed`/`embeddir`）相对“宏调用点所在源文件”的目录。
+- 当使用 `resource!("path/to/resources.yaml")` **从文件读取 YAML** 时，`from:`（`embed`/`embeddir`）相对该 YAML 文件自身所在目录。
 
 这一设计的好处是：当你的资源声明放在单独的 YAML 文件里时，你可以把 **YAML 与它引用的资源文件按相对布局一起移动/复用**（例如把整个资源目录从 `assets/` 移到 `content/`）。
 注意：如果你只移动 YAML 而不移动对应资源文件，那么 `from:` 的相对路径会随之改变，通常会导致资源找不到。

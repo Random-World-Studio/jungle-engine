@@ -1,0 +1,3 @@
+- embeddir_test:
+    - bundle: embeddir
+      from: dir_root

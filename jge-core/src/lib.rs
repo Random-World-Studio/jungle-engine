@@ -154,7 +154,7 @@ pub use jge_macros::scene;
 ///
 /// - 资源逻辑路径：由 YAML 的目录层级拼接而成，使用 `/` 作为分隔符，例如 `textures/ui/button.png`。
 /// - `from` 相对路径：
-///   - `embed`：
+///   - `embed` / `embeddir`：
 ///     - **内联 YAML**：以 **宏调用点源代码文件的父目录** 为基准解析。
 ///     - **从文件读取 YAML**：以该 **YAML 文件所在目录** 为基准解析。
 ///   - `fs` / `dir`：若 `from` 不是绝对路径，则在**运行时**按进程的当前工作目录（cwd）解析。
@@ -165,12 +165,12 @@ pub use jge_macros::scene;
 ///
 /// ```text
 /// - <dir_name>: [ <node>... ]
-/// - <res_name>: embed|fs
+/// - <res_name>: embed|embeddir|fs
 ///   from: <path>     # embed/fs 必须
+/// - <res_name>: embeddir
+///   from: <dir_path> # embeddir 必须（宏在编译期递归扫描目录，并把每个文件按 embed 方式注册到 <res_name>/... 下）
 /// - <res_name>: txt
 ///   txt: |\n...      # txt 必须（必须是 YAML 字符串标量；推荐用 | 块标量）
-/// - <res_name>: bin
-///   bin: |\n...      # bin 必须（多个空格/换行分隔的两位十六进制字节，不含 0x 前缀）
 /// - <res_name>: bin
 ///   bin: |\n...      # bin 必须（多个空格/换行分隔的两位十六进制字节，不含 0x 前缀）
 /// - <res_name>: dir
@@ -185,6 +185,9 @@ pub use jge_macros::scene;
 /// # 五种资源类型
 ///
 /// - `embed`：编译期嵌入（`include_bytes!`），适合纹理/着色器等随二进制分发的资源。
+/// - `embeddir`：编译期递归嵌入目录（对目录内每个文件生成 `include_bytes!` 并注册到对应逻辑路径）。
+///   - 注意：目录内新增/删除文件是否会自动触发重新编译，取决于构建系统对目录变更的追踪；如遇到不刷新，请手动触发一次重新编译。
+///   - 若你不想看到编译期提示，可在调用点加 `#[allow(unused_must_use)]` 包裹该宏调用，或设置环境变量 `JGE_RESOURCE_EMBEDDIR_SILENCE=1`。
 /// - `fs`：磁盘懒加载（`Resource::from_file`），适合开发期热改或超大文件。
 /// - `txt`：内联文本（写在 YAML 里），适合小配置/小片段。
 /// - `bin`：内联二进制（写在 YAML 里），适合小型二进制 blob（例如调试用纹理/自定义表）。

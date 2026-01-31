@@ -4,7 +4,7 @@ use quote::{format_ident, quote};
 use syn::{LitStr, parse2};
 
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 fn is_rust_analyzer_env() -> bool {
     // rust-analyzer 的 proc-macro 扩展通常运行在 VS Code extension host 进程环境里，
@@ -16,6 +16,14 @@ fn is_rust_analyzer_env() -> bool {
             .as_deref()
             == Some("extensionHost")
         && std::env::var("VSCODE_IPC_HOOK").ok().is_some()
+}
+
+fn env_truthy(name: &str) -> bool {
+    let Ok(v) = std::env::var(name) else {
+        return false;
+    };
+    let v = v.trim().to_ascii_lowercase();
+    matches!(v.as_str(), "1" | "true" | "yes" | "on")
 }
 
 fn resolve_from_for_yaml_file(from: &str, yaml_dir: Option<&PathBuf>) -> String {
@@ -34,9 +42,181 @@ fn resolve_from_for_yaml_file(from: &str, yaml_dir: Option<&PathBuf>) -> String 
     yaml_dir.join(from_path).to_string_lossy().into_owned()
 }
 
+fn resolve_callsite_path(callsite_dir: &Path, p: &str) -> PathBuf {
+    let pb = PathBuf::from(p);
+    if pb.is_absolute() {
+        pb
+    } else {
+        callsite_dir.join(pb)
+    }
+}
+
+fn collect_files_recursively(root: &Path) -> Result<Vec<PathBuf>, syn::Error> {
+    fn walk(dir: &Path, root: &Path, out: &mut Vec<PathBuf>) -> Result<(), syn::Error> {
+        let rd = std::fs::read_dir(dir).map_err(|err| {
+            syn::Error::new(
+                proc_macro2::Span::call_site(),
+                format!(
+                    "resource!: embeddir 无法读取目录：{}（{}）",
+                    dir.display(),
+                    err
+                ),
+            )
+        })?;
+
+        for entry in rd {
+            let entry = entry.map_err(|err| {
+                syn::Error::new(
+                    proc_macro2::Span::call_site(),
+                    format!(
+                        "resource!: embeddir 读取目录项失败：{}（{}）",
+                        dir.display(),
+                        err
+                    ),
+                )
+            })?;
+
+            let path = entry.path();
+            let meta = std::fs::symlink_metadata(&path).map_err(|err| {
+                syn::Error::new(
+                    proc_macro2::Span::call_site(),
+                    format!(
+                        "resource!: embeddir 无法读取元信息：{}（{}）",
+                        path.display(),
+                        err
+                    ),
+                )
+            })?;
+
+            let ft = meta.file_type();
+            if ft.is_symlink() {
+                // 避免潜在的循环引用；也保持语义简单。
+                continue;
+            }
+            if ft.is_dir() {
+                walk(&path, root, out)?;
+                continue;
+            }
+            if ft.is_file() {
+                let rel = path.strip_prefix(root).map_err(|_| {
+                    syn::Error::new(
+                        proc_macro2::Span::call_site(),
+                        format!(
+                            "resource!: embeddir 内部错误：无法计算相对路径：root={} file={}",
+                            root.display(),
+                            path.display()
+                        ),
+                    )
+                })?;
+                out.push(rel.to_path_buf());
+            }
+        }
+        Ok(())
+    }
+
+    let mut out = Vec::<PathBuf>::new();
+    walk(root, root, &mut out)?;
+    out.sort_by(|a, b| a.to_string_lossy().cmp(&b.to_string_lossy()));
+    Ok(out)
+}
+
+fn expand_embeddir_entries(
+    callsite_dir: &Path,
+    yaml_dir_for_from: Option<&PathBuf>,
+    prefix: &[String],
+    res_name: &str,
+    from_raw: &str,
+) -> Result<Vec<ResourceEntry>, syn::Error> {
+    if from_raw.trim().is_empty() {
+        return Err(syn::Error::new(
+            proc_macro2::Span::call_site(),
+            format!("resource!: {res_name}: embeddir 需要 from 字段"),
+        ));
+    }
+
+    // include_bytes! 的路径语义需要相对“宏调用点源文件”。
+    // 当 YAML 从文件读取时，我们把 from 改写为相对调用点的路径（加上 yaml_dir 前缀）。
+    // 注意：这里要求 from_raw 是 YAML 中的原始字符串（尚未做 yaml_dir 折叠）。
+    let from_for_include = resolve_from_for_yaml_file(from_raw, yaml_dir_for_from);
+
+    // 目录扫描需要绝对路径：相对路径按宏调用点源文件目录解析。
+    let root_abs = resolve_callsite_path(callsite_dir, &from_for_include);
+    if !root_abs.exists() {
+        return Err(syn::Error::new(
+            proc_macro2::Span::call_site(),
+            format!(
+                "resource!: {res_name}: embeddir 目录不存在：{}（from: {}）",
+                root_abs.display(),
+                from_for_include
+            ),
+        ));
+    }
+    if !root_abs.is_dir() {
+        return Err(syn::Error::new(
+            proc_macro2::Span::call_site(),
+            format!(
+                "resource!: {res_name}: embeddir from 必须指向目录：{}（from: {}）",
+                root_abs.display(),
+                from_for_include
+            ),
+        ));
+    }
+
+    let files = collect_files_recursively(&root_abs)?;
+    if files.is_empty() {
+        // 允许空目录：不注册任何资源。
+        return Ok(Vec::new());
+    }
+
+    let mut out = Vec::<ResourceEntry>::new();
+    for rel in files {
+        let mut segments = prefix.to_vec();
+        segments.push(res_name.to_string());
+
+        for comp in rel.components() {
+            let std::path::Component::Normal(os) = comp else {
+                // 递归扫描得到的相对路径不应包含 ParentDir/CurDir/Prefix/Root。
+                return Err(syn::Error::new(
+                    proc_macro2::Span::call_site(),
+                    format!(
+                        "resource!: embeddir 发现非法相对路径：{}",
+                        rel.to_string_lossy()
+                    ),
+                ));
+            };
+            let Some(s) = os.to_str() else {
+                return Err(syn::Error::new(
+                    proc_macro2::Span::call_site(),
+                    format!(
+                        "resource!: embeddir 文件名不是 UTF-8：{}",
+                        rel.to_string_lossy()
+                    ),
+                ));
+            };
+            validate_segment(s)?;
+            segments.push(s.to_string());
+        }
+
+        let logical_path = segments.join("/");
+        let include_path = PathBuf::from(&from_for_include).join(&rel);
+        let include_path_str = include_path.to_string_lossy().into_owned();
+
+        out.push(ResourceEntry {
+            logical_path,
+            kind: ResourceKind::Embed,
+            from: Some(include_path_str),
+            txt: None,
+            bin: None,
+        });
+    }
+
+    Ok(out)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ResourceKind {
     Embed,
+    EmbedDir,
     Fs,
     Txt,
     Bin,
@@ -47,6 +227,7 @@ impl ResourceKind {
     fn parse(s: &str) -> Option<Self> {
         match s {
             "embed" => Some(Self::Embed),
+            "embeddir" => Some(Self::EmbedDir),
             "fs" => Some(Self::Fs),
             "txt" => Some(Self::Txt),
             "bin" => Some(Self::Bin),
@@ -58,6 +239,7 @@ impl ResourceKind {
     fn as_str(&self) -> &'static str {
         match self {
             Self::Embed => "embed",
+            Self::EmbedDir => "embeddir",
             Self::Fs => "fs",
             Self::Txt => "txt",
             Self::Bin => "bin",
@@ -183,11 +365,13 @@ pub fn expand_resource(input: TokenStream) -> TokenStream {
     };
 
     let mut entries = Vec::<ResourceEntry>::new();
+    let mut used_embeddir = false;
     if let Err(err) = parse_root(
         &doc,
         &callsite_dir,
         yaml_dir_for_from.as_ref(),
         &mut entries,
+        &mut used_embeddir,
     ) {
         return err.to_compile_error().into();
     }
@@ -276,12 +460,47 @@ pub fn expand_resource(input: TokenStream) -> TokenStream {
                     .with_context(|| format!("resource!: 注册目录映射失败（{}:{}）", #logical_path, #from_lit))?;
                 }
             }
+            ResourceKind::EmbedDir => unreachable!("embeddir should be expanded into embed entries"),
         }
     });
+
+    // 说明：embeddir 的“新增/删除文件是否触发重编译”在 stable Rust 里难以做到完美自动。
+    // 我们在默认情况下给出一个很显眼的编译 warning（unused_must_use + 自定义文案），
+    // 避免使用者误以为它会自动刷新，同时又不会给出“已废弃”的误导。
+    // 可通过：
+    // - 在调用点包一层 `#[allow(unused_must_use)] { ... }` 静默
+    // - 或设置环境变量 `JGE_RESOURCE_EMBEDDIR_SILENCE=1` 全局静默
+    let embeddir_notice = if used_embeddir && !env_truthy("JGE_RESOURCE_EMBEDDIR_SILENCE") {
+        let note = LitStr::new(
+            "jge_core::resource!: 检测到使用 embeddir。\n\
+注意：本 `unused_must_use` 警告是该宏故意触发的提示。\n\
+目录内新增/删除文件不一定会自动触发重新编译/重新展开。\n\
+若你修改了 embeddir 目录的文件集合，请确保触发一次重新编译（例如修改 resources.yaml 或相关源文件，或执行 cargo clean）。\n\
+关闭本提示：在调用点加 #[allow(unused_must_use)]，或设置环境变量 JGE_RESOURCE_EMBEDDIR_SILENCE=1。",
+            proc_macro2::Span::call_site(),
+        );
+        quote! {
+            #[doc(hidden)]
+            #[must_use = #note]
+            struct __JgeResourceEmbeddirRebuildNotice;
+
+            #[doc(hidden)]
+            #[inline(always)]
+            fn __jge_resource_embeddir_rebuild_notice() -> __JgeResourceEmbeddirRebuildNotice {
+                __JgeResourceEmbeddirRebuildNotice
+            }
+
+            // 故意丢弃返回值以触发 unused_must_use warning（并携带自定义文案）。
+            __jge_resource_embeddir_rebuild_notice();
+        }
+    } else {
+        quote! {}
+    };
 
     quote! {{
         use ::anyhow::Context as _;
         #dep_include
+        #embeddir_notice
         #(#register_stmts)*
         ::core::result::Result::<(), ::anyhow::Error>::Ok(())
     }}
@@ -357,6 +576,7 @@ fn parse_root(
     callsite_dir: &PathBuf,
     yaml_dir_for_from: Option<&PathBuf>,
     out: &mut Vec<ResourceEntry>,
+    used_embeddir: &mut bool,
 ) -> Result<(), syn::Error> {
     let Some(seq) = doc.as_sequence() else {
         return Err(syn::Error::new(
@@ -367,7 +587,14 @@ fn parse_root(
 
     let mut prefix = Vec::<String>::new();
     for node in seq {
-        parse_node(node, callsite_dir, yaml_dir_for_from, &mut prefix, out)?;
+        parse_node(
+            node,
+            callsite_dir,
+            yaml_dir_for_from,
+            &mut prefix,
+            out,
+            used_embeddir,
+        )?;
     }
     Ok(())
 }
@@ -378,6 +605,7 @@ fn parse_node(
     yaml_dir_for_from: Option<&PathBuf>,
     prefix: &mut Vec<String>,
     out: &mut Vec<ResourceEntry>,
+    used_embeddir: &mut bool,
 ) -> Result<(), syn::Error> {
     let Some(map) = node.as_mapping() else {
         return Err(syn::Error::new(
@@ -394,7 +622,14 @@ fn parse_node(
                 validate_segment(&dir_name)?;
                 prefix.push(dir_name);
                 for child in children {
-                    parse_node(child, callsite_dir, yaml_dir_for_from, prefix, out)?;
+                    parse_node(
+                        child,
+                        callsite_dir,
+                        yaml_dir_for_from,
+                        prefix,
+                        out,
+                        used_embeddir,
+                    )?;
                 }
                 prefix.pop();
                 return Ok(());
@@ -436,14 +671,16 @@ fn parse_node(
                     return Err(syn::Error::new(
                         proc_macro2::Span::call_site(),
                         format!(
-                            "resource!: 资源类型必须是字符串（embed/fs/txt/bin/dir），但 {key} 的值不是字符串"
+                            "resource!: 资源类型必须是字符串（embed/embeddir/fs/txt/bin/dir），但 {key} 的值不是字符串"
                         ),
                     ));
                 };
                 let Some(kd) = ResourceKind::parse(vs) else {
                     return Err(syn::Error::new(
                         proc_macro2::Span::call_site(),
-                        format!("resource!: 未知资源类型：{vs}（仅支持 embed/fs/txt/bin/dir）"),
+                        format!(
+                            "resource!: 未知资源类型：{vs}（仅支持 embed/embeddir/fs/txt/bin/dir）"
+                        ),
                     ));
                 };
                 validate_segment(&key)?;
@@ -492,6 +729,39 @@ fn parse_node(
                     format!("resource!: {res_name}: {} 不允许 bin 字段", kind.as_str()),
                 ));
             }
+        }
+        ResourceKind::EmbedDir => {
+            *used_embeddir = true;
+            let from_path = from.as_deref().unwrap_or("");
+            if from_path.is_empty() {
+                return Err(syn::Error::new(
+                    proc_macro2::Span::call_site(),
+                    format!("resource!: {res_name}: embeddir 需要 from 字段"),
+                ));
+            }
+            if txt.is_some() {
+                return Err(syn::Error::new(
+                    proc_macro2::Span::call_site(),
+                    format!("resource!: {res_name}: embeddir 不允许 txt 字段"),
+                ));
+            }
+            if bin.is_some() {
+                return Err(syn::Error::new(
+                    proc_macro2::Span::call_site(),
+                    format!("resource!: {res_name}: embeddir 不允许 bin 字段"),
+                ));
+            }
+
+            let entries = expand_embeddir_entries(
+                callsite_dir.as_path(),
+                yaml_dir_for_from,
+                prefix,
+                &res_name,
+                // 注意：这里传的是原始 YAML 字符串；expand_embeddir_entries 内部会按 yaml_dir 规则解析。
+                from_path,
+            )?;
+            out.extend(entries);
+            return Ok(());
         }
         ResourceKind::Txt => {
             if txt.as_deref().unwrap_or("").is_empty() {

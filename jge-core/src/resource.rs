@@ -730,4 +730,41 @@ mod tests {
         std::env::set_current_dir(original_cwd)?;
         test_result
     }
+
+    #[test]
+    fn resource_macro_embeddir_embeds_files_recursively() -> anyhow::Result<()> {
+        crate::resource!("resource_testdata/resources_embeddir.yaml")?;
+
+        let hello = Resource::from(ResourcePath::from("embeddir_test/bundle/hello.txt"))
+            .expect("embeddir file should be registered");
+        {
+            let guard = hello.read();
+            assert!(guard.fs_path.is_none(), "embeddir should embed in memory");
+            let bytes = guard
+                .try_get_data()
+                .expect("embedded resource should be loaded");
+            assert_eq!(bytes.as_slice(), b"hello\n");
+        }
+
+        let world = Resource::from(ResourcePath::from("embeddir_test/bundle/nested/world.txt"))
+            .expect("embeddir nested file should be registered");
+        {
+            let guard = world.read();
+            let bytes = guard
+                .try_get_data()
+                .expect("embedded resource should be loaded");
+            assert_eq!(bytes.as_slice(), b"world\n");
+        }
+
+        assert_eq!(
+            Resource::list_children(ResourcePath::from("embeddir_test/bundle")).unwrap(),
+            vec!["hello.txt".to_string(), "nested".to_string()]
+        );
+        assert_eq!(
+            Resource::list_children(ResourcePath::from("embeddir_test/bundle/nested")).unwrap(),
+            vec!["world.txt".to_string()]
+        );
+
+        Ok(())
+    }
 }
