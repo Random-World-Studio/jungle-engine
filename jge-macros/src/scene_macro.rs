@@ -412,6 +412,10 @@ mod scene_dsl {
         let mut binds: Vec<Ident> = Vec::new();
         let mut counter: usize = 0;
 
+        // (entity, destroy_ops_var) for every node in this scene.
+        // destroy ops are recorded only for *explicitly registered* components in the DSL.
+        let mut destroy_pairs: Vec<(Ident, Ident)> = Vec::new();
+
         collect_binds(&scene.root, &mut binds);
 
         let root_var = format_ident!("__jge_scene_root");
@@ -421,6 +425,7 @@ mod scene_dsl {
             &mut counter,
             &mut create_stmts,
             &mut init_stmts,
+            &mut destroy_pairs,
             &core_crate,
             &entity_ty,
             &node_ty,
@@ -460,11 +465,35 @@ mod scene_dsl {
                 pub struct SceneBindings {
                     pub root: #entity_ty,
                     #(#fields,)*
+                    #[doc(hidden)]
+                    pub __jge_scene_destroy: ::std::vec::Vec<(#entity_ty, ::std::vec::Vec<fn(&#entity_ty)>)>,
                 }
             }
         };
 
         let bindings_ctor_fields = unique_binds.iter().map(|b| quote!(#b: #b));
+
+        let destroy_ctor_items = destroy_pairs
+            .iter()
+            .map(|(entity_var, destroy_var)| quote!((#entity_var, #destroy_var)));
+
+        let bindings_impl = quote! {
+            impl SceneBindings {
+                /// 销毁本次 `scene!` 构建出来的所有实体：
+                ///
+                /// - 语义：对每个实体，按 DSL 中显式声明的 `+ CompExpr;` 列表卸载组件；
+                /// - 依赖：`Entity::unregister_component` 会调用组件的 `unregister_dependencies` 钩子；
+                ///   是否会卸载依赖组件取决于组件实现策略；
+                /// - 幂等：可重复调用，多次调用不会报错。
+                pub fn destroy(&self) {
+                    for (e, ops) in &self.__jge_scene_destroy {
+                        for op in ops {
+                            op(e);
+                        }
+                    }
+                }
+            }
+        };
 
         let progress_prelude = if let Some(tx_ident) = &scene.progress_tx {
             quote! {
@@ -486,6 +515,7 @@ mod scene_dsl {
             async move {
                 use ::anyhow::Context as _;
                 #bindings_struct
+                #bindings_impl
 
                 #progress_prelude
 
@@ -497,6 +527,7 @@ mod scene_dsl {
                 ::core::result::Result::<SceneBindings, ::anyhow::Error>::Ok(SceneBindings {
                     root: #root_var,
                     #(#bindings_ctor_fields,)*
+                    __jge_scene_destroy: ::std::vec![#(#destroy_ctor_items),*],
                 })
             }
         })
@@ -562,6 +593,7 @@ mod scene_dsl {
         counter: &mut usize,
         create_stmts: &mut Vec<proc_macro2::TokenStream>,
         init_stmts: &mut Vec<proc_macro2::TokenStream>,
+        destroy_pairs: &mut Vec<(Ident, Ident)>,
         core_crate: &proc_macro2::TokenStream,
         entity_ty: &proc_macro2::TokenStream,
         node_ty: &proc_macro2::TokenStream,
@@ -580,6 +612,13 @@ mod scene_dsl {
             }
         };
         create_stmts.push(create_stmt);
+
+        // 每个实体一份“显式组件卸载操作”列表。
+        let destroy_var = format_ident!("{}_destroy", out_var);
+        destroy_pairs.push((out_var.clone(), destroy_var.clone()));
+        create_stmts.push(quote_spanned! {span=>
+            let mut #destroy_var: ::std::vec::Vec<fn(&#entity_ty)> = ::std::vec::Vec::new();
+        });
 
         // 可选：as 绑定（这里用“赋值初始化”，允许在创建阶段结束后再使用该名字）
         if let Some(bind) = &node.bind {
@@ -625,6 +664,7 @@ mod scene_dsl {
                         counter,
                         create_stmts,
                         init_stmts,
+                        destroy_pairs,
                         core_crate,
                         entity_ty,
                         node_ty,
@@ -706,12 +746,19 @@ mod scene_dsl {
                         *counter += 1;
                         let comp_tmp = format_ident!("__jge_scene_comp{}", *counter);
                         let apply_fn = format_ident!("__jge_scene_apply_cfg{}", *counter);
+                        let unreg_fn = format_ident!("__jge_scene_unreg_for{}", *counter);
                         if wants_mut_ref {
                             let tick = progress.map(|ctx| progress_tick(ctx, comp_span));
                             init_stmts.push(quote_spanned! {comp_span=>
                                 {
                                     #(#resources)*
                                     let mut #comp_tmp = #comp_expr;
+                                    fn #unreg_fn<C: #core_crate::game::component::Component>(_: &C) -> fn(&#entity_ty) {
+                                        |e: &#entity_ty| {
+                                            let _ = e.unregister_component::<C>();
+                                        }
+                                    }
+                                    #destroy_var.push(#unreg_fn(&#comp_tmp));
                                     fn #apply_fn<C, F>(e: #entity_ty, c: &mut C, f: F) -> ::anyhow::Result<()>
                                     where
                                         F: FnOnce(#entity_ty, &mut C) -> ::anyhow::Result<()>,
@@ -731,6 +778,12 @@ mod scene_dsl {
                                 {
                                     #(#resources)*
                                     let mut #comp_tmp = #comp_expr;
+                                    fn #unreg_fn<C: #core_crate::game::component::Component>(_: &C) -> fn(&#entity_ty) {
+                                        |e: &#entity_ty| {
+                                            let _ = e.unregister_component::<C>();
+                                        }
+                                    }
+                                    #destroy_var.push(#unreg_fn(&#comp_tmp));
                                     fn #apply_fn<C, F>(e: #entity_ty, c: &C, f: F) -> ::anyhow::Result<()>
                                     where
                                         F: FnOnce(#entity_ty, &C) -> ::anyhow::Result<()>,
@@ -747,10 +800,20 @@ mod scene_dsl {
                         }
                     } else {
                         let tick = progress.map(|ctx| progress_tick(ctx, comp_span));
+                        *counter += 1;
+                        let comp_tmp = format_ident!("__jge_scene_comp{}", *counter);
+                        let unreg_fn = format_ident!("__jge_scene_unreg_for{}", *counter);
                         init_stmts.push(quote_spanned! {comp_span=>
                             {
+                                let #comp_tmp = #comp_expr;
+                                fn #unreg_fn<C: #core_crate::game::component::Component>(_: &C) -> fn(&#entity_ty) {
+                                    |e: &#entity_ty| {
+                                        let _ = e.unregister_component::<C>();
+                                    }
+                                }
+                                #destroy_var.push(#unreg_fn(&#comp_tmp));
                                 let _ = #out_var
-                                    .register_component(#comp_expr)
+                                    .register_component(#comp_tmp)
                                     .with_context(|| format!("scene!: 注册组件失败：{}", stringify!(#comp_expr)))?;
                                 #tick
                             }
@@ -829,12 +892,20 @@ pub fn expand_scene(input: TokenStream) -> TokenStream {
             return quote! {
                 async move {
                     ::core::result::Result::<_, ::anyhow::Error>::Ok({
-                        struct __SceneBindings {
+                        struct SceneBindings {
                             pub root: ::jge_core::game::entity::Entity,
+                            #[doc(hidden)]
+                            pub __jge_scene_destroy: ::std::vec::Vec<(::jge_core::game::entity::Entity, ::std::vec::Vec<fn(&::jge_core::game::entity::Entity)>)>,
                         }
-                        __SceneBindings {
+                        impl SceneBindings {
+                            pub fn destroy(&self) {
+                                // rust-analyzer placeholder: no-op
+                            }
+                        }
+                        SceneBindings {
                             root: ::jge_core::game::entity::Entity::new()
                                 .expect("scene!: rust-analyzer placeholder should create entity"),
+                            __jge_scene_destroy: ::std::vec::Vec::new(),
                         }
                     })
                 }

@@ -181,6 +181,14 @@ cargo run
 > - `as ident` 绑定是“先收集并填充”的，因此你可以在任意位置引用同一个 `scene!` 块里导出的实体名（包括前向引用）。
 > - 节点树的 `attach` 会在宏的最后阶段集中完成：在 `with(...) { ... }` 等初始化块内，`Node::parent/children` 关系尚未建立。
 
+### （可选）销毁场景：`SceneBindings::destroy()`
+
+`scene!` 返回的 `SceneBindings` 绑定集会额外提供一个 `destroy()` 方法，用于销毁本次构建出来的场景。
+
+- 销毁的定义：对场景中每个实体，卸载你在 DSL 中显式注册的组件（也就是 `+ CompExpr;` 那些）。
+- 依赖关系：`Entity::unregister_component` 会调用组件的 `unregister_dependencies` 钩子。
+- 幂等：重复调用 `destroy()` 不会报错。
+
 ### （可选）构造进度上报：`progress tx;`
 
 当场景比较大时，你可能希望在构造期间汇报进度（例如加载关卡、生成复杂几何、批量注册组件）。

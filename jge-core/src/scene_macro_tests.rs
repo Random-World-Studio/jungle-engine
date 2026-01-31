@@ -1,6 +1,8 @@
 use anyhow::Context as _;
 
 use crate::game::component::node::Node;
+use crate::game::component::renderable::Renderable;
+use crate::game::component::transform::Transform;
 
 #[tokio::test]
 async fn scene_macro_allows_forward_reference_to_as_binding_and_preserves_child_order()
@@ -69,5 +71,60 @@ async fn scene_macro_can_report_progress() -> anyhow::Result<()> {
         values.windows(2).all(|w| w[0] <= w[1]),
         "progress 必须单调不减"
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn scene_macro_bindings_destroy_unregisters_explicit_components() -> anyhow::Result<()> {
+    let bindings = crate::scene! {
+        node "root" {
+            + Transform::new();
+        }
+    }
+    .await?;
+
+    assert!(
+        bindings.root.get_component::<Transform>().is_some(),
+        "Transform 应已注册"
+    );
+    bindings.destroy();
+
+    assert!(
+        bindings.root.get_component::<Transform>().is_none(),
+        "destroy() 后 Transform 应被卸载"
+    );
+    // 幂等：重复 destroy 不应出错。
+    bindings.destroy();
+    Ok(())
+}
+
+#[tokio::test]
+async fn scene_macro_bindings_destroy_unregisters_components_for_all_entities() -> anyhow::Result<()>
+{
+    let bindings = crate::scene! {
+        node "root" {
+            + Renderable::new();
+            node "child" as child {
+                + Transform::new();
+                + Renderable::new();
+            }
+        }
+    }
+    .await?;
+
+    assert!(bindings.root.get_component::<Renderable>().is_some());
+    assert!(bindings.root.get_component::<Transform>().is_none());
+    assert!(bindings.child.get_component::<Transform>().is_some());
+    assert!(bindings.child.get_component::<Renderable>().is_some());
+
+    bindings.destroy();
+
+    assert!(bindings.root.get_component::<Renderable>().is_none());
+    assert!(bindings.child.get_component::<Transform>().is_none());
+    assert!(bindings.child.get_component::<Renderable>().is_none());
+
+    // destroy() 不应影响默认 Node 的存在（实体句柄仍有效）。
+    assert!(bindings.root.get_component::<Node>().is_some());
+    assert!(bindings.child.get_component::<Node>().is_some());
     Ok(())
 }

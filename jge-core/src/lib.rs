@@ -87,6 +87,14 @@ pub use game::Game;
 /// # }
 /// ```
 ///
+/// ## 销毁语义：`SceneBindings::destroy()`
+///
+/// `scene!` 返回的 `SceneBindings` 提供 `destroy()` 方法，用于销毁本次构建出来的场景。
+///
+/// - `destroy()` 会对场景中每个实体，卸载 DSL 中显式声明的 `+ CompExpr;` 组件。
+/// - 依赖关系：[`game::entity::Entity::unregister_component`] 会调用组件的 `unregister_dependencies` 钩子。
+/// - 幂等：重复调用 `destroy()` 不会报错。
+///
 /// # 示例
 ///
 /// ```no_run

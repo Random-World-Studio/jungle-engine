@@ -37,6 +37,14 @@ impl std::fmt::Display for EntityId {
 /// - [`Entity::new`](Self::new) 创建实体时，会自动注册一个 [`Node`]。
 ///   这让实体可以加入节点树（父子层级、Layer 子树遍历等）。
 ///
+/// ## 销毁语义（推荐约定）
+///
+/// 在 Jungle Engine 中，`Entity` 是一个轻量句柄；“销毁实体”通常指把它上面**显式注册**的组件卸载掉。
+///
+/// - 你只需要对每个显式组件调用 [`Entity::unregister_component`](Self::unregister_component)。
+/// - 依赖关系：`unregister_component` 在卸载成功后会调用组件的 `unregister_dependencies` 钩子；
+///   具体是否会卸载依赖组件，取决于组件的实现策略。
+///
 /// # 示例
 ///
 /// ```no_run
