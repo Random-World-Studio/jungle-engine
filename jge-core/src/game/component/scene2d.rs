@@ -350,9 +350,15 @@ impl Scene2D {
         layer: &Layer,
         renderables: &[LayerRenderableBundle],
     ) -> Result<Vec<Scene2DFaceGroup>, Scene2DVisibilityError> {
-        let chunks = self.chunk_positions(layer);
+        // Scene2D 过去依赖 Layer 的 LOD（chunk_positions）来进行分组/加速。
+        // 但如果调用方忘记 warmup/step_lod，就会出现“没有可见 draw”的空结果。
+        //
+        // 与 Scene3D 的行为保持一致：默认不要求调用方先准备 LOD。
+        // 当 Layer 没有任何激活 chunk 时，我们退化为“单 chunk（root）”模式，
+        // 让 Scene2D 仍能产出可见面集合（只是少了 chunk 级别的分组优化）。
+        let mut chunks = self.chunk_positions(layer);
         if chunks.is_empty() {
-            return Ok(Vec::new());
+            chunks.push(OctVec::root());
         }
 
         let mut chunk_index = BTreeMap::new();
@@ -885,6 +891,41 @@ mod tests {
             "推进 LOD 后应至少激活根节点"
         );
         drop(layer);
+    }
+
+    #[tokio::test]
+    async fn visible_faces_no_longer_requires_lod_warmup() {
+        let root = Entity::new().expect("应能创建根实体");
+        register_layer_scene(root).await;
+
+        let child = Entity::new().expect("应能创建子实体");
+        let triangle = [
+            Vector3::new(-0.2, -0.2, 0.2),
+            Vector3::new(0.2, -0.2, 0.2),
+            Vector3::new(0.0, 0.2, 0.2),
+        ];
+        register_shape(child, &[triangle], Vector3::zeros()).await;
+        attach_node(child, root, "应能挂载子实体").await;
+
+        let visible = {
+            let scene = root
+                .get_component::<Scene2D>()
+                .expect("根节点应挂载 Scene2D");
+            scene.visible_faces().expect("应能收集可见面片")
+        };
+
+        assert_eq!(visible.len(), 1, "未 warmup 时也应能产出可见面组");
+        assert_eq!(visible[0].faces().len(), 1);
+        assert_eq!(visible[0].faces()[0], triangle);
+
+        detach_node(child).await;
+        let _ = Scene2D::remove(root);
+        let _ = Layer::remove(root);
+        let _ = Renderable::remove(root);
+
+        let _ = Shape::remove(child);
+        let _ = Transform::remove(child);
+        let _ = Renderable::remove(child);
     }
 
     async fn register_shape(

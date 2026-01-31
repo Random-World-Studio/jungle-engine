@@ -398,16 +398,9 @@ async fn build_demo_scene() -> anyhow::Result<Entity> {
             // UI Layer：在屏幕左上角显示带阴影的文字。
             node "HUD" as ui_layer {
                 + Layer::new();
-                + Scene2D::new() => |e, mut scene| -> anyhow::Result<()> {
+                + Scene2D::new() => |_, mut scene| -> anyhow::Result<()> {
                     // 让 1 世界单位 = 1 像素，方便用像素尺寸摆放 UI。
                     scene.set_pixels_per_unit(1.0);
-
-                    // Scene2D 的可见性查询依赖 Layer 的 LOD（chunk_positions）。
-                    // UI Layer 做一次 warmup，避免出现 "no visible draws"。
-                    let Some(mut layer) = e.get_component_mut::<Layer>() else {
-                        anyhow::bail!("UI Layer 缺少 Layer 组件")
-                    };
-                    let _ = scene.warmup_lod(&mut layer);
                     Ok(())
                 };
 
