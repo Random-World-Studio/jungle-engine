@@ -26,8 +26,6 @@ use tracing::{trace, warn};
 ///
 /// 通常由 [`crate::Game`] 在窗口创建后内部构造并持有。
 pub struct GameWindow {
-    pub(crate) window: Arc<Mutex<Window>>,
-
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -35,6 +33,8 @@ pub struct GameWindow {
     size: PhysicalSize<u32>,
     size_changed: bool,
     renderer: RenderSystem,
+
+    pub(crate) window: Arc<Mutex<Window>>,
 }
 
 impl GameWindow {
@@ -127,7 +127,6 @@ impl GameWindow {
         surface.configure(&device, &surf_config);
 
         Ok(Self {
-            window,
             surface,
             device,
             queue,
@@ -135,6 +134,7 @@ impl GameWindow {
             size,
             size_changed: false,
             renderer: RenderSystem::new(),
+            window,
         })
     }
 
