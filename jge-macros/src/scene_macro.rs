@@ -514,6 +514,76 @@ mod scene_dsl {
         Ok(quote! {
             async move {
                 use ::anyhow::Context as _;
+
+                #[allow(unused_macros)]
+                macro_rules! __jge_scene_log_err {
+                    (
+                        $phase:expr,
+                        $node:expr,
+                        $entity_id:expr,
+                        $parent_id:expr,
+                        $child_id:expr,
+                        $component:expr,
+                        $resource_expr:expr,
+                        $resource_path:expr,
+                        $message:expr,
+                        $res:expr
+                    ) => {
+                        __jge_scene_log_err!(
+                            $phase,
+                            $node,
+                            ::core::option::Option::None::<#core_crate::game::entity::Entity>,
+                            $entity_id,
+                            $parent_id,
+                            $child_id,
+                            $component,
+                            $resource_expr,
+                            $resource_path,
+                            $message,
+                            $res
+                        )
+                    };
+
+                    (
+                        $phase:expr,
+                        $node:expr,
+                        $entity_for_name:expr,
+                        $entity_id:expr,
+                        $parent_id:expr,
+                        $child_id:expr,
+                        $component:expr,
+                        $resource_expr:expr,
+                        $resource_path:expr,
+                        $message:expr,
+                        $res:expr
+                    ) => {
+                        ($res).map_err(|__e| {
+                            let __node_name: ::core::option::Option<::std::string::String> = match $entity_for_name {
+                                ::core::option::Option::Some(__e2) => __e2
+                                    .get_component::<#core_crate::game::component::node::Node>()
+                                    .map(|n| n.name().to_string()),
+                                ::core::option::Option::None => ::core::option::Option::None,
+                            };
+                            #core_crate::logger::__scene_log_error(
+                                $phase,
+                                $node,
+                                __node_name,
+                                $entity_id,
+                                $parent_id,
+                                $child_id,
+                                $component,
+                                $resource_expr,
+                                $resource_path,
+                                file!(),
+                                line!(),
+                                column!(),
+                                $message,
+                                &__e,
+                            );
+                            __e
+                        })
+                    };
+                }
                 #bindings_struct
                 #bindings_impl
 
@@ -600,18 +670,62 @@ mod scene_dsl {
         progress: Option<&ProgressCtx>,
     ) -> syn::Result<proc_macro2::TokenStream> {
         let span = node.span;
+
+        let node_ctx_var = format_ident!("{}_scene_ctx", out_var);
+        let mut ctx_parts: Vec<proc_macro2::TokenStream> = Vec::new();
+        ctx_parts.push(quote!("var="));
+        ctx_parts.push(quote!(stringify!(#out_var)));
+        if let Some(bind) = &node.bind {
+            ctx_parts.push(quote!(", as="));
+            ctx_parts.push(quote!(stringify!(#bind)));
+        }
+        if let Some(name_expr) = &node.name {
+            ctx_parts.push(quote!(", name_expr="));
+            ctx_parts.push(quote!(stringify!(#name_expr)));
+        }
+        if let Some(id_expr) = &node.id {
+            ctx_parts.push(quote!(", id_expr="));
+            ctx_parts.push(quote!(stringify!(#id_expr)));
+        }
+        let node_ctx_expr = quote!(concat!(#(#ctx_parts),*));
+
         let create_stmt = if let Some(id_expr) = &node.id {
             quote_spanned! {span=>
-                let #out_var: #entity_ty = #core_crate::game::entity::Entity::new_with_id(#id_expr)
-                    .with_context(|| "scene!: 创建实体失败")?;
+                let #out_var: #entity_ty = __jge_scene_log_err!(
+                    "create_entity",
+                    #node_ctx_expr,
+                    ::core::option::Option::None,
+                    ::core::option::Option::None,
+                    ::core::option::Option::None,
+                    ::core::option::Option::None,
+                    ::core::option::Option::None,
+                    ::core::option::Option::None::<&#core_crate::resource::ResourcePath>,
+                    "scene!: 创建实体失败",
+                    #core_crate::game::entity::Entity::new_with_id(#id_expr)
+                        .with_context(|| "scene!: 创建实体失败")
+                )?;
             }
         } else {
             quote_spanned! {span=>
-                let #out_var: #entity_ty = #core_crate::game::entity::Entity::new()
-                    .with_context(|| "scene!: 创建实体失败")?;
+                let #out_var: #entity_ty = __jge_scene_log_err!(
+                    "create_entity",
+                    #node_ctx_expr,
+                    ::core::option::Option::None,
+                    ::core::option::Option::None,
+                    ::core::option::Option::None,
+                    ::core::option::Option::None,
+                    ::core::option::Option::None,
+                    ::core::option::Option::None::<&#core_crate::resource::ResourcePath>,
+                    "scene!: 创建实体失败",
+                    #core_crate::game::entity::Entity::new().with_context(|| "scene!: 创建实体失败")
+                )?;
             }
         };
         create_stmts.push(create_stmt);
+
+        create_stmts.push(quote_spanned! {span=>
+            let #node_ctx_var: &'static str = #node_ctx_expr;
+        });
 
         // 每个实体一份“显式组件卸载操作”列表。
         let destroy_var = format_ident!("{}_destroy", out_var);
@@ -637,12 +751,36 @@ mod scene_dsl {
             let tick = progress.map(|ctx| progress_tick(ctx, span));
             init_stmts.push(quote_spanned! {span=>
                 {
-                    let mut __node = #out_var
-                        .get_component_mut::<#node_ty>()
-                        .with_context(|| "scene!: 实体缺少 Node 组件（无法设置名称）")?;
-                    __node
-                        .set_name(#name_expr)
-                        .with_context(|| "scene!: 设置 Node 名称失败")?;
+                    let mut __node = __jge_scene_log_err!(
+                        "set_name_get_node",
+                        #node_ctx_var,
+                        ::core::option::Option::Some(#out_var),
+                        ::core::option::Option::Some(#out_var.id()),
+                        ::core::option::Option::None,
+                        ::core::option::Option::None,
+                        ::core::option::Option::None,
+                        ::core::option::Option::None,
+                        ::core::option::Option::None::<&#core_crate::resource::ResourcePath>,
+                        "scene!: 实体缺少 Node 组件（无法设置名称）",
+                        #out_var
+                            .get_component_mut::<#node_ty>()
+                            .with_context(|| "scene!: 实体缺少 Node 组件（无法设置名称）")
+                    )?;
+                    __jge_scene_log_err!(
+                        "set_name",
+                        #node_ctx_var,
+                        ::core::option::Option::Some(#out_var),
+                        ::core::option::Option::Some(#out_var.id()),
+                        ::core::option::Option::None,
+                        ::core::option::Option::None,
+                        ::core::option::Option::None,
+                        ::core::option::Option::None,
+                        ::core::option::Option::None::<&#core_crate::resource::ResourcePath>,
+                        "scene!: 设置 Node 名称失败",
+                        __node
+                            .set_name(#name_expr)
+                            .with_context(|| "scene!: 设置 Node 名称失败")
+                    )?;
                     #tick
                 }
             });
@@ -685,16 +823,44 @@ mod scene_dsl {
 
                         if b.is_mut {
                             quote_spanned! {with_span=>
-                                let mut #guard = e
-                                    .get_component_mut::<#ty>()
-                                    .with_context(|| format!("scene!: with 缺少组件：{}", stringify!(#ty)))?;
+                                let mut #guard = __jge_scene_log_err!(
+                                    "with_bind",
+                                    #node_ctx_var,
+                                    ::core::option::Option::Some(e),
+                                    ::core::option::Option::Some(e.id()),
+                                    ::core::option::Option::None,
+                                    ::core::option::Option::None,
+                                    ::core::option::Option::Some(stringify!(#ty)),
+                                    ::core::option::Option::None,
+                                    ::core::option::Option::None::<&#core_crate::resource::ResourcePath>,
+                                    "scene!: with 缺少组件",
+                                    e.get_component_mut::<#ty>()
+                                        .with_context(|| format!(
+                                            "scene!: with 缺少组件：{}",
+                                            stringify!(#ty)
+                                        ))
+                                )?;
                                 let #name: &mut #ty = &mut *#guard;
                             }
                         } else {
                             quote_spanned! {with_span=>
-                                let #guard = e
-                                    .get_component::<#ty>()
-                                    .with_context(|| format!("scene!: with 缺少组件：{}", stringify!(#ty)))?;
+                                let #guard = __jge_scene_log_err!(
+                                    "with_bind",
+                                    #node_ctx_var,
+                                    ::core::option::Option::Some(e),
+                                    ::core::option::Option::Some(e.id()),
+                                    ::core::option::Option::None,
+                                    ::core::option::Option::None,
+                                    ::core::option::Option::Some(stringify!(#ty)),
+                                    ::core::option::Option::None,
+                                    ::core::option::Option::None::<&#core_crate::resource::ResourcePath>,
+                                    "scene!: with 缺少组件",
+                                    e.get_component::<#ty>()
+                                        .with_context(|| format!(
+                                            "scene!: with 缺少组件：{}",
+                                            stringify!(#ty)
+                                        ))
+                                )?;
                                 let #name: &#ty = &*#guard;
                             }
                         }
@@ -705,7 +871,19 @@ mod scene_dsl {
                             let e: #entity_ty = #out_var;
                             let _ = e;
                             #(#binding_stmts)*
-                            (|| -> ::anyhow::Result<()> #block)()?;
+                            __jge_scene_log_err!(
+                                "with_block",
+                                #node_ctx_var,
+                                ::core::option::Option::Some(e),
+                                ::core::option::Option::Some(e.id()),
+                                ::core::option::Option::None,
+                                ::core::option::Option::None,
+                                ::core::option::Option::None,
+                                ::core::option::Option::None,
+                                ::core::option::Option::None::<&#core_crate::resource::ResourcePath>,
+                                "scene!: with 块执行失败",
+                                (|| -> ::anyhow::Result<()> #block)()
+                            )?;
                             #tick
                         }
                     });
@@ -720,7 +898,31 @@ mod scene_dsl {
                                 let #name = {
                                     let __path: #core_crate::resource::ResourcePath = (#path_expr).into();
                                     #core_crate::resource::Resource::from(__path)
-                                        .ok_or_else(|| ::anyhow::anyhow!("scene!: 资源未注册：{}", stringify!(#path_expr)))?
+                                        .ok_or_else(|| {
+                                            let __e = ::anyhow::anyhow!(
+                                                "scene!: 资源未注册：{}",
+                                                stringify!(#path_expr)
+                                            );
+                                            #core_crate::logger::__scene_log_error(
+                                                "resource_lookup",
+                                                #node_ctx_var,
+                                                #out_var
+                                                    .get_component::<#node_ty>()
+                                                    .map(|n| n.name().to_string()),
+                                                ::core::option::Option::Some(#out_var.id()),
+                                                ::core::option::Option::None,
+                                                ::core::option::Option::None,
+                                                ::core::option::Option::Some(stringify!(#comp_expr)),
+                                                ::core::option::Option::Some(stringify!(#path_expr)),
+                                                ::core::option::Option::Some(&__path),
+                                                file!(),
+                                                line!(),
+                                                column!(),
+                                                "scene!: 资源未注册",
+                                                &__e,
+                                            );
+                                            __e
+                                        })?
                                 };
                             }
                         });
@@ -765,10 +967,37 @@ mod scene_dsl {
                                     {
                                         f(e, c)
                                     }
-                                    #apply_fn(#out_var, &mut #comp_tmp, #closure_for_call)?;
-                                    let _ = #out_var
-                                        .register_component(#comp_tmp)
-                                        .with_context(|| format!("scene!: 注册组件失败：{}", stringify!(#comp_expr)))?;
+                                    __jge_scene_log_err!(
+                                        "component_config",
+                                        #node_ctx_var,
+                                        ::core::option::Option::Some(#out_var),
+                                        ::core::option::Option::Some(#out_var.id()),
+                                        ::core::option::Option::None,
+                                        ::core::option::Option::None,
+                                        ::core::option::Option::Some(stringify!(#comp_expr)),
+                                        ::core::option::Option::None,
+                                        ::core::option::Option::None::<&#core_crate::resource::ResourcePath>,
+                                        "scene!: 组件配置执行失败",
+                                        #apply_fn(#out_var, &mut #comp_tmp, #closure_for_call)
+                                    )?;
+                                    let _ = __jge_scene_log_err!(
+                                        "register_component",
+                                        #node_ctx_var,
+                                        ::core::option::Option::Some(#out_var),
+                                        ::core::option::Option::Some(#out_var.id()),
+                                        ::core::option::Option::None,
+                                        ::core::option::Option::None,
+                                        ::core::option::Option::Some(stringify!(#comp_expr)),
+                                        ::core::option::Option::None,
+                                        ::core::option::Option::None::<&#core_crate::resource::ResourcePath>,
+                                        "scene!: 注册组件失败",
+                                        #out_var
+                                            .register_component(#comp_tmp)
+                                            .with_context(|| format!(
+                                                "scene!: 注册组件失败：{}",
+                                                stringify!(#comp_expr)
+                                            ))
+                                    )?;
                                     #tick
                                 }
                             });
@@ -790,10 +1019,37 @@ mod scene_dsl {
                                     {
                                         f(e, c)
                                     }
-                                    #apply_fn(#out_var, &#comp_tmp, #closure_for_call)?;
-                                    let _ = #out_var
-                                        .register_component(#comp_tmp)
-                                        .with_context(|| format!("scene!: 注册组件失败：{}", stringify!(#comp_expr)))?;
+                                    __jge_scene_log_err!(
+                                        "component_config",
+                                        #node_ctx_var,
+                                        ::core::option::Option::Some(#out_var),
+                                        ::core::option::Option::Some(#out_var.id()),
+                                        ::core::option::Option::None,
+                                        ::core::option::Option::None,
+                                        ::core::option::Option::Some(stringify!(#comp_expr)),
+                                        ::core::option::Option::None,
+                                        ::core::option::Option::None::<&#core_crate::resource::ResourcePath>,
+                                        "scene!: 组件配置执行失败",
+                                        #apply_fn(#out_var, &#comp_tmp, #closure_for_call)
+                                    )?;
+                                    let _ = __jge_scene_log_err!(
+                                        "register_component",
+                                        #node_ctx_var,
+                                        ::core::option::Option::Some(#out_var),
+                                        ::core::option::Option::Some(#out_var.id()),
+                                        ::core::option::Option::None,
+                                        ::core::option::Option::None,
+                                        ::core::option::Option::Some(stringify!(#comp_expr)),
+                                        ::core::option::Option::None,
+                                        ::core::option::Option::None::<&#core_crate::resource::ResourcePath>,
+                                        "scene!: 注册组件失败",
+                                        #out_var
+                                            .register_component(#comp_tmp)
+                                            .with_context(|| format!(
+                                                "scene!: 注册组件失败：{}",
+                                                stringify!(#comp_expr)
+                                            ))
+                                    )?;
                                     #tick
                                 }
                             });
@@ -812,9 +1068,24 @@ mod scene_dsl {
                                     }
                                 }
                                 #destroy_var.push(#unreg_fn(&#comp_tmp));
-                                let _ = #out_var
-                                    .register_component(#comp_tmp)
-                                    .with_context(|| format!("scene!: 注册组件失败：{}", stringify!(#comp_expr)))?;
+                                let _ = __jge_scene_log_err!(
+                                    "register_component",
+                                    #node_ctx_var,
+                                    ::core::option::Option::Some(#out_var),
+                                    ::core::option::Option::Some(#out_var.id()),
+                                    ::core::option::Option::None,
+                                    ::core::option::Option::None,
+                                    ::core::option::Option::Some(stringify!(#comp_expr)),
+                                    ::core::option::Option::None,
+                                    ::core::option::Option::None::<&#core_crate::resource::ResourcePath>,
+                                    "scene!: 注册组件失败",
+                                    #out_var
+                                        .register_component(#comp_tmp)
+                                        .with_context(|| format!(
+                                            "scene!: 注册组件失败：{}",
+                                            stringify!(#comp_expr)
+                                        ))
+                                )?;
                                 #tick
                             }
                         });
@@ -827,9 +1098,21 @@ mod scene_dsl {
                     init_stmts.push(quote_spanned! {logic_span=>
                         {
                             let __set_logic_future = {
-                                let mut __node = #out_var
-                                    .get_component_mut::<#node_ty>()
-                                    .with_context(|| "scene!: 实体缺少 Node 组件（无法挂载 GameLogic）")?;
+                                let mut __node = __jge_scene_log_err!(
+                                    "set_logic_get_node",
+                                    #node_ctx_var,
+                                    ::core::option::Option::Some(#out_var),
+                                    ::core::option::Option::Some(#out_var.id()),
+                                    ::core::option::Option::None,
+                                    ::core::option::Option::None,
+                                    ::core::option::Option::None,
+                                    ::core::option::Option::None,
+                                    ::core::option::Option::None::<&#core_crate::resource::ResourcePath>,
+                                    "scene!: 实体缺少 Node 组件（无法挂载 GameLogic）",
+                                    #out_var
+                                        .get_component_mut::<#node_ty>()
+                                        .with_context(|| "scene!: 实体缺少 Node 组件（无法挂载 GameLogic）")
+                                )?;
                                 __node.set_logic(#logic_expr)
                             };
                             __set_logic_future.await;
@@ -848,14 +1131,36 @@ mod scene_dsl {
             quote_spanned! {child_span=>
                 {
                     let __attach_future = {
-                        let mut __parent_node = #out_var
-                            .get_component_mut::<#node_ty>()
-                            .with_context(|| "scene!: 父节点缺少 Node 组件（无法挂载子节点）")?;
+                        let mut __parent_node = __jge_scene_log_err!(
+                            "attach_get_parent_node",
+                            #node_ctx_var,
+                            ::core::option::Option::Some(#out_var),
+                            ::core::option::Option::Some(#out_var.id()),
+                            ::core::option::Option::Some(#out_var.id()),
+                            ::core::option::Option::Some(#child_var.id()),
+                            ::core::option::Option::None,
+                            ::core::option::Option::None,
+                            ::core::option::Option::None::<&#core_crate::resource::ResourcePath>,
+                            "scene!: 父节点缺少 Node 组件（无法挂载子节点）",
+                            #out_var
+                                .get_component_mut::<#node_ty>()
+                                .with_context(|| "scene!: 父节点缺少 Node 组件（无法挂载子节点）")
+                        )?;
                         __parent_node.attach(#child_var)
                     };
-                    __attach_future
-                        .await
-                        .with_context(|| "scene!: 挂载子节点失败")?;
+                    __jge_scene_log_err!(
+                        "attach_child",
+                        #node_ctx_var,
+                        ::core::option::Option::Some(#out_var),
+                        ::core::option::Option::Some(#out_var.id()),
+                        ::core::option::Option::Some(#out_var.id()),
+                        ::core::option::Option::Some(#child_var.id()),
+                        ::core::option::Option::None,
+                        ::core::option::Option::None,
+                        ::core::option::Option::None::<&#core_crate::resource::ResourcePath>,
+                        "scene!: 挂载子节点失败",
+                        __attach_future.await.with_context(|| "scene!: 挂载子节点失败")
+                    )?;
                     #tick
                 }
             }

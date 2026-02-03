@@ -95,6 +95,42 @@ pub fn init() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[doc(hidden)]
+pub fn __scene_log_error(
+    phase: &'static str,
+    node: &'static str,
+    node_name: Option<String>,
+    entity_id: Option<crate::game::entity::EntityId>,
+    parent_id: Option<crate::game::entity::EntityId>,
+    child_id: Option<crate::game::entity::EntityId>,
+    component: Option<&'static str>,
+    resource_expr: Option<&'static str>,
+    resource_path: Option<&crate::resource::ResourcePath>,
+    file: &'static str,
+    line: u32,
+    column: u32,
+    message: &'static str,
+    err: &anyhow::Error,
+) {
+    tracing::error!(
+        target: "jge-scene",
+        phase = phase,
+        node = node,
+        node_name = ?node_name,
+        entity_id = ?entity_id,
+        parent_id = ?parent_id,
+        child_id = ?child_id,
+        component = ?component,
+        resource_expr = ?resource_expr,
+        resource_path = ?resource_path,
+        file = file,
+        line = line,
+        column = column,
+        error = ?err,
+        "{message}"
+    );
+}
+
 fn format_short_backtrace() -> String {
     let bt = backtrace::Backtrace::new();
     let mut out = String::from("stack backtrace:\n");
