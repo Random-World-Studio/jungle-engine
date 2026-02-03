@@ -49,7 +49,7 @@ enum MouseInputMode {
 
 #[derive(Debug)]
 struct MouseState {
-    window: Option<Arc<winit::window::Window>>,
+    window: Option<Arc<tokio::sync::Mutex<winit::window::Window>>>,
     mode: MouseInputMode,
     ignore_next_cursor_moved: bool,
 }
@@ -77,39 +77,56 @@ fn main() -> anyhow::Result<()> {
                 return;
             };
 
-            let mut state = mouse_state_for_init
-                .lock()
-                .expect("mouse state mutex poisoned");
-            state.window = Some(Arc::clone(&window));
+            // 先保存 window Arc（供事件映射器使用）。
+            {
+                let mut state = mouse_state_for_init
+                    .lock()
+                    .expect("mouse state mutex poisoned");
+                state.window = Some(Arc::clone(&window));
+            }
 
             // Wayland 下 set_cursor_position 仅在 Locked 时可用；同时“允许移动+回中法”也经常受限。
             // 优先采用：抓取光标 + 隐藏光标 + 使用 DeviceEvent::MouseMotion 获取相对 delta。
             // 如果 Locked 失败，则退化为“CursorMoved + 每次移动后回中”方案，避免光标到边缘后没法继续转向。
-            match window.set_cursor_grab(CursorGrabMode::Locked) {
-                Ok(()) => {
-                    state.mode = MouseInputMode::LockedRelative;
-                }
-                Err(err) => {
-                    warn!(target = "jge-demo", error = %err, "cursor grab (locked) failed, fallback to recenter mode");
-                    state.mode = MouseInputMode::Recenter;
-                    // 先确保不处于抓取状态，保持“允许鼠标移动”的语义。
-                    let _ = window.set_cursor_grab(CursorGrabMode::None);
+            let (mode, ignore_next_cursor_moved) = game.block_on(async {
+                let window = window.lock().await;
+                match window.set_cursor_grab(CursorGrabMode::Locked) {
+                    Ok(()) => (MouseInputMode::LockedRelative, false),
+                    Err(err) => {
+                        warn!(target = "jge-demo", error = %err, "cursor grab (locked) failed, fallback to recenter mode");
+                        // 先确保不处于抓取状态，保持“允许鼠标移动”的语义。
+                        let _ = window.set_cursor_grab(CursorGrabMode::None);
 
-                    // 尝试将鼠标放到窗口中心，后续每次移动事件也会继续回中。
-                    let size = window.inner_size();
-                    if size.width > 0 && size.height > 0 {
-                        let center_x = (size.width as f64) * 0.5;
-                        let center_y = (size.height as f64) * 0.5;
-                        if window
-                            .set_cursor_position(PhysicalPosition::new(center_x, center_y))
-                            .is_ok()
-                        {
-                            state.ignore_next_cursor_moved = true;
+                        // 尝试将鼠标放到窗口中心，后续每次移动事件也会继续回中。
+                        let mut ignore = false;
+                        let size = window.inner_size();
+                        if size.width > 0 && size.height > 0 {
+                            let center_x = (size.width as f64) * 0.5;
+                            let center_y = (size.height as f64) * 0.5;
+                            if window
+                                .set_cursor_position(PhysicalPosition::new(center_x, center_y))
+                                .is_ok()
+                            {
+                                ignore = true;
+                            }
                         }
+                        (MouseInputMode::Recenter, ignore)
                     }
                 }
+            });
+
+            {
+                let mut state = mouse_state_for_init
+                    .lock()
+                    .expect("mouse state mutex poisoned");
+                state.mode = mode;
+                state.ignore_next_cursor_moved = ignore_next_cursor_moved;
             }
-            window.set_cursor_visible(false);
+
+            game.block_on(async {
+                let window = window.lock().await;
+                window.set_cursor_visible(false);
+            });
         })
         .with_event_mapper(split_event_mapper(
             move |event: &WindowEvent| match event {
@@ -124,14 +141,27 @@ fn main() -> anyhow::Result<()> {
                     Some(Event::custom(InputEvent::MouseWheel { steps }))
                 }
                 WindowEvent::CursorMoved { position, .. } => {
-                    let mut state = mouse_state_for_window
-                        .lock()
-                        .expect("mouse state mutex poisoned");
-                    if state.mode != MouseInputMode::Recenter {
-                        return None;
-                    }
+                    let window = {
+                        let mut state = mouse_state_for_window
+                            .lock()
+                            .expect("mouse state mutex poisoned");
+                        if state.mode != MouseInputMode::Recenter {
+                            return None;
+                        }
 
-                    let Some(window) = state.window.clone() else {
+                        if state.ignore_next_cursor_moved {
+                            state.ignore_next_cursor_moved = false;
+                            return None;
+                        }
+
+                        let Some(window) = state.window.clone() else {
+                            return None;
+                        };
+                        window
+                    };
+
+                    // 同步事件回调里无法 await；这里用 try_lock，若当前持锁则直接丢弃本次事件。
+                    let Ok(window) = window.try_lock() else {
                         return None;
                     };
 
@@ -143,13 +173,6 @@ fn main() -> anyhow::Result<()> {
                     let center_x = (size.width as f64) * 0.5;
                     let center_y = (size.height as f64) * 0.5;
 
-                    if state.ignore_next_cursor_moved {
-                        // 我们主动 set_cursor_position 会触发一次 CursorMoved（到中心）。
-                        // 这次事件不应产生视角旋转。
-                        state.ignore_next_cursor_moved = false;
-                        return None;
-                    }
-
                     let dx = (position.x - center_x) as f32;
                     let dy = (position.y - center_y) as f32;
 
@@ -160,6 +183,11 @@ fn main() -> anyhow::Result<()> {
                         .set_cursor_position(PhysicalPosition::new(center_x, center_y))
                         .is_ok()
                     {
+                        let mut state = mouse_state_for_window
+                            .lock()
+                            .expect("mouse state mutex poisoned");
+                        // 这次 set_cursor_position 会触发一次 CursorMoved（到中心）。
+                        // 下次事件不应产生视角旋转。
                         state.ignore_next_cursor_moved = true;
                     }
                     let _ = window.set_cursor_grab(CursorGrabMode::None);

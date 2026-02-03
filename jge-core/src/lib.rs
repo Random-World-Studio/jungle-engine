@@ -14,6 +14,7 @@ pub mod event;
 pub mod game;
 pub mod logger;
 pub mod resource;
+pub mod scenes;
 pub mod text;
 mod window;
 
@@ -31,7 +32,6 @@ pub use game::Game;
 /// ## 文件路径与自动重编译
 ///
 /// - 默认（stable）：相对路径会以调用方 crate 的 `CARGO_MANIFEST_DIR/src` 为基准解析。
-/// - 可选（nightly + 启用 `jge-core/callsite-relative-paths`）：相对路径会以 **宏调用点所在源代码文件的父目录** 为基准解析（语义与 `include_str!("...")` 一致）。
 /// - 文件会作为编译依赖被追踪：修改 `.jgs` 内容会触发重新编译。
 ///   （实现方式是宏展开时注入了 `include_str!(...)` 依赖，不依赖任何不稳定编译器特性。）
 ///

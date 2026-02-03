@@ -25,6 +25,7 @@ use std::{
 };
 use tokio::{
     runtime::Runtime,
+    sync::Mutex,
     task::{JoinHandle, JoinSet},
     time::interval,
 };
@@ -392,22 +393,36 @@ impl Game {
     /// 获取内部 `winit::window::Window` 的共享引用。
     ///
     /// 注意：窗口在 `ApplicationHandler::resumed` 之后才会创建；因此在 `run()` 之前调用通常会返回 `None`。
-    pub fn winit_window(&self) -> Option<&Window> {
-        self.window.as_ref().map(|window| window.window.as_ref())
+    pub async fn winit_window(&self) -> Option<tokio::sync::MutexGuard<'_, Window>> {
+        Some(self.window.as_ref()?.window.lock().await)
     }
 
-    /// 获取内部 `winit::window::Window` 的共享引用（通过 `&mut self` 访问）。
+    /// 获取内部 `winit::window::Window` 的可变引用（通过 async Mutex guard）。
     ///
-    /// 由于窗口在引擎内通过 `Arc<Window>` 持有，这里返回的是 `&Window`（`winit::Window` 的大多数操作只需要 `&self`）。
-    pub fn winit_window_mut(&mut self) -> Option<&Window> {
-        self.window.as_ref().map(|window| window.window.as_ref())
+    /// 注意：`winit::Window` 的大多数 API 只需要 `&self`，但这里仍提供可变 guard，便于调用方统一处理。
+    pub async fn winit_window_mut(&self) -> Option<tokio::sync::MutexGuard<'_, Window>> {
+        Some(self.window.as_ref()?.window.lock().await)
     }
 
-    /// 获取内部 `winit::window::Window` 的 `Arc`（可跨闭包/线程保存）。
-    pub fn winit_window_arc(&self) -> Option<Arc<Window>> {
+    /// 获取内部 `winit::window::Window` 的 `Arc<tokio::sync::Mutex<_>>`（可跨闭包/线程保存）。
+    pub fn winit_window_arc(&self) -> Option<Arc<Mutex<Window>>> {
         self.window
             .as_ref()
             .map(|window| Arc::clone(&window.window))
+    }
+
+    /// 尝试获取内部 `winit::window::Window` 的共享引用（非阻塞）。
+    ///
+    /// 适用于 `winit` 的同步回调环境（无法 `await`）。若当前已被其他任务持锁会返回 `None`。
+    pub fn try_winit_window(&self) -> Option<tokio::sync::MutexGuard<'_, Window>> {
+        self.window.as_ref()?.window.try_lock().ok()
+    }
+
+    /// 尝试获取内部 `winit::window::Window` 的可变引用（非阻塞）。
+    ///
+    /// 语义与 [`Self::try_winit_window`] 相同，只是名称用于强调“可写访问”。
+    pub fn try_winit_window_mut(&self) -> Option<tokio::sync::MutexGuard<'_, Window>> {
+        self.window.as_ref()?.window.try_lock().ok()
     }
 
     /// 设置窗口创建后的初始化回调。
@@ -576,7 +591,9 @@ impl ApplicationHandler for Game {
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
         // 在事件循环即将等待时请求重绘，确保高刷新率下能及时准备下一帧
         if let Some(window) = &self.window {
-            window.window.request_redraw();
+            if let Ok(guard) = window.window.try_lock() {
+                guard.request_redraw();
+            }
         }
     }
 
@@ -651,9 +668,11 @@ impl Game {
         let window_attributes = Self::window_attributes(&self.config.window);
         let window = event_loop.create_window(window_attributes).unwrap();
 
+        let window = Arc::new(Mutex::new(window));
+
         self.window = Some(
             self.runtime
-                .block_on(GameWindow::new(Arc::new(window), &self.config.window))
+                .block_on(GameWindow::new(Arc::clone(&window), &self.config.window))
                 .unwrap(),
         );
 

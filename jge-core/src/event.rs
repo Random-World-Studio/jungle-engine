@@ -1,9 +1,11 @@
-use std::{any::Any, fmt::Debug, sync::Arc};
+use std::{any::Any, fmt::Debug, path::PathBuf, sync::Arc};
 
 pub use winit::{
     event::{DeviceEvent, ElementState, KeyEvent, WindowEvent},
     keyboard::{Key, KeyCode, NamedKey, PhysicalKey},
 };
+
+use crate::game::entity::Entity;
 
 /// 引擎事件。
 ///
@@ -25,6 +27,7 @@ pub use winit::{
 #[derive(Clone)]
 pub enum Event {
     CloseRequested,
+    FileSelected(Entity, Arc<Vec<PathBuf>>),
     /// 自定义事件：使用 `Arc<dyn Any + Send + Sync>` 承载任意用户载荷。
     Custom(Arc<dyn Any + Send + Sync>),
 }
@@ -51,6 +54,9 @@ impl Debug for Event {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::CloseRequested => write!(f, "CloseRequested"),
+            Self::FileSelected(e, paths) => {
+                f.debug_tuple("FileSelected").field(e).field(paths).finish()
+            }
             Self::Custom(arg) => f.debug_tuple("Custom").field(arg).finish(),
         }
     }

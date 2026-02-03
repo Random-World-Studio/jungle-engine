@@ -1,7 +1,11 @@
 use std::{sync::Arc, time::Duration};
 
 use wgpu::Backends;
+use wgpu::SurfaceTargetUnsafe;
 use winit::{dpi::PhysicalSize, window::Window};
+
+use tokio::sync::Mutex;
+use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
 use crate::{
     config::WindowConfig,
@@ -22,7 +26,7 @@ use tracing::{trace, warn};
 ///
 /// 通常由 [`crate::Game`] 在窗口创建后内部构造并持有。
 pub struct GameWindow {
-    pub(crate) window: Arc<Window>,
+    pub(crate) window: Arc<Mutex<Window>>,
 
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
@@ -37,14 +41,44 @@ impl GameWindow {
     /// 创建一个 `GameWindow`。
     ///
     /// 会初始化 wgpu 实例/适配器/设备，并根据 [`WindowConfig`] 配置表面（例如 vsync）。
-    pub async fn new(window: Arc<Window>, window_config: &WindowConfig) -> anyhow::Result<Self> {
+    pub async fn new(
+        window: Arc<Mutex<Window>>,
+        window_config: &WindowConfig,
+    ) -> anyhow::Result<Self> {
         let mut backends = Backends::all();
         backends.remove(Backends::GL);
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends,
             ..Default::default()
         });
-        let surface = instance.create_surface(window.clone())?;
+
+        // 注意：我们把 `winit::Window` 放进了 `Arc<tokio::sync::Mutex<_>>`，因此无法直接作为
+        // `SurfaceTarget` 传入（它需要实现 HasWindowHandle/HasDisplayHandle）。
+        // 这里改用 unsafe API：从 Window 取出 raw handle 创建 surface，并保证 Window 的生命周期
+        // 由 `GameWindow.window` 持有，从而满足“handle 在 Surface 生命周期内保持有效”的安全约束。
+        let (raw_display_handle, raw_window_handle, size) = {
+            let guard = window.lock().await;
+            let raw_display_handle = guard
+                .display_handle()
+                .map(|h| h.as_raw())
+                .map_err(|e| anyhow::anyhow!("wgpu surface: display_handle unavailable: {e}"))?;
+            let raw_window_handle = guard
+                .window_handle()
+                .map(|h| h.as_raw())
+                .map_err(|e| anyhow::anyhow!("wgpu surface: window_handle unavailable: {e}"))?;
+
+            let mut size = guard.inner_size();
+            size.width = size.width.max(1);
+            size.height = size.height.max(1);
+            (raw_display_handle, raw_window_handle, size)
+        };
+
+        let surface = unsafe {
+            instance.create_surface_unsafe(SurfaceTargetUnsafe::RawHandle {
+                raw_display_handle,
+                raw_window_handle,
+            })?
+        };
 
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
@@ -80,9 +114,6 @@ impl GameWindow {
         } else {
             caps.present_modes[0]
         };
-        let mut size = window.inner_size();
-        size.width = size.width.max(1);
-        size.height = size.height.max(1);
         let surf_config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: caps.formats[0],
