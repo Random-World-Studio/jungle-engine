@@ -472,7 +472,10 @@ mod scene_dsl {
                             fn(
                                 #entity_ty,
                             ) -> ::core::pin::Pin<
-                                ::std::boxed::Box<dyn ::core::future::Future<Output = ()>>,
+                                ::std::boxed::Box<
+                                    dyn ::core::future::Future<Output = ()>
+                                        + ::core::marker::Send,
+                                >,
                             >,
                         >,
                     )>,
@@ -754,7 +757,9 @@ mod scene_dsl {
                 fn(
                     #entity_ty,
                 ) -> ::core::pin::Pin<
-                    ::std::boxed::Box<dyn ::core::future::Future<Output = ()>>,
+                    ::std::boxed::Box<
+                        dyn ::core::future::Future<Output = ()> + ::core::marker::Send,
+                    >,
                 >,
             > = ::std::vec::Vec::new();
         });
@@ -990,7 +995,10 @@ mod scene_dsl {
                                     fn #unreg_fn<C: #core_crate::game::component::Component>(_: &C) -> fn(
                                         #entity_ty,
                                     ) -> ::core::pin::Pin<
-                                        ::std::boxed::Box<dyn ::core::future::Future<Output = ()>>,
+                                        ::std::boxed::Box<
+                                            dyn ::core::future::Future<Output = ()>
+                                                + ::core::marker::Send,
+                                        >,
                                     > {
                                         |e: #entity_ty| {
                                             ::std::boxed::Box::pin(async move {
@@ -1049,7 +1057,10 @@ mod scene_dsl {
                                     fn #unreg_fn<C: #core_crate::game::component::Component>(_: &C) -> fn(
                                         #entity_ty,
                                     ) -> ::core::pin::Pin<
-                                        ::std::boxed::Box<dyn ::core::future::Future<Output = ()>>,
+                                        ::std::boxed::Box<
+                                            dyn ::core::future::Future<Output = ()>
+                                                + ::core::marker::Send,
+                                        >,
                                     > {
                                         |e: #entity_ty| {
                                             ::std::boxed::Box::pin(async move {
@@ -1111,7 +1122,10 @@ mod scene_dsl {
                                 fn #unreg_fn<C: #core_crate::game::component::Component>(_: &C) -> fn(
                                     #entity_ty,
                                 ) -> ::core::pin::Pin<
-                                    ::std::boxed::Box<dyn ::core::future::Future<Output = ()>>,
+                                    ::std::boxed::Box<
+                                        dyn ::core::future::Future<Output = ()>
+                                            + ::core::marker::Send,
+                                    >,
                                 > {
                                     |e: #entity_ty| {
                                         ::std::boxed::Box::pin(async move {
@@ -1261,7 +1275,10 @@ pub fn expand_scene(input: TokenStream) -> TokenStream {
                                     fn(
                                         ::jge_core::game::entity::Entity,
                                     ) -> ::core::pin::Pin<
-                                        ::std::boxed::Box<dyn ::core::future::Future<Output = ()>>,
+                                        ::std::boxed::Box<
+                                            dyn ::core::future::Future<Output = ()>
+                                                + ::core::marker::Send,
+                                        >,
                                     >,
                                 >,
                             )>,

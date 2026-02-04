@@ -475,7 +475,9 @@ async fn build_demo_scene() -> anyhow::Result<Entity> {
     // 确保进度打印任务在返回前收尾。
     let _ = progress_handle.await;
 
-    Ok(bindings.root)
+    let root = bindings.root;
+
+    Ok(root)
 }
 
 fn quad_triangles(width: f32, height: f32, z: f32) -> Vec<[Vector3<f32>; 3]> {

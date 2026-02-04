@@ -74,6 +74,9 @@ pub struct Entity {
     id: EntityId,
 }
 
+unsafe impl Send for Entity {}
+unsafe impl Sync for Entity {}
+
 impl Entity {
     /// 创建一个新实体。
     ///

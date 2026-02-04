@@ -130,3 +130,24 @@ async fn scene_macro_bindings_destroy_unregisters_components_for_all_entities() 
     assert!(bindings.child.get_component::<Node>().await.is_some());
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn scene_macro_bindings_destroy_is_send_and_spawnable() -> anyhow::Result<()> {
+    let bindings = crate::scene! {
+        node "root" {
+            + Transform::new();
+        }
+    }
+    .await?;
+
+    let bindings = std::sync::Arc::new(bindings);
+    let handle = tokio::spawn({
+        let bindings = bindings.clone();
+        async move {
+            bindings.destroy().await;
+        }
+    });
+
+    handle.await.expect("destroy task should complete");
+    Ok(())
+}
