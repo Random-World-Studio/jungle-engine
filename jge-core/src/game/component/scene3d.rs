@@ -15,6 +15,7 @@ use super::{
     },
 };
 use crate::resource::ResourcePath;
+use async_trait::async_trait;
 use lodtree::coords::OctVec;
 use nalgebra::Vector3;
 use std::{f32::consts::PI, sync::OnceLock};
@@ -52,18 +53,23 @@ static SCENE3D_STORAGE: OnceLock<ComponentStorage<Scene3D>> = OnceLock::new();
 /// ```no_run
 /// # use jge_core::game::{entity::Entity, component::{scene3d::Scene3D, layer::Layer, camera::Camera, transform::Transform}};
 /// # fn main() -> anyhow::Result<()> {
-/// let scene = Entity::new()?;
-/// scene.register_component(Layer::new())?;
-/// scene.register_component(Transform::new())?;
-/// scene.register_component(Scene3D::new())?;
+/// let rt = tokio::runtime::Runtime::new()?;
+/// rt.block_on(async {
+///     let scene = Entity::new().await?;
+///     scene.register_component(Layer::new()).await?;
+///     scene.register_component(Transform::new()).await?;
+///     scene.register_component(Scene3D::new()).await?;
 ///
-/// let camera = Entity::new()?;
-/// camera.register_component(Transform::new())?;
-/// camera.register_component(Camera::new())?;
+///     let camera = Entity::new().await?;
+///     camera.register_component(Transform::new()).await?;
+///     camera.register_component(Camera::new()).await?;
 ///
-/// if let Some(mut scene3d) = scene.get_component_mut::<Scene3D>() {
-///     scene3d.bind_camera(camera)?;
-/// }
+///     if let Some(mut scene3d) = scene.get_component_mut::<Scene3D>().await {
+///         scene3d.bind_camera(camera).await?;
+///     }
+///
+///     Ok::<(), anyhow::Error>(())
+/// })?;
 /// Ok(())
 /// # }
 /// ```
@@ -100,22 +106,30 @@ impl Scene3D {
     }
 
     fn ensure_default_layer_shaders(entity: Entity) {
-        if let Some(mut layer) = entity.get_component_mut::<Layer>() {
-            if layer.shader(RenderPipelineStage::Vertex).is_none() {
-                let _ = layer.attach_shader_from_path(
-                    RenderPipelineStage::Vertex,
-                    ShaderLanguage::Wgsl,
-                    ResourcePath::from("shaders/3d.vs"),
-                );
-            }
-            if layer.shader(RenderPipelineStage::Fragment).is_none() {
-                let _ = layer.attach_shader_from_path(
-                    RenderPipelineStage::Fragment,
-                    ShaderLanguage::Wgsl,
-                    ResourcePath::from("shaders/3d.fs"),
-                );
-            }
-        }
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+
+        tokio::task::block_in_place(|| {
+            handle.block_on(async {
+                if let Some(mut layer) = entity.get_component_mut::<Layer>().await {
+                    if layer.shader(RenderPipelineStage::Vertex).is_none() {
+                        let _ = layer.attach_shader_from_path(
+                            RenderPipelineStage::Vertex,
+                            ShaderLanguage::Wgsl,
+                            ResourcePath::from("shaders/3d.vs"),
+                        );
+                    }
+                    if layer.shader(RenderPipelineStage::Fragment).is_none() {
+                        let _ = layer.attach_shader_from_path(
+                            RenderPipelineStage::Fragment,
+                            ShaderLanguage::Wgsl,
+                            ResourcePath::from("shaders/3d.fs"),
+                        );
+                    }
+                }
+            })
+        });
     }
 
     /// 当前垂直视场角（弧度）。
@@ -210,18 +224,20 @@ impl Scene3D {
         Ok((scaled_tan).atan() * 2.0)
     }
 
-    pub(crate) fn bind_camera_internal(
+    pub(crate) async fn bind_camera_internal(
         &mut self,
         camera_entity: Entity,
     ) -> Result<(), Scene3DAttachError> {
         let scene_entity = self.entity();
 
-        if camera_entity.get_component::<Camera>().is_none() {
+        if camera_entity.get_component::<Camera>().await.is_none() {
             return Err(Scene3DAttachError::MissingCamera(camera_entity));
         }
 
         let camera_transform_values = {
-            let transform = try_get_transform(camera_entity)
+            let transform = camera_entity
+                .get_component::<Transform>()
+                .await
                 .ok_or(Scene3DAttachError::MissingCameraTransform(camera_entity))?;
             (
                 transform.position(),
@@ -233,6 +249,7 @@ impl Scene3D {
         {
             let mut scene_transform = scene_entity
                 .get_component_mut::<Transform>()
+                .await
                 .ok_or(Scene3DAttachError::MissingSceneTransform(scene_entity))?;
             scene_transform.set_position(camera_transform_values.0);
             scene_transform.set_rotation(camera_transform_values.1);
@@ -249,19 +266,21 @@ impl Scene3D {
         self.attached_camera.take()
     }
 
-    pub(crate) fn sync_camera_transform_internal(&self) -> Result<(), Scene3DAttachError> {
+    pub(crate) async fn sync_camera_transform_internal(&self) -> Result<(), Scene3DAttachError> {
         let Some(camera_entity) = self.attached_camera else {
             return Ok(());
         };
 
         let scene_entity = self.entity();
 
-        if camera_entity.get_component::<Camera>().is_none() {
+        if camera_entity.get_component::<Camera>().await.is_none() {
             return Err(Scene3DAttachError::MissingCamera(camera_entity));
         }
 
         let (position, rotation, scale) = {
-            let transform = try_get_transform(camera_entity)
+            let transform = camera_entity
+                .get_component::<Transform>()
+                .await
                 .ok_or(Scene3DAttachError::MissingCameraTransform(camera_entity))?;
             (
                 transform.position(),
@@ -272,6 +291,7 @@ impl Scene3D {
 
         let mut scene_transform = scene_entity
             .get_component_mut::<Transform>()
+            .await
             .ok_or(Scene3DAttachError::MissingSceneTransform(scene_entity))?;
         scene_transform.set_position(position);
         scene_transform.set_rotation(rotation);
@@ -280,19 +300,20 @@ impl Scene3D {
         Ok(())
     }
 
-    fn sync_camera_transform_for_entity(
+    async fn sync_camera_transform_for_entity(
         &self,
         camera_entity: Entity,
     ) -> Result<(), Scene3DAttachError> {
         let scene_entity = self.entity();
 
-        if camera_entity.get_component::<Camera>().is_none() {
+        if camera_entity.get_component::<Camera>().await.is_none() {
             return Err(Scene3DAttachError::MissingCamera(camera_entity));
         }
 
         let (position, rotation, scale) = {
             let transform = camera_entity
                 .get_component::<Transform>()
+                .await
                 .ok_or(Scene3DAttachError::MissingCameraTransform(camera_entity))?;
             (
                 transform.position(),
@@ -303,6 +324,7 @@ impl Scene3D {
 
         let mut scene_transform = scene_entity
             .get_component_mut::<Transform>()
+            .await
             .ok_or(Scene3DAttachError::MissingSceneTransform(scene_entity))?;
         scene_transform.set_position(position);
         scene_transform.set_rotation(rotation);
@@ -325,12 +347,13 @@ impl Scene3D {
         Ok(horizontal_from_vertical(vertical, aspect_ratio))
     }
 
-    pub(crate) fn visible_renderables_internal(
+    pub(crate) async fn visible_renderables_internal(
         &self,
         camera_entity: Entity,
         framebuffer_size: (u32, u32),
     ) -> Result<LayerRenderableCollection, Scene3DVisibilityError> {
         self.sync_camera_transform_for_entity(camera_entity)
+            .await
             .map_err(Scene3DVisibilityError::from)?;
 
         let scene_entity = self.entity();
@@ -352,6 +375,7 @@ impl Scene3D {
 
         let camera_guard = camera_entity
             .get_component::<Camera>()
+            .await
             .ok_or(Scene3DVisibilityError::MissingCamera(camera_entity))?;
         let camera_vertical = camera_guard
             .vertical_fov_for_height(height)
@@ -381,19 +405,20 @@ impl Scene3D {
             });
         }
 
-        ensure_scene_transform(scene_entity)?;
+        ensure_scene_transform(scene_entity).await?;
 
-        let camera_transform = try_get_transform(camera_entity).ok_or(
+        let camera_transform = camera_entity.get_component::<Transform>().await.ok_or(
             Scene3DVisibilityError::MissingCameraTransform(camera_entity),
         )?;
         let camera_position = camera_transform.position();
         let basis = Camera::orientation_basis(&camera_transform).normalize();
 
-        let layer = scene_entity.get_component::<Layer>().ok_or_else(|| {
+        let layer = scene_entity.get_component::<Layer>().await.ok_or_else(|| {
             Scene3DVisibilityError::LayerTraversal(LayerTraversalError::MissingLayer(scene_entity))
         })?;
         let collection = layer
             .collect_renderables()
+            .await
             .map_err(Scene3DVisibilityError::LayerTraversal)?;
 
         let horizontal_limit = 0.5 * horizontal_fov;
@@ -455,54 +480,45 @@ impl Scene3D {
     /// 绑定后：
     /// - 场景实体的 `Transform` 会被同步为摄像机的 `Transform`（用于渲染时以摄像机为视点）。
     /// - 你可以在每帧渲染前调用 [`sync_camera_transform`](Self::sync_camera_transform) 刷新。
-    pub fn bind_camera(&mut self, camera_entity: Entity) -> Result<(), Scene3DAttachError> {
-        self.bind_camera_internal(camera_entity)
+    pub async fn bind_camera(&mut self, camera_entity: Entity) -> Result<(), Scene3DAttachError> {
+        self.bind_camera_internal(camera_entity).await
     }
 
     /// 将当前绑定摄像机的 `Transform` 同步到场景实体。
     ///
     /// 当你在游戏逻辑里更新了摄像机实体的位置/旋转/缩放后，可在渲染前调用此方法。
-    pub fn sync_camera_transform(&self) -> Result<(), Scene3DAttachError> {
-        self.sync_camera_transform_internal()
+    pub async fn sync_camera_transform(&self) -> Result<(), Scene3DAttachError> {
+        self.sync_camera_transform_internal().await
     }
 }
 
 impl ComponentWrite<Scene3D> {
-    pub fn bind_camera(&mut self, camera_entity: Entity) -> Result<(), Scene3DAttachError> {
-        self.bind_camera_internal(camera_entity)
+    pub async fn bind_camera(&mut self, camera_entity: Entity) -> Result<(), Scene3DAttachError> {
+        self.bind_camera_internal(camera_entity).await
     }
 }
 
 impl ComponentRead<Scene3D> {
-    pub fn sync_camera_transform(&self) -> Result<(), Scene3DAttachError> {
-        self.sync_camera_transform_internal()
+    pub async fn sync_camera_transform(&self) -> Result<(), Scene3DAttachError> {
+        self.sync_camera_transform_internal().await
     }
 
     /// 计算当前摄像机视锥内的可见几何集合。
     ///
     /// 返回值是一个便于渲染的集合（按实体聚合三角面，并保留材质信息）。
     /// 常见调用点：每帧渲染时。
-    pub fn visible_renderables(
+    pub async fn visible_renderables(
         &self,
         camera_entity: Entity,
         framebuffer_size: (u32, u32),
     ) -> Result<LayerRenderableCollection, Scene3DVisibilityError> {
         self.visible_renderables_internal(camera_entity, framebuffer_size)
+            .await
     }
 }
 
-fn try_get_transform(entity: Entity) -> Option<ComponentRead<Transform>> {
-    for _ in 0..3 {
-        if let Some(transform) = entity.get_component::<Transform>() {
-            return Some(transform);
-        }
-        std::thread::yield_now();
-    }
-    None
-}
-
-fn ensure_scene_transform(entity: Entity) -> Result<(), Scene3DVisibilityError> {
-    if try_get_transform(entity).is_some() {
+async fn ensure_scene_transform(entity: Entity) -> Result<(), Scene3DVisibilityError> {
+    if entity.get_component::<Transform>().await.is_some() {
         Ok(())
     } else {
         Err(Scene3DVisibilityError::MissingSceneTransform(entity))
@@ -732,23 +748,24 @@ impl std::fmt::Display for Scene3DAttachError {
 
 impl std::error::Error for Scene3DAttachError {}
 
+#[async_trait]
 impl Component for Scene3D {
     fn storage() -> &'static ComponentStorage<Self> {
         SCENE3D_STORAGE.get_or_init(ComponentStorage::new)
     }
 
-    fn register_dependencies(entity: Entity) -> Result<(), ComponentDependencyError> {
-        if entity.get_component::<Layer>().is_none() {
+    async fn register_dependencies(entity: Entity) -> Result<(), ComponentDependencyError> {
+        if entity.get_component::<Layer>().await.is_none() {
             let component = Layer::__jge_component_default(entity)?;
-            let _ = entity.register_component(component)?;
+            let _ = entity.register_component(component).await?;
         }
-        if entity.get_component::<Renderable>().is_none() {
+        if entity.get_component::<Renderable>().await.is_none() {
             let component = Renderable::__jge_component_default(entity)?;
-            let _ = entity.register_component(component)?;
+            let _ = entity.register_component(component).await?;
         }
-        if entity.get_component::<Transform>().is_none() {
+        if entity.get_component::<Transform>().await.is_none() {
             let component = Transform::__jge_component_default(entity)?;
-            let _ = entity.register_component(component)?;
+            let _ = entity.register_component(component).await?;
         }
         Ok(())
     }
@@ -778,14 +795,15 @@ mod tests {
     use lodtree::{coords::OctVec, traits::LodVec};
 
     async fn detach_node(entity: Entity) {
-        if entity.get_component::<Node>().is_some() {
+        if entity.get_component::<Node>().await.is_some() {
             let detach_future = {
                 let mut node = entity
                     .get_component_mut::<Node>()
+                    .await
                     .expect("node component disappeared");
                 node.detach()
             };
-            let _ = detach_future.await;
+            detach_future.await.expect("应能 detach node");
         }
     }
 
@@ -793,6 +811,7 @@ mod tests {
         let attach_future = {
             let mut parent_node = parent
                 .get_component_mut::<Node>()
+                .await
                 .expect("父实体应持有 Node 组件");
             parent_node.attach(entity)
         };
@@ -800,76 +819,90 @@ mod tests {
     }
 
     async fn prepare_scene_entity(entity: &Entity, name: &str) {
-        let _ = entity.unregister_component::<Scene3D>();
-        let _ = entity.unregister_component::<Layer>();
-        let _ = entity.unregister_component::<Renderable>();
-        let _ = entity.unregister_component::<Transform>();
+        let _ = entity.unregister_component::<Scene3D>().await;
+        let _ = entity.unregister_component::<Layer>().await;
+        let _ = entity.unregister_component::<Renderable>().await;
+        let _ = entity.unregister_component::<Transform>().await;
         detach_node(*entity).await;
-        let _ = entity.unregister_component::<Node>();
+        let _ = entity.unregister_component::<Node>().await;
 
         let _ = entity
             .register_component(Node::new(name).expect("应能创建节点"))
+            .await
             .expect("应能插入 Node");
         let _ = entity
             .register_component(Renderable::new())
+            .await
             .expect("应能插入 Renderable");
         let _ = entity
             .register_component(Transform::new())
+            .await
             .expect("应能插入 Transform");
         let _ = entity
             .register_component(Layer::new())
+            .await
             .expect("应能插入 Layer");
     }
 
     async fn prepare_child(entity: &Entity, name: &str, parent: Entity) {
         prepare_scene_entity(entity, name).await;
-        let _ = entity.unregister_component::<Layer>();
+        let _ = entity.unregister_component::<Layer>().await;
         attach_node(*entity, parent, "应能挂载到父节点").await;
     }
 
     async fn prepare_camera_entity(entity: &Entity, name: &str) {
-        let _ = entity.unregister_component::<Camera>();
-        let _ = entity.unregister_component::<Transform>();
-        let _ = entity.unregister_component::<Renderable>();
+        let _ = entity.unregister_component::<Camera>().await;
+        let _ = entity.unregister_component::<Transform>().await;
+        let _ = entity.unregister_component::<Renderable>().await;
         detach_node(*entity).await;
-        let _ = entity.unregister_component::<Node>();
+        let _ = entity.unregister_component::<Node>().await;
 
         let _ = entity
             .register_component(Node::new(name).expect("应能创建节点"))
+            .await
             .expect("应能插入 Node");
         let _ = entity
             .register_component(Renderable::new())
+            .await
             .expect("应能插入 Renderable");
         let _ = entity
             .register_component(Transform::new())
+            .await
             .expect("应能插入 Transform");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn scene3d_requires_layer_dependency() {
-        let entity = Entity::new().expect("应能创建实体");
-        let _ = entity.unregister_component::<Scene3D>();
-        let _ = entity.unregister_component::<Layer>();
-        let _ = entity.unregister_component::<Renderable>();
-        let _ = entity.unregister_component::<Transform>();
+        let entity = Entity::new().await.expect("应能创建实体");
+        let _ = entity.unregister_component::<Scene3D>().await;
+        let _ = entity.unregister_component::<Layer>().await;
+        let _ = entity.unregister_component::<Renderable>().await;
+        let _ = entity.unregister_component::<Transform>().await;
         detach_node(entity).await;
-        let _ = entity.unregister_component::<Node>();
+        let _ = entity.unregister_component::<Node>().await;
 
         let inserted = entity
             .register_component(Scene3D::new())
+            .await
             .expect("缺少 Layer 时应自动注册依赖");
         assert!(inserted.is_none());
 
         assert!(
-            entity.get_component::<Layer>().is_some(),
+            entity.get_component::<Layer>().await.is_some(),
             "Layer 应被自动注册"
         );
         assert!(
-            entity.get_component::<Renderable>().is_some(),
+            entity.get_component::<Renderable>().await.is_some(),
             "Renderable 应被注册"
         );
-        assert!(entity.get_component::<Node>().is_some(), "Node 应被注册");
-        let layer = entity.get_component::<Layer>().expect("应能读取 Layer");
+        assert!(
+            entity.get_component::<Node>().await.is_some(),
+            "Node 应被注册"
+        );
+        let layer = entity
+            .get_component::<Layer>()
+            .await
+            .expect("应能读取 Layer");
         assert!(
             layer.shader(RenderPipelineStage::Vertex).is_some(),
             "默认应挂载顶点着色器"
@@ -894,25 +927,27 @@ mod tests {
         );
         drop(layer);
 
-        let _ = entity.unregister_component::<Scene3D>();
-        let _ = entity.unregister_component::<Layer>();
-        let _ = entity.unregister_component::<Renderable>();
-        let _ = entity.unregister_component::<Transform>();
+        let _ = entity.unregister_component::<Scene3D>().await;
+        let _ = entity.unregister_component::<Layer>().await;
+        let _ = entity.unregister_component::<Renderable>().await;
+        let _ = entity.unregister_component::<Transform>().await;
         detach_node(entity).await;
-        let _ = entity.unregister_component::<Node>();
+        let _ = entity.unregister_component::<Node>().await;
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn scene3d_view_property_constraints() {
-        let entity = Entity::new().expect("应能创建实体");
+        let entity = Entity::new().await.expect("应能创建实体");
         prepare_scene_entity(&entity, "scene3d_props").await;
         entity
             .register_component(Scene3D::new())
+            .await
             .expect("应能插入 Scene3D");
 
         {
             let mut scene = entity
                 .get_component_mut::<Scene3D>()
+                .await
                 .expect("应能写入 Scene3D");
             assert!(scene.set_vertical_fov(MIN_VERTICAL_FOV / 2.0).is_err());
             assert!(scene.set_vertical_fov(DEFAULT_VERTICAL_FOV * 1.1).is_ok());
@@ -925,23 +960,27 @@ mod tests {
             assert!(scene.set_near_plane(0.5).is_ok());
         }
 
-        let _ = entity.unregister_component::<Scene3D>();
-        let _ = entity.unregister_component::<Layer>();
-        let _ = entity.unregister_component::<Renderable>();
-        let _ = entity.unregister_component::<Transform>();
+        let _ = entity.unregister_component::<Scene3D>().await;
+        let _ = entity.unregister_component::<Layer>().await;
+        let _ = entity.unregister_component::<Renderable>().await;
+        let _ = entity.unregister_component::<Transform>().await;
         detach_node(entity).await;
-        let _ = entity.unregister_component::<Node>();
+        let _ = entity.unregister_component::<Node>().await;
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn scene3d_vertical_fov_depends_on_aspect() {
-        let entity = Entity::new().expect("应能创建实体");
+        let entity = Entity::new().await.expect("应能创建实体");
         prepare_scene_entity(&entity, "scene3d_fov").await;
         entity
             .register_component(Scene3D::new())
+            .await
             .expect("应能插入 Scene3D");
 
-        let scene = entity.get_component::<Scene3D>().expect("应能读取 Scene3D");
+        let scene = entity
+            .get_component::<Scene3D>()
+            .await
+            .expect("应能读取 Scene3D");
         let tall = scene
             .horizontal_fov((1080, 1920))
             .expect("有效视口不应报错");
@@ -951,27 +990,36 @@ mod tests {
         drop(scene);
         assert!(wide > tall);
         {
-            let scene_guard = entity.get_component::<Scene3D>().expect("应能读取 Scene3D");
-            assert!(scene_guard.visible_renderables(entity, (0, 1080)).is_err());
+            let scene_guard = entity
+                .get_component::<Scene3D>()
+                .await
+                .expect("应能读取 Scene3D");
+            assert!(
+                scene_guard
+                    .visible_renderables(entity, (0, 1080))
+                    .await
+                    .is_err()
+            );
         }
 
-        let _ = entity.unregister_component::<Scene3D>();
-        let _ = entity.unregister_component::<Layer>();
-        let _ = entity.unregister_component::<Renderable>();
-        let _ = entity.unregister_component::<Transform>();
+        let _ = entity.unregister_component::<Scene3D>().await;
+        let _ = entity.unregister_component::<Layer>().await;
+        let _ = entity.unregister_component::<Renderable>().await;
+        let _ = entity.unregister_component::<Transform>().await;
         detach_node(entity).await;
-        let _ = entity.unregister_component::<Node>();
+        let _ = entity.unregister_component::<Node>().await;
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn scene3d_visible_renderables_culls_geometry() {
-        let scene = Entity::new().expect("应能创建实体");
+        let scene = Entity::new().await.expect("应能创建实体");
         prepare_scene_entity(&scene, "scene3d_cull_root").await;
         scene
             .register_component(Scene3D::new())
+            .await
             .expect("应能插入 Scene3D");
 
-        let inside = Entity::new().expect("应能创建实体");
+        let inside = Entity::new().await.expect("应能创建实体");
         prepare_child(&inside, "inside", scene).await;
         inside
             .register_component(Shape::from_triangles(vec![[
@@ -980,9 +1028,10 @@ mod tests {
                 Vector3::new(1.0, -1.0, -5.0),
                 Vector3::new(0.0, 1.0, -5.0),
             ]]))
+            .await
             .expect("应能插入 Shape");
 
-        let outside = Entity::new().expect("应能创建实体");
+        let outside = Entity::new().await.expect("应能创建实体");
         prepare_child(&outside, "outside", scene).await;
         outside
             .register_component(Shape::from_triangles(vec![[
@@ -991,18 +1040,22 @@ mod tests {
                 Vector3::new(1.0, -1.0, 5.0),
                 Vector3::new(0.0, 1.0, 5.0),
             ]]))
+            .await
             .expect("应能插入 Shape");
 
-        let scene_component = scene.get_component::<Scene3D>().expect("应能读取 Scene3D");
+        let scene_component = scene
+            .get_component::<Scene3D>()
+            .await
+            .expect("应能读取 Scene3D");
         let vertical_base = scene_component
             .vertical_fov_for_height(1080)
             .expect("有效视口不应报错");
         let vertical_double = scene_component
             .vertical_fov_for_height(2160)
             .expect("有效视口不应报错");
-        let base_ratio = (0.5 * vertical_base).tan() / 1080.0;
-        let double_ratio = (0.5 * vertical_double).tan() / 2160.0;
-        assert!((base_ratio - double_ratio).abs() < 1e-6);
+        let base_ratio = (0.5_f32 * vertical_base).tan() / 1080.0_f32;
+        let double_ratio = (0.5_f32 * vertical_double).tan() / 2160.0_f32;
+        assert!((base_ratio - double_ratio).abs() < 1e-6_f32);
 
         let horizontal_wide = scene_component
             .horizontal_fov((1920, 1080))
@@ -1013,67 +1066,77 @@ mod tests {
         assert!(horizontal_wide > horizontal_tall);
         drop(scene_component);
 
-        let camera = Entity::new().expect("应能创建实体");
+        let camera = Entity::new().await.expect("应能创建实体");
         prepare_scene_entity(&camera, "camera_node").await;
         camera
             .register_component(Camera::new())
+            .await
             .expect("应能插入 Camera");
 
         let visible = {
-            let scene_guard = scene.get_component::<Scene3D>().expect("应能读取 Scene3D");
+            let scene_guard = scene
+                .get_component::<Scene3D>()
+                .await
+                .expect("应能读取 Scene3D");
             scene_guard
                 .visible_renderables(camera, (1280, 720))
+                .await
                 .expect("可见性计算不应失败")
         };
         let bundles = visible.into_bundles();
         assert_eq!(bundles.len(), 1);
         assert_eq!(bundles[0].entity(), inside);
 
-        let _ = camera.unregister_component::<Camera>();
-        let _ = camera.unregister_component::<Scene3D>();
-        let _ = camera.unregister_component::<Layer>();
-        let _ = camera.unregister_component::<Renderable>();
-        let _ = camera.unregister_component::<Transform>();
+        let _ = camera.unregister_component::<Camera>().await;
+        let _ = camera.unregister_component::<Scene3D>().await;
+        let _ = camera.unregister_component::<Layer>().await;
+        let _ = camera.unregister_component::<Renderable>().await;
+        let _ = camera.unregister_component::<Transform>().await;
         detach_node(camera).await;
-        let _ = camera.unregister_component::<Node>();
+        let _ = camera.unregister_component::<Node>().await;
 
-        let _ = inside.unregister_component::<Shape>();
-        let _ = inside.unregister_component::<Scene3D>();
-        let _ = inside.unregister_component::<Layer>();
-        let _ = inside.unregister_component::<Renderable>();
-        let _ = inside.unregister_component::<Transform>();
+        let _ = inside.unregister_component::<Shape>().await;
+        let _ = inside.unregister_component::<Scene3D>().await;
+        let _ = inside.unregister_component::<Layer>().await;
+        let _ = inside.unregister_component::<Renderable>().await;
+        let _ = inside.unregister_component::<Transform>().await;
         detach_node(inside).await;
-        let _ = inside.unregister_component::<Node>();
+        let _ = inside.unregister_component::<Node>().await;
 
-        let _ = outside.unregister_component::<Shape>();
-        let _ = outside.unregister_component::<Scene3D>();
-        let _ = outside.unregister_component::<Layer>();
-        let _ = outside.unregister_component::<Renderable>();
-        let _ = outside.unregister_component::<Transform>();
+        let _ = outside.unregister_component::<Shape>().await;
+        let _ = outside.unregister_component::<Scene3D>().await;
+        let _ = outside.unregister_component::<Layer>().await;
+        let _ = outside.unregister_component::<Renderable>().await;
+        let _ = outside.unregister_component::<Transform>().await;
         detach_node(outside).await;
-        let _ = outside.unregister_component::<Node>();
+        let _ = outside.unregister_component::<Node>().await;
 
-        let _ = scene.unregister_component::<Scene3D>();
-        let _ = scene.unregister_component::<Layer>();
-        let _ = scene.unregister_component::<Renderable>();
-        let _ = scene.unregister_component::<Transform>();
+        let _ = scene.unregister_component::<Scene3D>().await;
+        let _ = scene.unregister_component::<Layer>().await;
+        let _ = scene.unregister_component::<Renderable>().await;
+        let _ = scene.unregister_component::<Transform>().await;
         detach_node(scene).await;
-        let _ = scene.unregister_component::<Node>();
+        let _ = scene.unregister_component::<Node>().await;
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn scene3d_accesses_layer_spatial_index() {
-        let entity = Entity::new().expect("应能创建实体");
+        let entity = Entity::new().await.expect("应能创建实体");
         prepare_scene_entity(&entity, "scene3d_spatial").await;
         entity
             .register_component(Scene3D::new())
+            .await
             .expect("依赖满足后应能插入 Scene3D");
         let scene = entity
             .get_component::<Scene3D>()
+            .await
             .expect("Scene3D 组件应已注册");
 
         {
-            let layer = entity.get_component::<Layer>().expect("Layer 组件应已注册");
+            let layer = entity
+                .get_component::<Layer>()
+                .await
+                .expect("Layer 组件应已注册");
             assert_eq!(scene.chunk_count(&layer), 0);
         }
 
@@ -1082,6 +1145,7 @@ mod tests {
         {
             let mut layer = entity
                 .get_component_mut::<Layer>()
+                .await
                 .expect("Layer 组件应已注册");
             let update = scene.step_lod(&mut layer, &[target], detail);
             assert_eq!(update.added.len(), 1);
@@ -1089,7 +1153,10 @@ mod tests {
         }
 
         {
-            let layer = entity.get_component::<Layer>().expect("Layer 组件应已注册");
+            let layer = entity
+                .get_component::<Layer>()
+                .await
+                .expect("Layer 组件应已注册");
             let positions = scene.chunk_positions(&layer);
             assert_eq!(positions.len(), 1);
             assert!(positions.contains(&target));
@@ -1101,66 +1168,83 @@ mod tests {
 
         drop(scene);
 
-        let _ = entity.unregister_component::<Scene3D>();
-        let _ = entity.unregister_component::<Layer>();
-        let _ = entity.unregister_component::<Renderable>();
-        let _ = entity.unregister_component::<Transform>();
+        let _ = entity.unregister_component::<Scene3D>().await;
+        let _ = entity.unregister_component::<Layer>().await;
+        let _ = entity.unregister_component::<Renderable>().await;
+        let _ = entity.unregister_component::<Transform>().await;
         detach_node(entity).await;
-        let _ = entity.unregister_component::<Node>();
+        let _ = entity.unregister_component::<Node>().await;
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn scene3d_attaches_and_syncs_camera_transform() {
-        let scene = Entity::new().expect("应能创建实体");
+        let scene = Entity::new().await.expect("应能创建实体");
         prepare_scene_entity(&scene, "scene3d_attach_root").await;
         scene
             .register_component(Scene3D::new())
+            .await
             .expect("应能插入 Scene3D");
 
-        let camera = Entity::new().expect("应能创建实体");
+        let camera = Entity::new().await.expect("应能创建实体");
         prepare_camera_entity(&camera, "camera_attach").await;
         attach_node(camera, scene, "应能将摄像机挂载到场景").await;
         let _ = camera
             .register_component(Camera::new())
+            .await
             .expect("应能插入 Camera");
 
-        if let Some(mut transform) = camera.get_component_mut::<Transform>() {
-            transform.set_position(Vector3::new(3.0, 2.0, -5.0));
-            transform.set_rotation(Vector3::new(0.1, 0.2, 0.0));
-            transform.set_scale(Vector3::new(1.0, 1.0, 1.0));
+        if let Some(mut transform) = camera.get_component_mut::<Transform>().await {
+            transform.set_position(Vector3::new(3.0_f32, 2.0_f32, -5.0_f32));
+            transform.set_rotation(Vector3::new(0.1_f32, 0.2_f32, 0.0_f32));
+            transform.set_scale(Vector3::new(1.0_f32, 1.0_f32, 1.0_f32));
         }
 
         {
             let mut scene_component = scene
                 .get_component_mut::<Scene3D>()
+                .await
                 .expect("应能读取 Scene3D");
-            scene_component.bind_camera(camera).expect("应能绑定摄像机");
+            scene_component
+                .bind_camera(camera)
+                .await
+                .expect("应能绑定摄像机");
         }
-        let stored = scene.get_component::<Scene3D>().expect("应能读取 Scene3D");
+        let stored = scene
+            .get_component::<Scene3D>()
+            .await
+            .expect("应能读取 Scene3D");
         assert_eq!(stored.attached_camera(), Some(camera));
         drop(stored);
 
         {
             let transform = scene
                 .get_component::<Transform>()
+                .await
                 .expect("场景应持有 Transform");
             assert_eq!(transform.position(), Vector3::new(3.0, 2.0, -5.0));
             assert_eq!(transform.rotation(), Vector3::new(0.1, 0.2, 0.0));
         }
 
-        if let Some(mut transform) = camera.get_component_mut::<Transform>() {
+        if let Some(mut transform) = camera.get_component_mut::<Transform>().await {
             transform.set_position(Vector3::new(-2.0, 1.5, -3.0));
             transform.set_rotation(Vector3::new(-0.1, 0.3, 0.2));
         }
 
         {
-            let scene_component = scene.get_component::<Scene3D>().expect("应能读取 Scene3D");
-            scene_component.sync_camera_transform().expect("同步应成功");
+            let scene_component = scene
+                .get_component::<Scene3D>()
+                .await
+                .expect("应能读取 Scene3D");
+            scene_component
+                .sync_camera_transform()
+                .await
+                .expect("同步应成功");
         }
 
         {
             let transform = scene
                 .get_component::<Transform>()
+                .await
                 .expect("场景应持有 Transform");
             assert_eq!(transform.position(), Vector3::new(-2.0, 1.5, -3.0));
             assert_eq!(transform.rotation(), Vector3::new(-0.1, 0.3, 0.2));
@@ -1169,66 +1253,77 @@ mod tests {
         {
             let mut scene_component = scene
                 .get_component_mut::<Scene3D>()
+                .await
                 .expect("应能读取 Scene3D");
             let _ = scene_component.detach_camera();
         }
-        let _ = camera.unregister_component::<Camera>();
-        let _ = camera.unregister_component::<Transform>();
-        let _ = camera.unregister_component::<Renderable>();
+        let _ = camera.unregister_component::<Camera>().await;
+        let _ = camera.unregister_component::<Transform>().await;
+        let _ = camera.unregister_component::<Renderable>().await;
         detach_node(camera).await;
-        let _ = camera.unregister_component::<Node>();
+        let _ = camera.unregister_component::<Node>().await;
 
-        let _ = scene.unregister_component::<Scene3D>();
-        let _ = scene.unregister_component::<Layer>();
-        let _ = scene.unregister_component::<Renderable>();
-        let _ = scene.unregister_component::<Transform>();
+        let _ = scene.unregister_component::<Scene3D>().await;
+        let _ = scene.unregister_component::<Layer>().await;
+        let _ = scene.unregister_component::<Renderable>().await;
+        let _ = scene.unregister_component::<Transform>().await;
         detach_node(scene).await;
-        let _ = scene.unregister_component::<Node>();
+        let _ = scene.unregister_component::<Node>().await;
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn scene3d_detach_camera_clears_attachment() {
-        let scene = Entity::new().expect("应能创建实体");
+        let scene = Entity::new().await.expect("应能创建实体");
         prepare_scene_entity(&scene, "scene3d_detach_root").await;
         scene
             .register_component(Scene3D::new())
+            .await
             .expect("应能插入 Scene3D");
 
-        let camera = Entity::new().expect("应能创建实体");
+        let camera = Entity::new().await.expect("应能创建实体");
         prepare_camera_entity(&camera, "camera_detach").await;
         attach_node(camera, scene, "应能将摄像机挂载到场景").await;
         let _ = camera
             .register_component(Camera::new())
+            .await
             .expect("应能插入 Camera");
 
         {
             let mut scene_component = scene
                 .get_component_mut::<Scene3D>()
+                .await
                 .expect("应能读取 Scene3D");
-            scene_component.bind_camera(camera).expect("应能绑定摄像机");
+            scene_component
+                .bind_camera(camera)
+                .await
+                .expect("应能绑定摄像机");
         }
         let detached = {
             let mut scene_component = scene
                 .get_component_mut::<Scene3D>()
+                .await
                 .expect("应能读取 Scene3D");
             scene_component.detach_camera()
         };
         assert_eq!(detached, Some(camera));
-        let stored = scene.get_component::<Scene3D>().expect("应能读取 Scene3D");
+        let stored = scene
+            .get_component::<Scene3D>()
+            .await
+            .expect("应能读取 Scene3D");
         assert_eq!(stored.attached_camera(), None);
         drop(stored);
 
-        let _ = camera.unregister_component::<Camera>();
-        let _ = camera.unregister_component::<Transform>();
-        let _ = camera.unregister_component::<Renderable>();
+        let _ = camera.unregister_component::<Camera>().await;
+        let _ = camera.unregister_component::<Transform>().await;
+        let _ = camera.unregister_component::<Renderable>().await;
         detach_node(camera).await;
-        let _ = camera.unregister_component::<Node>();
+        let _ = camera.unregister_component::<Node>().await;
 
-        let _ = scene.unregister_component::<Scene3D>();
-        let _ = scene.unregister_component::<Layer>();
-        let _ = scene.unregister_component::<Renderable>();
-        let _ = scene.unregister_component::<Transform>();
+        let _ = scene.unregister_component::<Scene3D>().await;
+        let _ = scene.unregister_component::<Layer>().await;
+        let _ = scene.unregister_component::<Renderable>().await;
+        let _ = scene.unregister_component::<Transform>().await;
         detach_node(scene).await;
-        let _ = scene.unregister_component::<Node>();
+        let _ = scene.unregister_component::<Node>().await;
     }
 }

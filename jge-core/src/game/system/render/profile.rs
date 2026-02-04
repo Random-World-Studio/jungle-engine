@@ -5,6 +5,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use tokio::runtime::Runtime;
 use tracing::info;
 
 use crate::game::{
@@ -23,6 +24,9 @@ const MAX_SAMPLES_PER_ENTITY: usize = 5000;
 pub(in crate::game::system::render) struct RenderProfiler {
     enabled: bool,
     frame_index: u64,
+
+    // 节点名缓存：避免在生成报告时访问 ECS（异步），同时 Drop 时也能安全输出。
+    node_names: HashMap<EntityId, String>,
 
     // 当前帧累计：一个实体在一帧内可能被渲染多次（例如跨 chunk），这里按实体聚合。
     frame_accumulated_ns: HashMap<EntityId, u64>,
@@ -45,6 +49,7 @@ impl RenderProfiler {
         Self {
             enabled,
             frame_index: 0,
+            node_names: HashMap::new(),
             frame_accumulated_ns: HashMap::new(),
             samples_ns: HashMap::new(),
         }
@@ -89,8 +94,18 @@ impl RenderProfiler {
 
     pub(in crate::game::system::render) fn entity_scope(
         &mut self,
+        runtime: &Runtime,
         entity: Entity,
     ) -> EntityRenderScope {
+        if self.enabled {
+            let entity_id = entity.id();
+            if !self.node_names.contains_key(&entity_id) {
+                if let Some(node) = runtime.block_on(entity.get_component::<Node>()) {
+                    self.node_names
+                        .insert(entity_id, node.name().to_string());
+                }
+            }
+        }
         EntityRenderScope::new(self, entity)
     }
 
@@ -115,9 +130,10 @@ impl RenderProfiler {
             let p99_ns = percentile_nearest_rank(&sorted, 0.99);
             let p999_ns = percentile_nearest_rank(&sorted, 0.999);
 
-            let node_name = Entity::from(*entity_id)
-                .get_component::<Node>()
-                .map(|n| n.name().to_string())
+            let node_name = self
+                .node_names
+                .get(entity_id)
+                .cloned()
                 .unwrap_or_default();
 
             rows.push(ReportRow {

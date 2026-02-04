@@ -21,18 +21,18 @@
 //!
 //! # async fn demo() -> anyhow::Result<()> {
 //! // 创建一个 Layer 根实体
-//! let root = Entity::new()?;
-//! root.register_component(Layer::new())?;
+//! let root = Entity::new().await?;
+//! root.register_component(Layer::new()).await?;
 //!
 //! // 在 Layer 子树下创建一个可渲染实体
-//! let child = Entity::new()?;
-//! child.register_component(Renderable::new())?;
-//! child.register_component(Transform::new())?;
+//! let child = Entity::new().await?;
+//! child.register_component(Renderable::new()).await?;
+//! child.register_component(Transform::new()).await?;
 //! // child.register_component(Shape::from_triangles(...))?;
 //!
 //! // 维护节点关系
 //! let attach_future = {
-//!     let mut root_node = root.get_component_mut::<Node>().unwrap();
+//!     let mut root_node = root.get_component_mut::<Node>().await.unwrap();
 //!     root_node.attach(child)
 //! };
 //! attach_future.await?;
@@ -192,12 +192,12 @@ impl Layer {
     /// - 会按照节点树的先序遍历顺序返回实体 ID。
     /// - 子树中若遇到其他 Layer，将整体跳过，交由对应 Layer 单独处理。
     /// - 若当前 Layer 自身处于其他 Layer 管理的子树内，则直接返回空列表。
-    pub fn renderable_entities(root: Entity) -> Result<Vec<Entity>, LayerTraversalError> {
-        let ordered = Self::traverse_layer_entities(root)?;
+    pub async fn renderable_entities(root: Entity) -> Result<Vec<Entity>, LayerTraversalError> {
+        let ordered = Self::traverse_layer_entities(root).await?;
         let mut renderables = Vec::new();
 
         for entity in ordered {
-            if let Some(renderable) = entity.get_component::<Renderable>() {
+            if let Some(renderable) = entity.get_component::<Renderable>().await {
                 if renderable.is_enabled() {
                     renderables.push(entity);
                 }
@@ -211,13 +211,13 @@ impl Layer {
     ///
     /// 只会返回同时拥有 [`Light`] 与 [`PointLight`] 的实体。
     /// 遍历规则与 [`renderable_entities`](Self::renderable_entities) 一致（会跳过嵌套 Layer 子树）。
-    pub fn point_light_entities(root: Entity) -> Result<Vec<Entity>, LayerTraversalError> {
-        let ordered = Self::traverse_layer_entities(root)?;
+    pub async fn point_light_entities(root: Entity) -> Result<Vec<Entity>, LayerTraversalError> {
+        let ordered = Self::traverse_layer_entities(root).await?;
         let mut lights = Vec::new();
 
         for entity in ordered {
-            if entity.get_component::<Light>().is_some()
-                && entity.get_component::<PointLight>().is_some()
+            if entity.get_component::<Light>().await.is_some()
+                && entity.get_component::<PointLight>().await.is_some()
             {
                 lights.push(entity);
             }
@@ -230,13 +230,13 @@ impl Layer {
     ///
     /// 只会返回同时拥有 [`Light`] 与 [`ParallelLight`] 的实体。
     /// 遍历规则与 [`renderable_entities`](Self::renderable_entities) 一致（会跳过嵌套 Layer 子树）。
-    pub fn parallel_light_entities(root: Entity) -> Result<Vec<Entity>, LayerTraversalError> {
-        let ordered = Self::traverse_layer_entities(root)?;
+    pub async fn parallel_light_entities(root: Entity) -> Result<Vec<Entity>, LayerTraversalError> {
+        let ordered = Self::traverse_layer_entities(root).await?;
         let mut lights = Vec::new();
 
         for entity in ordered {
-            if entity.get_component::<Light>().is_some()
-                && entity.get_component::<ParallelLight>().is_some()
+            if entity.get_component::<Light>().await.is_some()
+                && entity.get_component::<ParallelLight>().await.is_some()
             {
                 lights.push(entity);
             }
@@ -248,8 +248,8 @@ impl Layer {
     /// 收集当前 Layer 下所有可渲染实体的世界空间三角面集合。
     ///
     /// 返回的顺序与 [`Self::renderable_entities`] 保持一致，便于复用渲染排序。
-    pub fn world_triangles(root: Entity) -> Result<Vec<LayerTriangle>, LayerTraversalError> {
-        let bundles = Self::gather_renderables(root)?;
+    pub async fn world_triangles(root: Entity) -> Result<Vec<LayerTriangle>, LayerTraversalError> {
+        let bundles = Self::gather_renderables(root).await?;
         let mut triangles = Vec::new();
         for bundle in bundles {
             triangles.extend(bundle.into_layer_triangles());
@@ -261,25 +261,29 @@ impl Layer {
     ///
     /// 每个条目包含实体标识、转换后的三角面列表以及（若存在）绑定的材质描述，
     /// 便于在 2D 与 3D 渲染路径之间共享基础数据。
-    pub fn world_renderables(
+    pub async fn world_renderables(
         root: Entity,
     ) -> Result<Vec<LayerRenderableBundle>, LayerTraversalError> {
-        Self::gather_renderables(root)
+        Self::gather_renderables(root).await
     }
 
     /// 构造渲染前数据集合，便于多处渲染路径共享。
-    pub fn collect_renderables(
+    pub async fn collect_renderables(
         root: Entity,
     ) -> Result<LayerRenderableCollection, LayerTraversalError> {
-        Self::gather_renderables(root).map(LayerRenderableCollection::from_bundles)
+        Self::gather_renderables(root)
+            .await
+            .map(LayerRenderableCollection::from_bundles)
     }
 
-    fn gather_renderables(root: Entity) -> Result<Vec<LayerRenderableBundle>, LayerTraversalError> {
-        let renderables = Self::renderable_entities(root)?;
+    async fn gather_renderables(
+        root: Entity,
+    ) -> Result<Vec<LayerRenderableBundle>, LayerTraversalError> {
+        let renderables = Self::renderable_entities(root).await?;
         let mut bundles = Vec::new();
 
         for entity in renderables {
-            let shape_guard = match entity.get_component::<Shape>() {
+            let shape_guard = match entity.get_component::<Shape>().await {
                 Some(shape) => shape,
                 None => continue,
             };
@@ -288,7 +292,7 @@ impl Layer {
                 continue;
             }
 
-            let transform_guard = match entity.get_component::<Transform>() {
+            let transform_guard = match entity.get_component::<Transform>().await {
                 Some(transform) => transform,
                 None => continue,
             };
@@ -305,12 +309,15 @@ impl Layer {
             }
             drop(shape_guard);
 
-            let material = entity.get_component::<Material>().map(|material_guard| {
-                let regions: Vec<MaterialPatch> =
-                    material_guard.regions().iter().copied().collect();
-                let regions_arc = Arc::<[MaterialPatch]>::from(regions);
-                LayerMaterialDescriptor::new(material_guard.resource(), regions_arc)
-            });
+            let material = entity
+                .get_component::<Material>()
+                .await
+                .map(|material_guard| {
+                    let regions: Vec<MaterialPatch> =
+                        material_guard.regions().iter().copied().collect();
+                    let regions_arc = Arc::<[MaterialPatch]>::from(regions);
+                    LayerMaterialDescriptor::new(material_guard.resource(), regions_arc)
+                });
 
             bundles.push(LayerRenderableBundle::new(
                 entity,
@@ -322,16 +329,16 @@ impl Layer {
         Ok(bundles)
     }
 
-    fn traverse_layer_entities(root: Entity) -> Result<Vec<Entity>, LayerTraversalError> {
-        if root.get_component::<Layer>().is_none() {
+    async fn traverse_layer_entities(root: Entity) -> Result<Vec<Entity>, LayerTraversalError> {
+        if root.get_component::<Layer>().await.is_none() {
             return Err(LayerTraversalError::MissingLayer(root));
         }
 
-        if root.get_component::<Node>().is_none() {
+        if root.get_component::<Node>().await.is_none() {
             return Err(LayerTraversalError::MissingNode(root));
         }
 
-        if Self::has_layer_ancestor(root)? {
+        if Self::has_layer_ancestor(root).await? {
             return Ok(Vec::new());
         }
 
@@ -339,7 +346,7 @@ impl Layer {
         let mut ordered = Vec::new();
 
         while let Some(current) = stack.pop() {
-            if current != root && current.get_component::<Layer>().is_some() {
+            if current != root && current.get_component::<Layer>().await.is_some() {
                 continue;
             }
 
@@ -348,6 +355,7 @@ impl Layer {
             let child_ids = {
                 let node_guard = current
                     .get_component::<Node>()
+                    .await
                     .ok_or(LayerTraversalError::MissingNode(current))?;
                 let mut ids: Vec<Entity> = node_guard.children().iter().copied().collect();
                 ids.reverse();
@@ -362,22 +370,24 @@ impl Layer {
         Ok(ordered)
     }
 
-    fn has_layer_ancestor(entity: Entity) -> Result<bool, LayerTraversalError> {
+    async fn has_layer_ancestor(entity: Entity) -> Result<bool, LayerTraversalError> {
         let mut current_parent = {
             let node_guard = entity
                 .get_component::<Node>()
+                .await
                 .ok_or(LayerTraversalError::MissingNode(entity))?;
             node_guard.parent()
         };
 
         while let Some(id) = current_parent {
-            if id.get_component::<Layer>().is_some() {
+            if id.get_component::<Layer>().await.is_some() {
                 return Ok(true);
             }
 
             let parent = {
                 let node_guard = id
                     .get_component::<Node>()
+                    .await
                     .ok_or(LayerTraversalError::MissingNode(id))?;
                 node_guard.parent()
             };
@@ -503,28 +513,32 @@ impl LayerRenderableCollection {
 }
 
 impl ComponentRead<Layer> {
-    pub fn renderable_entities(&self) -> Result<Vec<Entity>, LayerTraversalError> {
-        Layer::renderable_entities(self.entity())
+    pub async fn renderable_entities(&self) -> Result<Vec<Entity>, LayerTraversalError> {
+        Layer::renderable_entities(self.entity()).await
     }
 
-    pub fn point_light_entities(&self) -> Result<Vec<Entity>, LayerTraversalError> {
-        Layer::point_light_entities(self.entity())
+    pub async fn point_light_entities(&self) -> Result<Vec<Entity>, LayerTraversalError> {
+        Layer::point_light_entities(self.entity()).await
     }
 
-    pub fn parallel_light_entities(&self) -> Result<Vec<Entity>, LayerTraversalError> {
-        Layer::parallel_light_entities(self.entity())
+    pub async fn parallel_light_entities(&self) -> Result<Vec<Entity>, LayerTraversalError> {
+        Layer::parallel_light_entities(self.entity()).await
     }
 
-    pub fn world_renderables(&self) -> Result<Vec<LayerRenderableBundle>, LayerTraversalError> {
-        Layer::world_renderables(self.entity())
+    pub async fn world_renderables(
+        &self,
+    ) -> Result<Vec<LayerRenderableBundle>, LayerTraversalError> {
+        Layer::world_renderables(self.entity()).await
     }
 
-    pub fn collect_renderables(&self) -> Result<LayerRenderableCollection, LayerTraversalError> {
-        Layer::collect_renderables(self.entity())
+    pub async fn collect_renderables(
+        &self,
+    ) -> Result<LayerRenderableCollection, LayerTraversalError> {
+        Layer::collect_renderables(self.entity()).await
     }
 
-    pub fn world_triangles(&self) -> Result<Vec<LayerTriangle>, LayerTraversalError> {
-        Layer::world_triangles(self.entity())
+    pub async fn world_triangles(&self) -> Result<Vec<LayerTriangle>, LayerTraversalError> {
+        Layer::world_triangles(self.entity()).await
     }
 }
 
@@ -824,10 +838,11 @@ mod tests {
     use nalgebra::Vector2;
 
     async fn detach_node(entity: Entity) {
-        if entity.get_component::<Node>().is_some() {
+        if entity.get_component::<Node>().await.is_some() {
             let detach_future = {
                 let mut node = entity
                     .get_component_mut::<Node>()
+                    .await
                     .expect("node component disappeared");
                 node.detach()
             };
@@ -839,6 +854,7 @@ mod tests {
         let attach_future = {
             let mut parent_node = parent
                 .get_component_mut::<Node>()
+                .await
                 .expect("父实体应持有 Node 组件");
             parent_node.attach(entity)
         };
@@ -846,64 +862,69 @@ mod tests {
     }
 
     async fn prepare_node(entity: &Entity, name: &str) {
-        let _ = entity.unregister_component::<Layer>();
-        let _ = entity.unregister_component::<Renderable>();
+        let _ = entity.unregister_component::<Layer>().await;
+        let _ = entity.unregister_component::<Renderable>().await;
         detach_node(*entity).await;
-        let _ = entity.unregister_component::<Node>();
+        let _ = entity.unregister_component::<Node>().await;
         let _ = entity
             .register_component(Node::new(name).expect("应能创建节点"))
+            .await
             .expect("应能注册 Node");
     }
 
     async fn cleanup(entity: &Entity) {
-        let _ = entity.unregister_component::<Layer>();
-        let _ = entity.unregister_component::<Renderable>();
+        let _ = entity.unregister_component::<Layer>().await;
+        let _ = entity.unregister_component::<Renderable>().await;
         detach_node(*entity).await;
-        let _ = entity.unregister_component::<Node>();
+        let _ = entity.unregister_component::<Node>().await;
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn layer_requires_renderable_dependency() {
-        let entity = Entity::new().expect("应能创建实体");
+        let entity = Entity::new().await.expect("应能创建实体");
         let inserted = entity
             .register_component(Layer::new())
+            .await
             .expect("缺少 Renderable 时应自动注册依赖");
         assert!(inserted.is_none());
 
         assert!(
-            entity.get_component::<Renderable>().is_some(),
+            entity.get_component::<Renderable>().await.is_some(),
             "依赖的 Renderable 应已注册"
         );
         assert!(
-            entity.get_component::<Node>().is_some(),
+            entity.get_component::<Node>().await.is_some(),
             "Renderable 的依赖 Node 应已注册"
         );
 
         let previous_auto = entity
             .register_component(Layer::new())
+            .await
             .expect("重复插入应返回旧的 Layer");
         assert!(previous_auto.is_some());
 
         prepare_node(&entity, "layer_root").await;
         let _ = entity
             .register_component(Renderable::new())
+            .await
             .expect("应能插入 Renderable");
 
         let reinserted = entity
             .register_component(Layer::new())
+            .await
             .expect("满足依赖后应能插入 Layer");
         assert!(reinserted.is_none());
 
         cleanup(&entity).await;
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn renderable_entities_skip_nested_layers() {
-        let root = Entity::new().expect("应能创建 root 实体");
-        let child_a = Entity::new().expect("应能创建 child_a 实体");
-        let child_b = Entity::new().expect("应能创建 child_b 实体");
-        let nested_root = Entity::new().expect("应能创建 nested_root 实体");
-        let nested_child = Entity::new().expect("应能创建 nested_child 实体");
+        let root = Entity::new().await.expect("应能创建 root 实体");
+        let child_a = Entity::new().await.expect("应能创建 child_a 实体");
+        let child_b = Entity::new().await.expect("应能创建 child_b 实体");
+        let nested_root = Entity::new().await.expect("应能创建 nested_root 实体");
+        let nested_child = Entity::new().await.expect("应能创建 nested_child 实体");
 
         prepare_node(&root, "root").await;
         prepare_node(&child_a, "child_a").await;
@@ -920,34 +941,43 @@ mod tests {
         // 注册可渲染组件
         let _ = root
             .register_component(Renderable::new())
+            .await
             .expect("应能插入 root rend");
         let _ = child_a
             .register_component(Renderable::new())
+            .await
             .expect("应能插入 child_a rend");
         let _ = child_b
             .register_component(Renderable::new())
+            .await
             .expect("应能插入 child_b rend");
         let _ = nested_root
             .register_component(Renderable::new())
+            .await
             .expect("应能插入 nested_root rend");
         let _ = nested_child
             .register_component(Renderable::new())
+            .await
             .expect("应能插入 nested_child rend");
 
         // 注册 Layer（根以及子树）
         let _ = root
             .register_component(Layer::new())
+            .await
             .expect("应能插入 root layer");
         let _ = nested_root
             .register_component(Layer::new())
+            .await
             .expect("应能插入 nested layer");
 
-        let root_renderables =
-            Layer::renderable_entities(root).expect("应能收集 root layer 的渲染实体");
+        let root_renderables = Layer::renderable_entities(root)
+            .await
+            .expect("应能收集 root layer 的渲染实体");
         assert_eq!(root_renderables, vec![root, child_a, child_b]);
 
-        let nested_renderables =
-            Layer::renderable_entities(nested_root).expect("嵌套 Layer 应被忽略并返回空列表");
+        let nested_renderables = Layer::renderable_entities(nested_root)
+            .await
+            .expect("嵌套 Layer 应被忽略并返回空列表");
         assert!(nested_renderables.is_empty());
 
         // 清理（按照叶 -> 根顺序）
@@ -958,12 +988,12 @@ mod tests {
         cleanup(&root).await;
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn point_light_entities_skip_nested_layers() {
-        let root = Entity::new().expect("应能创建 root 实体");
-        let nested_root = Entity::new().expect("应能创建 nested_root 实体");
-        let light_a = Entity::new().expect("应能创建 light_a 实体");
-        let light_b = Entity::new().expect("应能创建 light_b 实体");
+        let root = Entity::new().await.expect("应能创建 root 实体");
+        let nested_root = Entity::new().await.expect("应能创建 nested_root 实体");
+        let light_a = Entity::new().await.expect("应能创建 light_a 实体");
+        let light_b = Entity::new().await.expect("应能创建 light_b 实体");
 
         prepare_node(&root, "root").await;
         prepare_node(&nested_root, "nested_root").await;
@@ -976,70 +1006,85 @@ mod tests {
 
         let _ = root
             .register_component(Renderable::new())
+            .await
             .expect("应能插入 root Renderable");
         let _ = nested_root
             .register_component(Renderable::new())
+            .await
             .expect("应能插入 nested Renderable");
 
         let _ = root
             .register_component(Layer::new())
+            .await
             .expect("应能插入 root Layer");
         let _ = nested_root
             .register_component(Layer::new())
+            .await
             .expect("应能插入 nested Layer");
 
         let _ = light_a
             .register_component(Renderable::new())
+            .await
             .expect("应能为光源 A 注册 Renderable");
-        if let Some(mut renderable) = light_a.get_component_mut::<Renderable>() {
+        if let Some(mut renderable) = light_a.get_component_mut::<Renderable>().await {
             renderable.set_enabled(false);
         }
         let _ = light_a
             .register_component(Transform::new())
+            .await
             .expect("应能为光源 A 注册 Transform");
-        if let Some(mut transform) = light_a.get_component_mut::<Transform>() {
+        if let Some(mut transform) = light_a.get_component_mut::<Transform>().await {
             transform.set_position(Vector3::new(0.5, 0.0, 0.0));
         }
         let _ = light_a
             .register_component(Light::new(1.0))
+            .await
             .expect("应能插入 Light 组件");
         let _ = light_a
             .register_component(PointLight::new(2.0))
+            .await
             .expect("应能插入 PointLight 组件");
 
         let _ = light_b
             .register_component(Renderable::new())
+            .await
             .expect("应能为光源 B 注册 Renderable");
-        if let Some(mut renderable) = light_b.get_component_mut::<Renderable>() {
+        if let Some(mut renderable) = light_b.get_component_mut::<Renderable>().await {
             renderable.set_enabled(false);
         }
         let _ = light_b
             .register_component(Transform::new())
+            .await
             .expect("应能为光源 B 注册 Transform");
-        if let Some(mut transform) = light_b.get_component_mut::<Transform>() {
+        if let Some(mut transform) = light_b.get_component_mut::<Transform>().await {
             transform.set_position(Vector3::new(-0.25, 0.25, 0.0));
         }
         let _ = light_b
             .register_component(Light::new(1.0))
+            .await
             .expect("应能插入嵌套 Light 组件");
         let _ = light_b
             .register_component(PointLight::new(2.0))
+            .await
             .expect("应能插入嵌套 PointLight 组件");
 
         assert!(
-            light_a.get_component::<Light>().is_some(),
+            light_a.get_component::<Light>().await.is_some(),
             "光源 A 应具备 Light 组件"
         );
         assert!(
-            light_a.get_component::<PointLight>().is_some(),
+            light_a.get_component::<PointLight>().await.is_some(),
             "光源 A 应具备 PointLight 组件"
         );
 
-        let root_lights = Layer::point_light_entities(root).expect("根 Layer 应能收集光源");
+        let root_lights = Layer::point_light_entities(root)
+            .await
+            .expect("根 Layer 应能收集光源");
         assert_eq!(root_lights, vec![light_a], "根 Layer 应仅包含直接子光源");
 
-        let nested_lights =
-            Layer::point_light_entities(nested_root).expect("嵌套 Layer 应仅返回自身与子光源");
+        let nested_lights = Layer::point_light_entities(nested_root)
+            .await
+            .expect("嵌套 Layer 应仅返回自身与子光源");
         assert!(
             nested_lights.is_empty(),
             "嵌套 Layer 的光源应由自身渲染时处理"
@@ -1051,12 +1096,12 @@ mod tests {
         cleanup(&root).await;
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn parallel_light_entities_skip_nested_layers() {
-        let root = Entity::new().expect("应能创建 root 实体");
-        let nested_root = Entity::new().expect("应能创建 nested_root 实体");
-        let light_a = Entity::new().expect("应能创建平行光实体 A");
-        let light_b = Entity::new().expect("应能创建平行光实体 B");
+        let root = Entity::new().await.expect("应能创建 root 实体");
+        let nested_root = Entity::new().await.expect("应能创建 nested_root 实体");
+        let light_a = Entity::new().await.expect("应能创建平行光实体 A");
+        let light_b = Entity::new().await.expect("应能创建平行光实体 B");
 
         prepare_node(&root, "root_parallel").await;
         prepare_node(&nested_root, "nested_parallel").await;
@@ -1069,55 +1114,70 @@ mod tests {
 
         let _ = root
             .register_component(Renderable::new())
+            .await
             .expect("应能插入 root Renderable");
         let _ = nested_root
             .register_component(Renderable::new())
+            .await
             .expect("应能插入 nested Renderable");
 
         let _ = root
             .register_component(Layer::new())
+            .await
             .expect("应能插入 root Layer");
         let _ = nested_root
             .register_component(Layer::new())
+            .await
             .expect("应能插入 nested Layer");
 
         let _ = light_a
             .register_component(Renderable::new())
+            .await
             .expect("应能为平行光 A 注册 Renderable");
-        if let Some(mut renderable) = light_a.get_component_mut::<Renderable>() {
+        if let Some(mut renderable) = light_a.get_component_mut::<Renderable>().await {
             renderable.set_enabled(false);
         }
         let _ = light_a
             .register_component(Transform::new())
+            .await
             .expect("应能为平行光 A 注册 Transform");
         let _ = light_a
             .register_component(Light::new(0.8))
+            .await
             .expect("应能插入光源亮度");
         let _ = light_a
             .register_component(ParallelLight::new())
+            .await
             .expect("应能插入平行光组件");
 
         let _ = light_b
             .register_component(Renderable::new())
+            .await
             .expect("应能为平行光 B 注册 Renderable");
-        if let Some(mut renderable) = light_b.get_component_mut::<Renderable>() {
+        if let Some(mut renderable) = light_b.get_component_mut::<Renderable>().await {
             renderable.set_enabled(false);
         }
         let _ = light_b
             .register_component(Transform::new())
+            .await
             .expect("应能为平行光 B 注册 Transform");
         let _ = light_b
             .register_component(Light::new(0.5))
+            .await
             .expect("应能插入嵌套光源亮度");
         let _ = light_b
             .register_component(ParallelLight::new())
+            .await
             .expect("应能插入嵌套平行光组件");
 
-        let root_lights = Layer::parallel_light_entities(root).expect("根 Layer 应能收集平行光");
+        let root_lights = Layer::parallel_light_entities(root)
+            .await
+            .expect("根 Layer 应能收集平行光");
         assert_eq!(root_lights, vec![light_a], "根 Layer 应仅包含直接子平行光");
 
-        let nested_lights =
-            Layer::parallel_light_entities(nested_root).expect("嵌套 Layer 平行光查询应成功");
+        let nested_lights = Layer::parallel_light_entities(nested_root)
+            .await
+            .expect("嵌套 Layer 平行光查询应成功");
         assert!(
             nested_lights.is_empty(),
             "嵌套 Layer 的平行光应由其自身处理"
@@ -1129,7 +1189,7 @@ mod tests {
         cleanup(&root).await;
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn layer_shader_attachment_cycle() {
         let mut layer = Layer::new();
 
@@ -1172,18 +1232,23 @@ mod tests {
         assert!(layer.shader(RenderPipelineStage::Vertex).is_none());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn layer_spatial_index_supports_octree_updates() {
-        let entity = Entity::new().expect("应能创建实体");
+        let entity = Entity::new().await.expect("应能创建实体");
         prepare_node(&entity, "layer_spatial_root").await;
         let _ = entity
             .register_component(Renderable::new())
+            .await
             .expect("应能插入 Renderable");
         let _ = entity
             .register_component(Layer::new())
+            .await
             .expect("应能插入 Layer");
 
-        let mut layer = entity.get_component_mut::<Layer>().expect("应能写入 Layer");
+        let mut layer = entity
+            .get_component_mut::<Layer>()
+            .await
+            .expect("应能写入 Layer");
         assert_eq!(layer.chunk_count(), 0);
 
         let target = OctVec::new(128, 128, 128, 5);
@@ -1219,10 +1284,10 @@ mod tests {
         cleanup(&entity).await;
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn world_renderables_collects_triangles_and_materials() {
-        let root = Entity::new().expect("应能创建渲染根实体");
-        let child = Entity::new().expect("应能创建渲染子实体");
+        let root = Entity::new().await.expect("应能创建渲染根实体");
+        let child = Entity::new().await.expect("应能创建渲染子实体");
 
         prepare_node(&root, "renderables_root").await;
         prepare_node(&child, "renderables_child").await;
@@ -1230,18 +1295,22 @@ mod tests {
 
         let _ = root
             .register_component(Renderable::new())
+            .await
             .expect("应能插入根 Renderable");
         let _ = root
             .register_component(Layer::new())
+            .await
             .expect("应能插入根 Layer");
 
         let _ = child
             .register_component(Renderable::new())
+            .await
             .expect("应能插入子 Renderable");
         let _ = child
             .register_component(Transform::new())
+            .await
             .expect("应能插入子 Transform");
-        if let Some(mut transform) = child.get_component_mut::<Transform>() {
+        if let Some(mut transform) = child.get_component_mut::<Transform>().await {
             transform.set_position(Vector3::new(0.5, -0.25, 1.0));
         }
 
@@ -1250,7 +1319,10 @@ mod tests {
             Vector3::new(1.0, 0.0, 0.0),
             Vector3::new(0.0, 1.0, 0.0),
         ]]);
-        let _ = child.register_component(shape).expect("应能插入 Shape");
+        let _ = child
+            .register_component(shape)
+            .await
+            .expect("应能插入 Shape");
 
         let resource: ResourceHandle = Resource::from_memory(vec![1, 2, 3, 4]);
         let material = Material::new(
@@ -1263,9 +1335,12 @@ mod tests {
         );
         let _ = child
             .register_component(material)
+            .await
             .expect("应能插入 Material");
 
-        let bundles = Layer::world_renderables(root).expect("应能收集世界渲染数据");
+        let bundles = Layer::world_renderables(root)
+            .await
+            .expect("应能收集世界渲染数据");
         assert_eq!(bundles.len(), 1);
         let bundle = &bundles[0];
         assert_eq!(bundle.entity(), child);
@@ -1284,21 +1359,25 @@ mod tests {
             "材质资源句柄应保持引用一致"
         );
 
-        let triangles = Layer::world_triangles(root).expect("应能扁平化三角面");
+        let triangles = Layer::world_triangles(root)
+            .await
+            .expect("应能扁平化三角面");
         assert_eq!(triangles.len(), 1);
         assert_eq!(triangles[0].entity(), child);
         let vertex = triangles[0].vertices()[0];
         assert!((vertex.x - 0.5).abs() < 1e-6 && (vertex.z - 1.0).abs() < 1e-6);
 
-        let collection = Layer::collect_renderables(root).expect("应能构建渲染集合");
+        let collection = Layer::collect_renderables(root)
+            .await
+            .expect("应能构建渲染集合");
         assert_eq!(collection.bundles().len(), 1);
         assert!(collection.get(child).is_some());
         assert!(collection.material(child).is_some());
 
-        let _ = child.unregister_component::<Material>();
-        let _ = child.unregister_component::<Shape>();
-        let _ = child.unregister_component::<Transform>();
-        let _ = child.unregister_component::<Renderable>();
+        let _ = child.unregister_component::<Material>().await;
+        let _ = child.unregister_component::<Shape>().await;
+        let _ = child.unregister_component::<Transform>().await;
+        let _ = child.unregister_component::<Renderable>().await;
         cleanup(&child).await;
         cleanup(&root).await;
     }

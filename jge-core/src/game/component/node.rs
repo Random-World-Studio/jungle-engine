@@ -1,4 +1,4 @@
-use std::{collections::HashSet, fmt, ops::ControlFlow};
+use std::{collections::HashSet, fmt};
 
 use super::layer::Layer;
 use super::{Component, ComponentWrite, component, component_impl};
@@ -26,18 +26,23 @@ use tracing::warn;
 /// use jge_core::game::{component::node::Node, entity::Entity};
 ///
 /// # async fn demo() -> anyhow::Result<()> {
-/// let parent = Entity::new()?;
-/// let child = Entity::new()?;
+/// let parent = Entity::new().await?;
+/// let child = Entity::new().await?;
 ///
 /// // 把 child 挂到 parent 下（注意：attach 返回 Future）
 /// let attach_future = {
-///     let mut parent_node = parent.get_component_mut::<Node>().unwrap();
+///     let mut parent_node = parent.get_component_mut::<Node>().await.unwrap();
 ///     parent_node.attach(child)
 /// };
 /// attach_future.await?;
 ///
 /// // 获取当前 path（根到自身）
-/// let path = child.get_component::<Node>().unwrap().path()?;
+/// let path = child
+///     .get_component::<Node>()
+///     .await
+///     .unwrap()
+///     .path()
+///     .await?;
 /// println!("{path}");
 /// Ok(())
 /// # }
@@ -125,30 +130,12 @@ impl Node {
     /// 返回值形如 `root/child/grandchild`。
     ///
     /// 注意：若层级关系存在环，或层级中某个实体缺失 `Node` 组件，将返回错误。
-    pub fn path(&self) -> Result<String, NodeHierarchyError> {
+    pub async fn path(&self) -> Result<String, NodeHierarchyError> {
         let mut segments = Vec::new();
-        Self::walk_ancestor_chain::<(), _>(Some(self.entity()), self.entity(), |id| {
-            let node_guard = id
-                .get_component::<Node>()
-                .ok_or(NodeHierarchyError::MissingNode(id))?;
-            segments.push(node_guard.name.clone());
-            Ok(ControlFlow::Continue(node_guard.parent))
-        })?;
 
-        segments.reverse();
-        Ok(segments.join("/"))
-    }
-
-    fn walk_ancestor_chain<R, F>(
-        start: Option<Entity>,
-        descendant: Entity,
-        mut step: F,
-    ) -> Result<Option<R>, NodeHierarchyError>
-    where
-        F: FnMut(Entity) -> Result<ControlFlow<R, Option<Entity>>, NodeHierarchyError>,
-    {
+        let descendant = self.entity();
         let mut visited = HashSet::new();
-        let mut current = start;
+        let mut current = Some(descendant);
         while let Some(id) = current {
             if !visited.insert(id) {
                 return Err(NodeHierarchyError::HierarchyCycle {
@@ -156,30 +143,45 @@ impl Node {
                     descendant,
                 });
             }
-            match step(id)? {
-                ControlFlow::Break(result) => return Ok(Some(result)),
-                ControlFlow::Continue(next) => current = next,
-            }
+
+            let node_guard = id
+                .get_component::<Node>()
+                .await
+                .ok_or(NodeHierarchyError::MissingNode(id))?;
+            segments.push(node_guard.name.clone());
+            current = node_guard.parent;
         }
-        Ok(None)
+
+        segments.reverse();
+        Ok(segments.join("/"))
     }
 
-    fn has_ancestor_with_hint(
+    async fn has_ancestor_with_hint(
         entity: Entity,
         parent_hint: Option<Entity>,
         candidate: Entity,
     ) -> Result<bool, NodeHierarchyError> {
-        let found = Self::walk_ancestor_chain(parent_hint, entity, |id| {
+        let descendant = entity;
+        let mut visited = HashSet::new();
+        let mut current = parent_hint;
+        while let Some(id) = current {
+            if !visited.insert(id) {
+                return Err(NodeHierarchyError::HierarchyCycle {
+                    ancestor: id,
+                    descendant,
+                });
+            }
             if id == candidate {
-                return Ok(ControlFlow::Break(()));
+                return Ok(true);
             }
             let node = id
                 .get_component::<Node>()
+                .await
                 .ok_or(NodeHierarchyError::MissingNode(id))?;
-            Ok(ControlFlow::Continue(node.parent))
-        })?;
+            current = node.parent;
+        }
 
-        Ok(found.is_some())
+        Ok(false)
     }
 
     async fn attach_impl(
@@ -191,18 +193,18 @@ impl Node {
             return Err(NodeHierarchyError::SelfAttachment(child));
         }
 
-        Self::ensure_exists(child)?;
+        Self::ensure_exists(child).await?;
 
-        if Self::has_ancestor_with_hint(parent_entity, parent_hint, child)? {
+        if Self::has_ancestor_with_hint(parent_entity, parent_hint, child).await? {
             return Err(NodeHierarchyError::HierarchyCycle {
                 ancestor: parent_entity,
                 descendant: child,
             });
         }
 
-        if child.get_component::<Layer>().is_some() {
+        if child.get_component::<Layer>().await.is_some() {
             if let Some(ancestor_layer) =
-                Self::nearest_layer_ancestor_with_hint(parent_entity, parent_hint)?
+                Self::nearest_layer_ancestor_with_hint(parent_entity, parent_hint).await?
             {
                 warn!(
                     child_id = %child.id(),
@@ -216,6 +218,7 @@ impl Node {
         let (child_logic, previous_parent) = {
             let mut child_node = Self::storage()
                 .get_mut(child.id())
+                .await
                 .ok_or(NodeHierarchyError::MissingNode(child))?;
             let child_logic = child_node.logic.clone();
             let previous_parent = child_node.parent;
@@ -224,6 +227,7 @@ impl Node {
                 drop(child_node);
                 let mut parent_node = Self::storage()
                     .get_mut(parent_entity.id())
+                    .await
                     .ok_or(NodeHierarchyError::MissingNode(parent_entity))?;
                 if !parent_node.children.contains(&child) {
                     parent_node.children.push(child);
@@ -236,7 +240,7 @@ impl Node {
         };
 
         if let Some(old_parent) = previous_parent {
-            if let Some(mut old_parent_node) = Self::storage().get_mut(old_parent.id()) {
+            if let Some(mut old_parent_node) = Self::storage().get_mut(old_parent.id()).await {
                 old_parent_node
                     .children
                     .retain(|existing| *existing != child);
@@ -248,6 +252,7 @@ impl Node {
         {
             let mut parent_node = Self::storage()
                 .get_mut(parent_entity.id())
+                .await
                 .ok_or(NodeHierarchyError::MissingNode(parent_entity))?;
             if !parent_node.children.contains(&child) {
                 parent_node.children.push(child);
@@ -256,8 +261,8 @@ impl Node {
 
         // 可达性：子树是否“对引擎根可达”由 parent 是否可达决定。
         // 这会直接影响 Renderable 的实际可见性。
-        let reachable = is_reachable_from_engine_root(parent_entity);
-        set_subtree_reachable(child, reachable);
+        let reachable = is_reachable_from_engine_root(parent_entity).await;
+        set_subtree_reachable(child, reachable).await;
 
         if previous_parent.is_some() {
             Self::notify_logic(child, child_logic.clone(), NodeLogicEvent::Detach).await;
@@ -280,6 +285,7 @@ impl Node {
         let (previous_parent, logic_handle) = {
             let mut node = Self::storage()
                 .get_mut(entity.id())
+                .await
                 .ok_or(NodeHierarchyError::MissingNode(entity))?;
             let previous_parent = node.parent.take();
             let logic_handle = node.logic.clone();
@@ -289,11 +295,12 @@ impl Node {
         if let Some(parent) = previous_parent {
             let mut parent_guard = Self::storage()
                 .get_mut(parent.id())
+                .await
                 .ok_or(NodeHierarchyError::MissingNode(parent))?;
             parent_guard.children.retain(|child| *child != entity);
 
             // 只有确实从树上卸载时才会失去可达性；根节点（无 parent）不受影响。
-            set_subtree_reachable(entity, false);
+            set_subtree_reachable(entity, false).await;
         }
 
         if previous_parent.is_some() {
@@ -349,8 +356,8 @@ impl Node {
         self.logic.is_some()
     }
 
-    fn ensure_exists(entity: Entity) -> Result<(), NodeHierarchyError> {
-        if entity.get_component::<Node>().is_some() {
+    async fn ensure_exists(entity: Entity) -> Result<(), NodeHierarchyError> {
+        if entity.get_component::<Node>().await.is_some() {
             Ok(())
         } else {
             Err(NodeHierarchyError::MissingNode(entity))
@@ -370,27 +377,40 @@ impl Node {
         Ok(())
     }
 
-    fn nearest_layer_ancestor_with_hint(
+    async fn nearest_layer_ancestor_with_hint(
         entity: Entity,
         parent_hint: Option<Entity>,
     ) -> Result<Option<Entity>, NodeHierarchyError> {
-        if entity.get_component::<Layer>().is_some() {
+        if entity.get_component::<Layer>().await.is_some() {
             return Ok(Some(entity));
         }
 
-        Self::walk_ancestor_chain(parent_hint, entity, |id| {
-            if id.get_component::<Layer>().is_some() {
-                return Ok(ControlFlow::Break(id));
+        let descendant = entity;
+        let mut visited = HashSet::new();
+        let mut current = parent_hint;
+        while let Some(id) = current {
+            if !visited.insert(id) {
+                return Err(NodeHierarchyError::HierarchyCycle {
+                    ancestor: id,
+                    descendant,
+                });
+            }
+
+            if id.get_component::<Layer>().await.is_some() {
+                return Ok(Some(id));
             }
 
             let parent = {
                 let node_guard = id
                     .get_component::<Node>()
+                    .await
                     .ok_or(NodeHierarchyError::MissingNode(id))?;
                 node_guard.parent()
             };
-            Ok(ControlFlow::Continue(parent))
-        })
+            current = parent;
+        }
+
+        Ok(None)
     }
 
     async fn notify_logic(entity: Entity, logic: Option<GameLogicHandle>, event: NodeLogicEvent) {
@@ -505,15 +525,20 @@ impl std::error::Error for NodeHierarchyError {}
 mod tests {
     use super::*;
 
-    fn prepare_node(entity: &Entity, name: &str) {
+    async fn prepare_node(entity: &Entity, name: &str) {
+        let _ = entity.unregister_component::<Node>().await;
         let _ = entity
             .register_component(Node::new(name).expect("应能创建节点"))
+            .await
             .expect("应能注册节点");
     }
 
     async fn attach(parent: Entity, child: Entity, message: &str) {
         let attach_future = {
-            let mut parent_node = parent.get_component_mut::<Node>().expect("父节点应存在");
+            let mut parent_node = parent
+                .get_component_mut::<Node>()
+                .await
+                .expect("父节点应存在");
             parent_node.attach(child)
         };
         attach_future.await.expect(message);
@@ -521,97 +546,100 @@ mod tests {
 
     async fn detach(entity: Entity, message: &str) {
         let detach_future = {
-            let mut node = entity.get_component_mut::<Node>().expect("节点应存在");
+            let mut node = entity
+                .get_component_mut::<Node>()
+                .await
+                .expect("节点应存在");
             node.detach()
         };
         detach_future.await.expect(message);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn attach_sets_parent_and_child() {
-        let parent = Entity::new().expect("应能创建父实体");
-        let child = Entity::new().expect("应能创建子实体");
+        let parent = Entity::new().await.expect("应能创建父实体");
+        let child = Entity::new().await.expect("应能创建子实体");
 
-        prepare_node(&parent, "node_parent");
-        prepare_node(&child, "node_child");
+        prepare_node(&parent, "node_parent").await;
+        prepare_node(&child, "node_child").await;
 
         attach(parent, child, "应当可以挂载子节点").await;
 
-        let parent_node = parent.get_component::<Node>().expect("父节点应存在");
+        let parent_node = parent.get_component::<Node>().await.expect("父节点应存在");
         assert_eq!(parent_node.children(), &[child]);
         assert_eq!(parent_node.name(), "node_parent");
         drop(parent_node);
 
-        let child_node = child.get_component::<Node>().expect("子节点应存在");
+        let child_node = child.get_component::<Node>().await.expect("子节点应存在");
         assert_eq!(child_node.parent(), Some(parent));
         assert_eq!(child_node.name(), "node_child");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn detach_removes_relationship() {
-        let parent = Entity::new().expect("应能创建父实体");
-        let child = Entity::new().expect("应能创建子实体");
+        let parent = Entity::new().await.expect("应能创建父实体");
+        let child = Entity::new().await.expect("应能创建子实体");
 
-        prepare_node(&parent, "node_parent");
-        prepare_node(&child, "node_child");
+        prepare_node(&parent, "node_parent").await;
+        prepare_node(&child, "node_child").await;
 
         attach(parent, child, "应当可以挂载子节点").await;
         detach(child, "应能将子节点脱离父节点").await;
 
-        let parent_node = parent.get_component::<Node>().unwrap();
+        let parent_node = parent.get_component::<Node>().await.unwrap();
         assert!(parent_node.children().is_empty());
         drop(parent_node);
 
-        let child_node = child.get_component::<Node>().unwrap();
+        let child_node = child.get_component::<Node>().await.unwrap();
         assert_eq!(child_node.parent(), None);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn reattach_moves_child_between_parents() {
-        let parent_a = Entity::new().expect("应能创建第一个父实体");
-        let parent_b = Entity::new().expect("应能创建第二个父实体");
-        let child = Entity::new().expect("应能创建子实体");
+        let parent_a = Entity::new().await.expect("应能创建第一个父实体");
+        let parent_b = Entity::new().await.expect("应能创建第二个父实体");
+        let child = Entity::new().await.expect("应能创建子实体");
 
-        prepare_node(&parent_a, "node_a");
-        prepare_node(&parent_b, "node_b");
-        prepare_node(&child, "node_child");
+        prepare_node(&parent_a, "node_a").await;
+        prepare_node(&parent_b, "node_b").await;
+        prepare_node(&child, "node_child").await;
 
         attach(parent_a, child, "挂载到 parent_a 应成功").await;
         attach(parent_b, child, "重新挂载到 parent_b 应成功").await;
 
-        let old_parent = parent_a.get_component::<Node>().unwrap();
+        let old_parent = parent_a.get_component::<Node>().await.unwrap();
         assert!(old_parent.children().is_empty());
         drop(old_parent);
 
-        let new_parent = parent_b.get_component::<Node>().unwrap();
+        let new_parent = parent_b.get_component::<Node>().await.unwrap();
         assert_eq!(new_parent.children(), &[child]);
         drop(new_parent);
 
-        let child_component = child.get_component::<Node>().unwrap();
+        let child_component = child.get_component::<Node>().await.unwrap();
         assert_eq!(child_component.parent(), Some(parent_b));
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn attach_detects_cycle() {
-        let parent = Entity::new().expect("应能创建父实体");
-        let child = Entity::new().expect("应能创建子实体");
+        let parent = Entity::new().await.expect("应能创建父实体");
+        let child = Entity::new().await.expect("应能创建子实体");
 
-        prepare_node(&parent, "node_parent");
-        prepare_node(&child, "node_child");
+        prepare_node(&parent, "node_parent").await;
+        prepare_node(&child, "node_child").await;
 
         attach(parent, child, "首次挂载应成功").await;
 
         let attach_cycle_future = {
-            let mut child_node = child.get_component_mut::<Node>().unwrap();
+            let mut child_node = child.get_component_mut::<Node>().await.unwrap();
             child_node.attach(parent)
         };
-        let result = attach_cycle_future
+        let result: NodeHierarchyError = attach_cycle_future
             .await
             .expect_err("挂载应当检测到层级循环");
         assert!(matches!(result, NodeHierarchyError::HierarchyCycle { .. }));
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn node_name_validation_rules() {
         assert!(matches!(Node::new(""), Err(NodeNameError::Empty)));
         assert!(matches!(

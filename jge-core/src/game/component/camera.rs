@@ -34,9 +34,13 @@ const DEFAULT_REFERENCE_FRAMEBUFFER_HEIGHT: u32 = 1080;
 /// };
 ///
 /// # fn main() -> anyhow::Result<()> {
-/// let camera = Entity::new()?;
-/// camera.register_component(Transform::new())?;
-/// camera.register_component(Camera::new())?;
+/// let rt = tokio::runtime::Runtime::new()?;
+/// rt.block_on(async {
+///     let camera = Entity::new().await?;
+///     camera.register_component(Transform::new()).await?;
+///     camera.register_component(Camera::new()).await?;
+///     Ok::<(), anyhow::Error>(())
+/// })?;
 /// Ok(())
 /// # }
 /// ```
@@ -269,10 +273,11 @@ mod tests {
     use crate::game::entity::Entity;
 
     async fn detach_node(entity: Entity) {
-        if entity.get_component::<Node>().is_some() {
+        if entity.get_component::<Node>().await.is_some() {
             let detach_future = {
                 let mut node = entity
                     .get_component_mut::<Node>()
+                    .await
                     .expect("node component disappeared");
                 node.detach()
             };
@@ -281,65 +286,71 @@ mod tests {
     }
 
     async fn prepare_entity(entity: &Entity, node_name: &str) {
-        let _ = entity.unregister_component::<Camera>();
-        let _ = entity.unregister_component::<Transform>();
-        let _ = entity.unregister_component::<Renderable>();
+        let _ = entity.unregister_component::<Camera>().await;
+        let _ = entity.unregister_component::<Transform>().await;
+        let _ = entity.unregister_component::<Renderable>().await;
         detach_node(*entity).await;
-        let _ = entity.unregister_component::<Node>();
+        let _ = entity.unregister_component::<Node>().await;
 
         let _ = entity
             .register_component(Node::new(node_name).expect("应能创建节点"))
+            .await
             .expect("应能插入 Node");
         let _ = entity
             .register_component(Renderable::new())
+            .await
             .expect("应能插入 Renderable");
         let _ = entity
             .register_component(Transform::new())
+            .await
             .expect("应能插入 Transform");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn camera_requires_transform_dependency() {
-        let entity = Entity::new().expect("应能创建实体");
-        let _ = entity.unregister_component::<Camera>();
-        let _ = entity.unregister_component::<Transform>();
-        let _ = entity.unregister_component::<Renderable>();
+        let entity = Entity::new().await.expect("应能创建实体");
+        let _ = entity.unregister_component::<Camera>().await;
+        let _ = entity.unregister_component::<Transform>().await;
+        let _ = entity.unregister_component::<Renderable>().await;
         detach_node(entity).await;
-        let _ = entity.unregister_component::<Node>();
+        let _ = entity.unregister_component::<Node>().await;
 
         let inserted = entity
             .register_component(Camera::new())
+            .await
             .expect("缺少 Transform 时应自动注册依赖");
         assert!(inserted.is_none());
 
         assert!(
-            entity.get_component::<Transform>().is_some(),
+            entity.get_component::<Transform>().await.is_some(),
             "Transform 应被自动注册"
         );
         assert!(
-            entity.get_component::<Renderable>().is_some(),
+            entity.get_component::<Renderable>().await.is_some(),
             "Renderable 应被自动注册"
         );
         assert!(
-            entity.get_component::<Node>().is_some(),
+            entity.get_component::<Node>().await.is_some(),
             "Node 应被自动注册"
         );
 
         let previous = entity
             .register_component(Camera::new())
+            .await
             .expect("重复插入应返回旧的 Camera");
         assert!(previous.is_some());
 
         prepare_entity(&entity, "camera_node").await;
         let reinserted = entity
             .register_component(Camera::new())
+            .await
             .expect("满足依赖后应能插入 Camera");
         assert!(reinserted.is_none());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn camera_property_validations() {
-        let entity = Entity::new().expect("应能创建实体");
+        let entity = Entity::new().await.expect("应能创建实体");
         prepare_entity(&entity, "camera_props").await;
 
         let mut camera = Camera::new();
@@ -374,9 +385,9 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn camera_vertical_fov_respects_aspect_ratio() {
-        let entity = Entity::new().expect("应能创建实体");
+        let entity = Entity::new().await.expect("应能创建实体");
         prepare_entity(&entity, "camera_fov").await;
 
         let camera = Camera::new();

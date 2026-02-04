@@ -3,6 +3,7 @@ use std::{borrow::Cow, collections::HashMap, sync::Arc};
 use anyhow::{Context, anyhow, ensure};
 use image::GenericImageView;
 use nalgebra::{Matrix4, Perspective3, Point3, Rotation3, Vector3};
+use tokio::runtime::Runtime;
 use tracing::{trace, warn};
 use wgpu::{self, util::DeviceExt};
 
@@ -27,33 +28,31 @@ const SCENE3D_DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Fl
 
 impl RenderSystem {
     pub(in crate::game::system::render) fn try_get_transform(
+        runtime: &Runtime,
         entity: Entity,
     ) -> Option<ComponentRead<Transform>> {
-        for _ in 0..3 {
-            if let Some(transform) = entity.get_component::<Transform>() {
-                return Some(transform);
-            }
-            std::thread::yield_now();
-        }
-        None
+        runtime.block_on(entity.get_component::<Transform>())
     }
 
     pub(in crate::game::system::render) fn select_scene3d_camera(
+        runtime: &Runtime,
         root: Entity,
         preferred: Option<Entity>,
     ) -> Result<Option<Entity>, LayerTraversalError> {
         if let Some(candidate) = preferred {
-            if candidate.get_component::<Camera>().is_some()
-                && Self::try_get_transform(candidate).is_some()
+            if runtime
+                .block_on(candidate.get_component::<Camera>())
+                .is_some()
+                && Self::try_get_transform(runtime, candidate).is_some()
             {
                 return Ok(Some(candidate));
             }
         }
 
-        let ordered = Layer::renderable_entities(root)?;
+        let ordered = runtime.block_on(Layer::renderable_entities(root))?;
         for entity in ordered {
-            if entity.get_component::<Camera>().is_some()
-                && Self::try_get_transform(entity).is_some()
+            if runtime.block_on(entity.get_component::<Camera>()).is_some()
+                && Self::try_get_transform(runtime, entity).is_some()
             {
                 return Ok(Some(entity));
             }
@@ -65,7 +64,9 @@ impl RenderSystem {
         entity: Entity,
         context: &mut LayerRenderContext<'_, '_>,
     ) {
-        let scene_guard = match entity.get_component::<Scene3D>() {
+        let runtime = context.runtime;
+
+        let scene_guard = match runtime.block_on(entity.get_component::<Scene3D>()) {
             Some(scene) => scene,
             None => return,
         };
@@ -74,7 +75,7 @@ impl RenderSystem {
         let attached_camera = scene_guard.attached_camera();
 
         let (vertex_shader, fragment_shader) = {
-            let layer_guard = match entity.get_component::<Layer>() {
+            let layer_guard = match runtime.block_on(entity.get_component::<Layer>()) {
                 Some(layer) => layer,
                 None => {
                     warn!(
@@ -148,7 +149,7 @@ impl RenderSystem {
             }
         };
 
-        let camera_entity = match Self::select_scene3d_camera(entity, attached_camera) {
+        let camera_entity = match Self::select_scene3d_camera(runtime, entity, attached_camera) {
             Ok(camera) => match camera {
                 Some(camera) => camera,
                 None => {
@@ -171,7 +172,7 @@ impl RenderSystem {
             }
         };
 
-        let camera_guard = match camera_entity.get_component::<Camera>() {
+        let camera_guard = match runtime.block_on(camera_entity.get_component::<Camera>()) {
             Some(camera) => camera,
             None => {
                 warn!(
@@ -231,22 +232,23 @@ impl RenderSystem {
         let vertical_fov = scene_vertical.min(camera_vertical);
         let aspect_ratio = width as f32 / height as f32;
 
-        let visible =
-            match scene_guard.visible_renderables(camera_entity, viewport_framebuffer_size) {
-                Ok(collection) => collection,
-                Err(error) => {
-                    warn!(
-                        target: "jge-core",
-                        layer_id = %entity.id(),
-                        camera_id = %camera_entity.id(),
-                        error = %error,
-                        "Scene3D visibility query failed"
-                    );
-                    return;
-                }
-            };
+        let visible = match runtime
+            .block_on(scene_guard.visible_renderables(camera_entity, viewport_framebuffer_size))
+        {
+            Ok(collection) => collection,
+            Err(error) => {
+                warn!(
+                    target: "jge-core",
+                    layer_id = %entity.id(),
+                    camera_id = %camera_entity.id(),
+                    error = %error,
+                    "Scene3D visibility query failed"
+                );
+                return;
+            }
+        };
 
-        let transform_guard = match Self::try_get_transform(camera_entity) {
+        let transform_guard = match Self::try_get_transform(runtime, camera_entity) {
             Some(transform) => transform,
             None => {
                 warn!(
@@ -262,7 +264,7 @@ impl RenderSystem {
         let basis = Camera::orientation_basis(&transform_guard).normalize();
         drop(transform_guard);
 
-        let point_light_entities = match Layer::point_light_entities(entity) {
+        let point_light_entities = match runtime.block_on(Layer::point_light_entities(entity)) {
             Ok(lights) => lights,
             Err(error) => {
                 warn!(
@@ -275,7 +277,8 @@ impl RenderSystem {
             }
         };
 
-        let parallel_light_entities = match Layer::parallel_light_entities(entity) {
+        let parallel_light_entities =
+            match runtime.block_on(Layer::parallel_light_entities(entity)) {
             Ok(lights) => lights,
             Err(error) => {
                 warn!(
@@ -284,9 +287,9 @@ impl RenderSystem {
                     error = %error,
                     "Scene3D parallel lighting query failed"
                 );
-                Vec::new()
-            }
-        };
+                    Vec::new()
+                }
+            };
 
         struct ScenePointLight {
             position: Vector3<f32>,
@@ -302,9 +305,9 @@ impl RenderSystem {
         let mut point_lights: Vec<ScenePointLight> = point_light_entities
             .into_iter()
             .filter_map(|light_entity| {
-                let light = light_entity.get_component::<Light>()?;
-                let point = light_entity.get_component::<PointLight>()?;
-                let transform = light_entity.get_component::<Transform>()?;
+                let light = runtime.block_on(light_entity.get_component::<Light>())?;
+                let point = runtime.block_on(light_entity.get_component::<PointLight>())?;
+                let transform = runtime.block_on(light_entity.get_component::<Transform>())?;
                 let radius = point.distance();
                 let intensity = light.lightness();
                 let position = transform.position();
@@ -325,9 +328,9 @@ impl RenderSystem {
         let mut parallel_lights: Vec<SceneParallelLight> = parallel_light_entities
             .into_iter()
             .filter_map(|light_entity| {
-                let light = light_entity.get_component::<Light>()?;
-                let parallel = light_entity.get_component::<ParallelLight>()?;
-                let transform = light_entity.get_component::<Transform>()?;
+                let light = runtime.block_on(light_entity.get_component::<Light>())?;
+                let parallel = runtime.block_on(light_entity.get_component::<ParallelLight>())?;
+                let transform = runtime.block_on(light_entity.get_component::<Transform>())?;
                 let rotation = transform.rotation();
                 let intensity = light.lightness();
                 drop(transform);
@@ -383,7 +386,10 @@ impl RenderSystem {
                 continue;
             }
 
-            let _profile_scope = context.caches.profiler.entity_scope(bundle.entity());
+            let _profile_scope = context
+                .caches
+                .profiler
+                .entity_scope(context.runtime, bundle.entity());
 
             let material_descriptor = bundle.material();
             let regions = material_descriptor.map(|descriptor| descriptor.regions());

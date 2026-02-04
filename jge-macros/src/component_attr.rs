@@ -38,9 +38,9 @@ pub fn expand_component(args: TokenStream, input: TokenStream) -> TokenStream {
 
     let dependency_checks = dependencies.iter().map(|dep| {
         quote! {
-            if entity.get_component::<#dep>().is_none() {
+            if entity.get_component::<#dep>().await.is_none() {
                 let component = #dep::__jge_component_default(entity)?;
-                let _ = entity.register_component(component)?;
+                let _ = entity.register_component(component).await?;
             }
         }
     });
@@ -49,7 +49,7 @@ pub fn expand_component(args: TokenStream, input: TokenStream) -> TokenStream {
         quote! {}
     } else {
         quote! {
-            fn register_dependencies(entity: ::jge_core::game::entity::Entity) -> Result<(), ::jge_core::game::component::ComponentDependencyError> {
+            async fn register_dependencies(entity: ::jge_core::game::entity::Entity) -> Result<(), ::jge_core::game::component::ComponentDependencyError> {
                 #(#dependency_checks)*
                 Ok(())
             }
@@ -95,6 +95,7 @@ pub fn expand_component(args: TokenStream, input: TokenStream) -> TokenStream {
             #[allow(non_upper_case_globals)]
             #vis static #storage_ident: ::std::sync::OnceLock<::jge_core::game::component::ComponentStorage<#struct_ident>> = ::std::sync::OnceLock::new();
 
+            #[jge_core::async_trait]
             impl ::jge_core::game::component::Component for #struct_ident {
                 fn storage() -> &'static ::jge_core::game::component::ComponentStorage<Self> {
                     #storage_ident.get_or_init(::jge_core::game::component::ComponentStorage::new)

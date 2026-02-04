@@ -1,3 +1,5 @@
+use tokio::runtime::Runtime;
+
 use super::profile::RenderProfiler;
 use super::scene2d::{Scene2DDepthCache, Scene2DMaterialCache, Scene2DPipelineCache};
 use super::scene3d::{Scene3DDepthCache, Scene3DMaterialCache, Scene3DPipelineCache};
@@ -40,6 +42,7 @@ impl Default for LayerRendererCache {
 }
 
 pub(in crate::game::system::render) struct LayerRenderContext<'a, 'cache> {
+    pub(in crate::game::system::render) runtime: &'a Runtime,
     pub(in crate::game::system::render) device: &'a wgpu::Device,
     pub(in crate::game::system::render) queue: &'a wgpu::Queue,
     pub(in crate::game::system::render) encoder: &'a mut wgpu::CommandEncoder,

@@ -16,9 +16,13 @@ use crate::resource::{Resource, ResourceHandle, ResourcePath};
 /// };
 ///
 /// # fn main() -> anyhow::Result<()> {
-/// let layer_root = Entity::new()?;
-/// layer_root.register_component(Layer::new())?;
-/// layer_root.register_component(Background::new())?;
+/// let rt = tokio::runtime::Runtime::new()?;
+/// rt.block_on(async {
+///     let layer_root = Entity::new().await?;
+///     layer_root.register_component(Layer::new()).await?;
+///     layer_root.register_component(Background::new()).await?;
+///     Ok::<(), anyhow::Error>(())
+/// })?;
 /// Ok(())
 /// # }
 /// ```
@@ -89,32 +93,34 @@ mod tests {
     use super::*;
     use crate::game::entity::Entity;
 
-    #[test]
-    fn background_requires_node_dependency() {
-        let entity = Entity::new().expect("应能创建实体");
-        entity.unregister_component::<Node>();
+    #[tokio::test(flavor = "multi_thread")]
+    async fn background_requires_node_dependency() {
+        let entity = Entity::new().await.expect("应能创建实体");
+        let _ = entity.unregister_component::<Node>().await;
 
         let inserted = entity
             .register_component(Background::new())
+            .await
             .expect("缺少 Node 时应自动注册依赖");
         assert!(inserted.is_none());
-        assert!(entity.get_component::<Node>().is_some());
+        assert!(entity.get_component::<Node>().await.is_some());
     }
 
-    #[test]
-    fn background_updates_color_and_image() {
-        let entity = Entity::new().expect("应能创建实体");
+    #[tokio::test(flavor = "multi_thread")]
+    async fn background_updates_color_and_image() {
+        let entity = Entity::new().await.expect("应能创建实体");
         entity
             .register_component(Background::new())
+            .await
             .expect("应能插入 Background");
 
         {
-            let mut bg = entity.get_component_mut::<Background>().unwrap();
+            let mut bg = entity.get_component_mut::<Background>().await.unwrap();
             bg.set_color([1.0, 0.5, 0.25, 0.75]);
             bg.set_image(Some(Resource::from_memory(vec![1, 2, 3])));
         }
 
-        let bg = entity.get_component::<Background>().unwrap();
+        let bg = entity.get_component::<Background>().await.unwrap();
         assert_eq!(bg.color(), [1.0, 0.5, 0.25, 0.75]);
         assert!(bg.image().is_some());
     }

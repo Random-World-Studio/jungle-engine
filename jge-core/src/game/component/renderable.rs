@@ -1,6 +1,7 @@
 use super::node::Node;
 use super::{Component, ComponentDependencyError, ComponentStorage, component_impl};
 use crate::game::entity::Entity;
+use async_trait::async_trait;
 use std::sync::OnceLock;
 
 static RENDERABLE_STORAGE: OnceLock<ComponentStorage<Renderable>> = OnceLock::new();
@@ -22,9 +23,13 @@ static RENDERABLE_STORAGE: OnceLock<ComponentStorage<Renderable>> = OnceLock::ne
 /// };
 ///
 /// # fn main() -> anyhow::Result<()> {
-/// let e = Entity::new()?;
-/// e.register_component(Renderable::new())?;
-/// e.register_component(Transform::new())?;
+/// let rt = tokio::runtime::Runtime::new()?;
+/// rt.block_on(async {
+///     let e = Entity::new().await?;
+///     e.register_component(Renderable::new()).await?;
+///     e.register_component(Transform::new()).await?;
+///     Ok::<(), anyhow::Error>(())
+/// })?;
 /// Ok(())
 /// # }
 /// ```
@@ -38,15 +43,16 @@ pub struct Renderable {
     reachable: bool,
 }
 
+#[async_trait]
 impl Component for Renderable {
     fn storage() -> &'static ComponentStorage<Self> {
         RENDERABLE_STORAGE.get_or_init(ComponentStorage::new)
     }
 
-    fn register_dependencies(entity: Entity) -> Result<(), ComponentDependencyError> {
-        if entity.get_component::<Node>().is_none() {
+    async fn register_dependencies(entity: Entity) -> Result<(), ComponentDependencyError> {
+        if entity.get_component::<Node>().await.is_none() {
             let component = Node::__jge_component_default(entity)?;
-            let _ = entity.register_component(component)?;
+            let _ = entity.register_component(component).await?;
         }
         Ok(())
     }
@@ -56,7 +62,14 @@ impl Component for Renderable {
 
         // Renderable 的实际可见性由“是否对引擎根可达”驱动。
         // 这一步用于覆盖“先建树、后注册 Renderable”的场景。
-        let reachable = crate::game::is_reachable_from_engine_root(entity);
+        // 该钩子是同步的，但可达性计算依赖 async ECS。
+        // 这里做“最佳努力”：若处在 Tokio runtime 中则同步阻塞计算；否则回退为可达。
+        let reachable = match tokio::runtime::Handle::try_current() {
+            Ok(handle) => tokio::task::block_in_place(|| {
+                handle.block_on(crate::game::is_reachable_from_engine_root(entity))
+            }),
+            Err(_) => true,
+        };
         self.set_reachable(reachable);
     }
 
@@ -110,93 +123,118 @@ mod tests {
     use super::*;
     use crate::game::entity::Entity;
 
-    fn prepare_node(entity: &Entity, name: &str) {
+    async fn prepare_node(entity: &Entity, name: &str) {
         let _ = entity
             .register_component(Node::new(name).expect("应能创建节点"))
+            .await
             .expect("应能注册 Node 组件");
     }
 
-    #[test]
-    fn renderable_requires_node_dependency() {
-        let entity = Entity::new().expect("应能创建实体");
-        entity.unregister_component::<Node>();
+    #[tokio::test(flavor = "multi_thread")]
+    async fn renderable_requires_node_dependency() {
+        let entity = Entity::new().await.expect("应能创建实体");
+        entity.unregister_component::<Node>().await;
 
         let inserted = entity
             .register_component(Renderable::new())
+            .await
             .expect("缺少 Node 时应自动注册依赖");
         assert!(inserted.is_none());
 
         assert!(
-            entity.get_component::<Node>().is_some(),
+            entity.get_component::<Node>().await.is_some(),
             "Node 应被自动注册"
         );
 
-        prepare_node(&entity, "renderable_node");
+        prepare_node(&entity, "renderable_node").await;
         let previous = entity
             .register_component(Renderable::new())
+            .await
             .expect("重复插入应返回旧的 Renderable");
         assert!(previous.is_some());
 
-        let _ = entity.unregister_component::<Renderable>();
+        let _ = entity.unregister_component::<Renderable>().await;
     }
 
-    #[test]
-    fn toggling_enabled_state_updates_renderable() {
-        let entity = Entity::new().expect("应能创建实体");
-        prepare_node(&entity, "toggle_node");
+    #[tokio::test(flavor = "multi_thread")]
+    async fn toggling_enabled_state_updates_renderable() {
+        let entity = Entity::new().await.expect("应能创建实体");
+        prepare_node(&entity, "toggle_node").await;
 
         entity
             .register_component(Renderable::new())
+            .await
             .expect("应能插入 Renderable");
 
         {
             let mut renderable = entity
                 .get_component_mut::<Renderable>()
+                .await
                 .expect("应能获得 Renderable 的可写引用");
             renderable.set_enabled(false);
         }
 
         let renderable = entity
             .get_component::<Renderable>()
+            .await
             .expect("应能读取 Renderable 组件");
         assert!(!renderable.is_enabled());
 
         drop(renderable);
-        let _ = entity.unregister_component::<Renderable>();
+        let _ = entity.unregister_component::<Renderable>().await;
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn renderable_visibility_is_driven_by_engine_root_reachability() {
-        let engine_root = Entity::new().expect("应能创建根实体");
+        let engine_root = Entity::new().await.expect("应能创建根实体");
         crate::game::register_engine_root(engine_root);
-        crate::game::set_subtree_reachable(engine_root, true);
+        crate::game::set_subtree_reachable(engine_root, true).await;
 
-        let child = Entity::new().expect("应能创建子实体");
-        prepare_node(&child, "renderable_child");
+        let child = Entity::new().await.expect("应能创建子实体");
+        prepare_node(&child, "renderable_child").await;
         child
             .register_component(Renderable::new())
+            .await
             .expect("应能插入 Renderable");
 
         // 初始化后必须不可见。
-        assert!(!child.get_component::<Renderable>().unwrap().is_enabled());
+        assert!(
+            !child
+                .get_component::<Renderable>()
+                .await
+                .unwrap()
+                .is_enabled()
+        );
 
         // 挂载到引擎根节点后，可达则恢复为初始可见性（默认可见）。
         let attach_future = {
-            let mut root_node = engine_root.get_component_mut::<Node>().unwrap();
+            let mut root_node = engine_root.get_component_mut::<Node>().await.unwrap();
             root_node.attach(child)
         };
         attach_future.await.unwrap();
 
-        assert!(child.get_component::<Renderable>().unwrap().is_enabled());
+        assert!(
+            child
+                .get_component::<Renderable>()
+                .await
+                .unwrap()
+                .is_enabled()
+        );
 
         // 卸载后不可见。
         let detach_future = {
-            let mut node = child.get_component_mut::<Node>().unwrap();
+            let mut node = child.get_component_mut::<Node>().await.unwrap();
             node.detach()
         };
         detach_future.await.unwrap();
 
-        assert!(!child.get_component::<Renderable>().unwrap().is_enabled());
+        assert!(
+            !child
+                .get_component::<Renderable>()
+                .await
+                .unwrap()
+                .is_enabled()
+        );
 
         crate::game::unregister_engine_root(engine_root);
     }

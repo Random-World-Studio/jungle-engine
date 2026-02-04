@@ -59,7 +59,10 @@ fn main() -> anyhow::Result<()> {
 
     jge_core::resource!("resources.yaml")?;
 
-    let root = Entity::new()?;
+    // Game 创建前需要一个 root Entity；Entity/ECS API 是 async 的，这里用一个临时 runtime 做启动引导。
+    // （Game 启动后请优先使用 game.block_on / game.spawn。）
+    let bootstrap_rt = tokio::runtime::Runtime::new()?;
+    let root = bootstrap_rt.block_on(Entity::new())?;
 
     let mouse_state = Arc::new(StdMutex::new(MouseState {
         window: None,
@@ -224,10 +227,11 @@ fn main() -> anyhow::Result<()> {
     game.spawn(async move {
         tokio::time::sleep(Duration::from_secs(1)).await;
         let scene = build_demo_scene().await.context("构建测试场景失败")?;
-        if root.get_component::<Node>().is_some() {
+        if root.get_component::<Node>().await.is_some() {
             let attach_future = {
                 let mut node = root
                     .get_component_mut::<Node>()
+                    .await
                     .expect("root missing Node component");
                 node.attach(scene)
             };
@@ -341,12 +345,16 @@ async fn build_demo_scene() -> anyhow::Result<Entity> {
                 with(mut scene: Scene3D) {
                     scene
                         .bind_camera(camera)
+                        .await
                         .context("为 Scene3D 图层绑定摄像机失败")?;
                     Ok(())
                 }
 
                 with(scene: Scene3D) {
-                    scene.sync_camera_transform().context("同步 Scene3D 摄像机变换失败")?;
+                    scene
+                        .sync_camera_transform()
+                        .await
+                        .context("同步 Scene3D 摄像机变换失败")?;
                     Ok(())
                 }
 
@@ -363,7 +371,7 @@ async fn build_demo_scene() -> anyhow::Result<Entity> {
                 node {
                     + PointLight::new(15.0);
                     with(mut transform: Transform, mut light: Light) {
-                        if let Some(mut renderable) = e.get_component_mut::<Renderable>() {
+                        if let Some(mut renderable) = e.get_component_mut::<Renderable>().await {
                             renderable.set_enabled(false);
                         }
                         transform.set_position(Vector3::new(6.0, 1.0, 6.0));
@@ -375,7 +383,7 @@ async fn build_demo_scene() -> anyhow::Result<Entity> {
                 node {
                     + ParallelLight::new();
                     with(mut transform: Transform, mut light: Light) {
-                        if let Some(mut renderable) = e.get_component_mut::<Renderable>() {
+                        if let Some(mut renderable) = e.get_component_mut::<Renderable>().await {
                             renderable.set_enabled(false);
                         }
                         transform.set_rotation(Vector3::new(-0.3, -std::f32::consts::PI, 0.0));
@@ -436,7 +444,7 @@ async fn build_demo_scene() -> anyhow::Result<Entity> {
                 node {
                     + ParallelLight::new();
                     with(mut transform: Transform, mut light: Light) {
-                        if let Some(mut renderable) = e.get_component_mut::<Renderable>() {
+                        if let Some(mut renderable) = e.get_component_mut::<Renderable>().await {
                             renderable.set_enabled(false);
                         }
                         // 方向：绕 Y 轴转 180°，并略微向下俯（与 3D 示例一致的方向习惯）。
@@ -509,7 +517,7 @@ impl UiHelloLogic {
 impl GameLogic for UiHelloLogic {
     async fn update(&mut self, layer_entity: Entity, _delta: Duration) -> anyhow::Result<()> {
         // 在 framebuffer 尺寸由渲染阶段初始化后，把文字贴到视口左上角。
-        let Some(scene) = layer_entity.get_component::<Scene2D>() else {
+        let Some(scene) = layer_entity.get_component::<Scene2D>().await else {
             return Ok(());
         };
 
@@ -517,7 +525,7 @@ impl GameLogic for UiHelloLogic {
             return Ok(());
         };
 
-        if let Some(mut transform) = self.text_entity.get_component_mut::<Transform>() {
+        if let Some(mut transform) = self.text_entity.get_component_mut::<Transform>().await {
             transform.set_position(Vector3::new(world_top_left.x, world_top_left.y, 0.9));
         }
         Ok(())
@@ -591,7 +599,7 @@ impl GameLogic for CameraControllerLogic {
             return Ok(());
         }
 
-        let Some(mut transform) = entity.get_component_mut::<Transform>() else {
+        let Some(mut transform) = entity.get_component_mut::<Transform>().await else {
             return Ok(());
         };
 
@@ -657,7 +665,7 @@ impl GameLogic for CameraControllerLogic {
         let wheel_steps = self.wheel_steps;
         self.wheel_steps = 0.0;
         if wheel_steps.abs() > f32::EPSILON {
-            if let Some(mut camera) = entity.get_component_mut::<Camera>() {
+            if let Some(mut camera) = entity.get_component_mut::<Camera>().await {
                 let current = camera.vertical_half_fov_degrees();
                 let candidate = current - wheel_steps * self.zoom_sensitivity_degrees;
                 let _ = camera.set_vertical_half_fov_degrees(candidate);
@@ -862,7 +870,7 @@ impl GameLogic for CubeLogic {
     }
 
     async fn on_render(&mut self, entity: Entity, delta: Duration) -> anyhow::Result<()> {
-        if let Some(mut trans) = entity.get_component_mut::<Transform>() {
+        if let Some(mut trans) = entity.get_component_mut::<Transform>().await {
             let new_pos = trans.position() + Vector3::new(1., 0., 0.) * 0.8 * delta.as_secs_f32();
             trans.set_position(new_pos);
         }

@@ -64,9 +64,11 @@ use jge_core::{
 fn main() -> anyhow::Result<()> {
     logger::init()?;
 
-    // 注意：不要自行构造 tokio runtime。
-    // `Game` 内部已经持有 runtime，并提供 `block_on/spawn` 来运行 async 任务。
-    let engine_root = Entity::new()?;
+    // Game 创建前需要一个 root Entity；Entity/ECS API 是 async 的。
+    // 这里用一个临时 runtime 仅用于“启动引导”创建 root。
+    // Game 启动后请优先使用 `game.block_on` / `game.spawn` 驱动引擎相关 async 任务。
+    let bootstrap_rt = tokio::runtime::Runtime::new()?;
+    let engine_root = bootstrap_rt.block_on(Entity::new())?;
     let game = Game::new(GameConfig::default(), engine_root)?;
 
     // 在启动主循环前，用 Game 的 runtime 构建并挂载场景子树。
@@ -93,11 +95,14 @@ async fn build_scene(engine_root: Entity) -> anyhow::Result<()> {
 
                 // 绑定摄像机（`scene!` 的 `as` 绑定支持前向引用/非强顺序）
                 with(mut scene: Scene3D) {
-                    scene.bind_camera(camera).context("绑定摄像机失败")?;
+                    scene.bind_camera(camera).await.context("绑定摄像机失败")?;
                     Ok(())
                 }
                 with(scene: Scene3D) {
-                    scene.sync_camera_transform().context("同步摄像机变换失败")?;
+                    scene
+                        .sync_camera_transform()
+                        .await
+                        .context("同步摄像机变换失败")?;
                     Ok(())
                 }
 
@@ -161,6 +166,7 @@ async fn build_scene(engine_root: Entity) -> anyhow::Result<()> {
     let attach_future = {
         let mut root_node = engine_root
             .get_component_mut::<Node>()
+            .await
             .expect("引擎根实体应持有 Node 组件");
         root_node.attach(bindings.scene_root)
     };
@@ -181,13 +187,13 @@ cargo run
 > - `as ident` 绑定是“先收集并填充”的，因此你可以在任意位置引用同一个 `scene!` 块里导出的实体名（包括前向引用）。
 > - 节点树的 `attach` 会在宏的最后阶段集中完成：在 `with(...) { ... }` 等初始化块内，`Node::parent/children` 关系尚未建立。
 
-### （可选）销毁场景：`SceneBindings::destroy()`
+### （可选）销毁场景：`SceneBindings::destroy().await`
 
-`scene!` 返回的 `SceneBindings` 绑定集会额外提供一个 `destroy()` 方法，用于销毁本次构建出来的场景。
+`scene!` 返回的 `SceneBindings` 绑定集会额外提供一个 `destroy()` 方法（async），用于销毁本次构建出来的场景：调用时需要 `destroy().await`。
 
 - 销毁的定义：对场景中每个实体，卸载你在 DSL 中显式注册的组件（也就是 `+ CompExpr;` 那些）。
 - 依赖关系：`Entity::unregister_component` 会调用组件的 `unregister_dependencies` 钩子。
-- 幂等：重复调用 `destroy()` 不会报错。
+- 幂等：重复调用 `destroy().await` 不会报错。
 
 ### （可选）构造进度上报：`progress tx;`
 
@@ -272,7 +278,7 @@ impl GameLogic for Rotator {
     }
 
     async fn update(&mut self, entity: Entity, delta: Duration) -> anyhow::Result<()> {
-        let Some(mut transform) = entity.get_component_mut::<Transform>() else {
+        let Some(mut transform) = entity.get_component_mut::<Transform>().await else {
             return Ok(());
         };
 
@@ -497,12 +503,12 @@ impl Health {
 }
 ```
 
-目前可以通过 `Entity::get_component::<Health>()` / `Entity::get_component_mut::<Health>()` 来访问自定义组件实例。
+目前可以通过 `Entity::get_component::<Health>().await` / `Entity::get_component_mut::<Health>().await` 来访问自定义组件实例。
 
 例如在你的 GameLogic 中在某个事件发生时访问：
 
 ```rust
-if let Some(mut health) = entity.get_component_mut::<Health>() {
+if let Some(mut health) = entity.get_component_mut::<Health>().await {
     health.damage(10);
     println!("Entity {:?} 受伤，剩余生命值：{}", entity.id(), health.hp());
 }
@@ -528,10 +534,14 @@ if let Some(mut health) = entity.get_component_mut::<Health>() {
 ### 9.3 ECS/组件访问（Entity）
 
 - `jge_core::game::entity::Entity`：实体句柄。
-    - `Entity::new()` 创建实体（自动带 `Node`）。
-    - `entity.register_component(T::new())` 注册组件（会自动补齐依赖）。
-    - `entity.get_component::<T>()` 只读访问。
-    - `entity.get_component_mut::<T>()` 可写访问。
+    - `Entity::new().await` 创建实体（自动带 `Node`）。
+    - `entity.register_component(T::new()).await` 注册组件（会自动补齐依赖）。
+    - `entity.get_component::<T>().await` 只读访问。
+    - `entity.get_component_mut::<T>().await` 可写访问。
+
+> 提示：由于 `Game::new` 需要一个 root Entity，而 `Entity::new().await` 是 async，
+> 你可以在创建 `Game` 之前用临时 runtime `block_on` 一次创建 root；
+> 创建 `Game` 之后请优先用 `game.block_on` / `game.spawn`。
 
 ### 9.4 渲染基础工作流（Layer / Scene2D / Scene3D）
 

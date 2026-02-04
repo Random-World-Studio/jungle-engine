@@ -2,6 +2,7 @@ use std::{borrow::Cow, collections::HashMap, sync::Arc};
 
 use anyhow::Context;
 use image::GenericImageView;
+use tokio::runtime::Runtime;
 use tracing::{trace, warn};
 use wgpu::{self, util::DeviceExt};
 
@@ -329,12 +330,14 @@ pub(in crate::game::system::render) fn render_background_if_present(
     layer_entity: Entity,
     context: &mut LayerRenderContext<'_, '_>,
 ) -> bool {
-    let bg_entity = match find_first_background(layer_entity) {
+    let runtime = context.runtime;
+
+    let bg_entity = match find_first_background(runtime, layer_entity) {
         Some(entity) => entity,
         None => return false,
     };
 
-    let bg_guard = match bg_entity.get_component::<Background>() {
+    let bg_guard = match runtime.block_on(bg_entity.get_component::<Background>()) {
         Some(bg) => bg,
         None => return false,
     };
@@ -378,7 +381,7 @@ pub(in crate::game::system::render) fn render_background_if_present(
 
     let use_texture = if image.is_some() { 1u32 } else { 0u32 };
 
-    let (camera_pos, camera_forward) = resolve_layer_camera(layer_entity);
+    let (camera_pos, camera_forward) = resolve_layer_camera(runtime, layer_entity);
     let uniform_bytes = pack_background_uniform(color, use_texture, camera_pos, camera_forward);
     let uniform_buffer = context
         .device
@@ -461,21 +464,21 @@ pub(in crate::game::system::render) fn render_background_if_present(
     true
 }
 
-fn resolve_layer_camera(layer_entity: Entity) -> ([f32; 3], [f32; 3]) {
-    let scene_guard = match layer_entity.get_component::<Scene3D>() {
+fn resolve_layer_camera(runtime: &Runtime, layer_entity: Entity) -> ([f32; 3], [f32; 3]) {
+    let scene_guard = match runtime.block_on(layer_entity.get_component::<Scene3D>()) {
         Some(scene) => scene,
         None => return ([0.0, 0.0, 0.0], [0.0, 0.0, -1.0]),
     };
     let preferred = scene_guard.attached_camera();
     drop(scene_guard);
 
-    let camera_entity = match RenderSystem::select_scene3d_camera(layer_entity, preferred) {
+    let camera_entity = match RenderSystem::select_scene3d_camera(runtime, layer_entity, preferred) {
         Ok(Some(camera)) => camera,
         Ok(None) => return ([0.0, 0.0, 0.0], [0.0, 0.0, -1.0]),
         Err(_) => return ([0.0, 0.0, 0.0], [0.0, 0.0, -1.0]),
     };
 
-    let transform_guard = match RenderSystem::try_get_transform(camera_entity) {
+    let transform_guard = match RenderSystem::try_get_transform(runtime, camera_entity) {
         Some(transform) => transform,
         None => return ([0.0, 0.0, 0.0], [0.0, 0.0, -1.0]),
     };
@@ -490,16 +493,19 @@ fn resolve_layer_camera(layer_entity: Entity) -> ([f32; 3], [f32; 3]) {
     )
 }
 
-fn find_first_background(root: Entity) -> Option<Entity> {
+fn find_first_background(runtime: &Runtime, root: Entity) -> Option<Entity> {
     let mut stack = Vec::new();
     stack.push(root);
 
     while let Some(entity) = stack.pop() {
-        if entity.get_component::<Background>().is_some() {
+        if runtime
+            .block_on(entity.get_component::<Background>())
+            .is_some()
+        {
             return Some(entity);
         }
 
-        let node_guard = match entity.get_component::<Node>() {
+        let node_guard = match runtime.block_on(entity.get_component::<Node>()) {
             Some(node) => node,
             None => continue,
         };

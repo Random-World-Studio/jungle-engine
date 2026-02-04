@@ -66,7 +66,7 @@ pub(crate) fn unregister_engine_root(root: Entity) {
     engine_roots().write().remove(&root.id());
 }
 
-pub(crate) fn is_reachable_from_engine_root(entity: Entity) -> bool {
+pub(crate) async fn is_reachable_from_engine_root(entity: Entity) -> bool {
     let roots = engine_roots().read();
     if roots.is_empty() {
         // 在未创建 Game 的单测/工具场景下，不引入“全局根节点”约束。
@@ -82,7 +82,7 @@ pub(crate) fn is_reachable_from_engine_root(entity: Entity) -> bool {
         if roots.contains(&e.id()) {
             return true;
         }
-        let parent = e.get_component::<Node>().map(|n| n.parent());
+        let parent = e.get_component::<Node>().await.map(|n| n.parent());
         current = match parent {
             Some(p) => p,
             None => return false,
@@ -91,7 +91,7 @@ pub(crate) fn is_reachable_from_engine_root(entity: Entity) -> bool {
     false
 }
 
-pub(crate) fn set_subtree_reachable(root: Entity, reachable: bool) {
+pub(crate) async fn set_subtree_reachable(root: Entity, reachable: bool) {
     use crate::game::component::renderable::Renderable;
 
     let mut stack = vec![root];
@@ -101,11 +101,11 @@ pub(crate) fn set_subtree_reachable(root: Entity, reachable: bool) {
             continue;
         }
 
-        if let Some(mut renderable) = entity.get_component_mut::<Renderable>() {
+        if let Some(mut renderable) = entity.get_component_mut::<Renderable>().await {
             renderable.set_reachable(reachable);
         }
 
-        let children = match entity.get_component::<Node>() {
+        let children = match entity.get_component::<Node>().await {
             Some(node) => node.children().to_vec(),
             None => Vec::new(),
         };
@@ -126,7 +126,9 @@ pub(crate) fn set_subtree_reachable(root: Entity, reachable: bool) {
 /// fn main() -> ::anyhow::Result<()> {
 ///     ::jge_core::logger::init()?;
 ///
-///     let root = ::jge_core::game::entity::Entity::new()?;
+///     // `Entity`/ECS API 是 async 的；在同步 `main` 里创建根实体时可用一个临时 runtime。
+///     let rt = ::tokio::runtime::Runtime::new()?;
+///     let root = rt.block_on(::jge_core::game::entity::Entity::new())?;
 ///     let game = ::jge_core::Game::new(::jge_core::config::GameConfig::default(), root)?;
 ///
 ///     game.run()?;
@@ -157,6 +159,7 @@ pub(crate) fn set_subtree_reachable(root: Entity, reachable: bool) {
 ///         let attach_future = {
 ///             let mut root_node = engine_root
 ///                 .get_component_mut::<::jge_core::game::component::node::Node>()
+///                 .await
 ///                 .expect("engine root should have Node");
 ///             root_node.attach(bindings.scene_root)
 ///         };
@@ -187,7 +190,8 @@ impl Drop for Game {
         // 停止调度循环，避免退出阶段仍然并发执行 update/on_event。
         self.stopped.store(true, Ordering::Release);
         unregister_engine_root(self.root);
-        set_subtree_reachable(self.root, false);
+        self.runtime
+            .block_on(set_subtree_reachable(self.root, false));
         self.detach_node_tree(self.root);
     }
 }
@@ -214,6 +218,7 @@ impl Game {
     ///         let attach_future = {
     ///             let mut root_node = engine_root
     ///                 .get_component_mut::<::jge_core::game::component::node::Node>()
+    ///                 .await
     ///                 .expect("engine root should have Node");
     ///             root_node.attach(bindings.scene_root)
     ///         };
@@ -231,8 +236,10 @@ impl Game {
 
         info!(target: "jge-core", "Jungle Engine v{}", env!("CARGO_PKG_VERSION"));
 
-        if let Some(rootn) = root.get_component::<Node>() {
-            if let Some(handle) = rootn.logic().cloned() {
+        if let Some(rootn) = runtime.block_on(root.get_component::<Node>()) {
+            let handle = rootn.logic().cloned();
+            drop(rootn);
+            if let Some(handle) = handle {
                 // 注意：tokio::sync::Mutex::blocking_lock 在 runtime 内会 panic。
                 // 这里优先在“非 runtime 上下文”同步等待；若当前已在某个 runtime 内，则退化为异步 task。
                 let root_entity = root;
@@ -268,7 +275,7 @@ impl Game {
         // 标记该 root 为引擎根节点，并把其子树内的 Renderable 设为“可达”。
         // 这样当用户在 Game::new 之前就构建并挂载了一棵场景树时，可见性也能正确恢复。
         register_engine_root(root);
-        set_subtree_reachable(root, true);
+        runtime.block_on(set_subtree_reachable(root, true));
 
         Ok(Self {
             config,
@@ -312,36 +319,45 @@ impl Game {
         self.runtime.block_on(future)
     }
 
-    fn collect_subtree_postorder(root: Entity) -> Vec<Entity> {
-        fn walk(
-            entity: Entity,
-            visited: &mut HashSet<crate::game::entity::EntityId>,
-            out: &mut Vec<Entity>,
-        ) {
-            if !visited.insert(entity.id()) {
-                return;
-            }
-
-            if let Some(node) = entity.get_component::<Node>() {
-                let children = node.children().to_vec();
-                drop(node);
-                for child in children {
-                    walk(child, visited, out);
-                }
-            }
-
-            out.push(entity);
-        }
-
+    async fn collect_subtree_postorder(root: Entity) -> Vec<Entity> {
         let mut visited = HashSet::new();
         let mut out = Vec::new();
-        walk(root, &mut visited, &mut out);
+
+        // (entity, expanded)
+        let mut stack = vec![(root, false)];
+        while let Some((entity, expanded)) = stack.pop() {
+            if expanded {
+                out.push(entity);
+                continue;
+            }
+
+            if !visited.insert(entity.id()) {
+                continue;
+            }
+
+            stack.push((entity, true));
+
+            if let Some(node) = entity.get_component::<Node>().await {
+                let children = node.children().to_vec();
+                drop(node);
+
+                // 保持与递归实现一致的遍历顺序。
+                for child in children.into_iter().rev() {
+                    stack.push((child, false));
+                }
+            }
+        }
+
         out
     }
 
     fn detach_node_tree(&self, root: Entity) {
         // 没有 Node 的根实体不参与拆树。
-        if root.get_component::<Node>().is_none() {
+        if self
+            .runtime
+            .block_on(root.get_component::<Node>())
+            .is_none()
+        {
             return;
         }
 
@@ -357,15 +373,16 @@ impl Game {
 
         let runtime = &self.runtime;
         runtime.block_on(async move {
-            let order = Self::collect_subtree_postorder(root);
+            let order = Self::collect_subtree_postorder(root).await;
 
             // 拆散节点树：对除根以外的所有节点执行 detach。
             // detach 会触发 GameLogic::on_detach（节点此前确实有 parent 时）。
             for entity in order.iter().take(order.len().saturating_sub(1)) {
-                if entity.get_component::<Node>().is_some() {
+                if entity.get_component::<Node>().await.is_some() {
                     let detach_future = {
                         let mut node = entity
                             .get_component_mut::<Node>()
+                            .await
                             .expect("node component disappeared");
                         node.detach()
                     };
@@ -374,7 +391,7 @@ impl Game {
             }
 
             // 退出时额外对根节点触发一次 on_detach（根节点没有 parent，detach 不会触发生命周期回调）。
-            if let Some(root_node) = root.get_component::<Node>() {
+            if let Some(root_node) = root.get_component::<Node>().await {
                 if let Some(handle) = root_node.logic().cloned() {
                     let result = {
                         let mut logic = handle.lock().await;
@@ -511,7 +528,7 @@ impl Game {
     async fn dispatch_update(delta: Duration) {
         let mut join_set = JoinSet::new();
 
-        let node_targets = Game::collect_logic_handle_chunks();
+        let node_targets = Game::collect_logic_handle_chunks().await;
         for chunk in node_targets {
             let delta = delta;
             join_set.spawn(async move {
@@ -554,9 +571,10 @@ impl Game {
     /// - chunk 任务 panic：记录 `warn`；其他 chunk 不受影响。
     fn dispatch_event(&self, event: GameEvent) {
         trace!(target: "jge-core", "dispatch event: {:?}", event);
-        let logic_targets = Game::collect_logic_handle_chunks();
         self.runtime.spawn(async move {
             let mut join_set = JoinSet::new();
+
+            let logic_targets = Game::collect_logic_handle_chunks().await;
 
             for chunk in logic_targets {
                 let event = event.clone();
@@ -694,7 +712,7 @@ impl Game {
 
             gwin.resize_surface_if_needed();
 
-            match gwin.render(&self.root, delta) {
+            match gwin.render(&self.runtime, &self.root, delta) {
                 Ok(_) => {}
                 // 展示平面的上下文丢失
                 Err(wgpu::SurfaceError::Lost) => warn!(target: "jge-core", "Surface is lost"),
@@ -717,9 +735,10 @@ impl Game {
     /// - 单个逻辑返回 `Err`：记录 `warn` 并继续处理同 chunk 的后续逻辑。
     /// - chunk 任务 panic：记录 `warn`；其他 chunk 不受影响。
     fn dispatch_on_render(&self, delta: Duration) {
-        let logic_targets = Game::collect_logic_handle_chunks();
         self.runtime.spawn(async move {
             let mut join_set = JoinSet::new();
+
+            let logic_targets = Game::collect_logic_handle_chunks().await;
 
             for chunk in logic_targets {
                 let logic_delta = delta;
@@ -732,7 +751,7 @@ impl Game {
                         // Renderable 的“实际可见性”需要直接影响 on_render 调度。
                         // - 有 Renderable：不可见则跳过。
                         // - 无 Renderable：保持原语义，仍调度。
-                        if let Some(renderable) = entity.get_component::<Renderable>() {
+                        if let Some(renderable) = entity.get_component::<Renderable>().await {
                             if !renderable.is_enabled() {
                                 continue;
                             }
@@ -782,10 +801,13 @@ impl Game {
     ///
     /// 返回值的 chunk 划分与顺序由 `Node` 的内部存储决定；调用方通常会对每个 chunk 并发执行，
     /// 同时保持 chunk 内顺序遍历，以获得更好的缓存局部性并降低任务开销。
-    fn collect_logic_handle_chunks() -> Vec<Vec<(crate::game::entity::EntityId, GameLogicHandle)>> {
-        Node::storage().collect_chunks_with(|entity_id, node| {
-            node.logic().cloned().map(|logic| (entity_id, logic))
-        })
+    async fn collect_logic_handle_chunks()
+    -> Vec<Vec<(crate::game::entity::EntityId, GameLogicHandle)>> {
+        Node::storage()
+            .collect_chunks_with(|entity_id, node| {
+                node.logic().cloned().map(|logic| (entity_id, logic))
+            })
+            .await
     }
 }
 
@@ -823,93 +845,113 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn game_drop_detaches_tree_and_calls_root_on_detach() {
+    #[test]
+    fn game_drop_detaches_tree_and_calls_root_on_detach() {
         let events = Arc::new(StdMutex::new(Vec::new()));
 
-        let root = Entity::new().expect("should create root entity");
-        root.register_component(Node::new("root").unwrap())
-            .expect("should register root Node");
-        {
-            let set_logic_future = {
-                let mut node = root.get_component_mut::<Node>().unwrap();
+        let setup_rt = tokio::runtime::Runtime::new().expect("should create setup runtime");
+        let (root, child) = setup_rt.block_on(async {
+            let root = Entity::new().await.expect("should create root entity");
+            root.register_component(Node::new("root").unwrap())
+                .await
+                .expect("should register root Node");
+            {
+                let mut node = root
+                    .get_component_mut::<Node>()
+                    .await
+                    .expect("should get root Node mut guard");
                 node.set_logic(TrackingLogic {
                     label: "root",
                     events: events.clone(),
                 })
-            };
-            set_logic_future.await;
-        }
+                .await;
+            }
 
-        let child = Entity::new().expect("should create child entity");
-        child
-            .register_component(Node::new("child").unwrap())
-            .expect("should register child Node");
-        {
-            let set_logic_future = {
-                let mut node = child.get_component_mut::<Node>().unwrap();
+            let child = Entity::new().await.expect("should create child entity");
+            child
+                .register_component(Node::new("child").unwrap())
+                .await
+                .expect("should register child Node");
+            {
+                let mut node = child
+                    .get_component_mut::<Node>()
+                    .await
+                    .expect("should get child Node mut guard");
                 node.set_logic(TrackingLogic {
                     label: "child",
                     events: events.clone(),
                 })
-            };
-            set_logic_future.await;
-        }
+                .await;
+            }
+
+            (root, child)
+        });
+        drop(setup_rt);
 
         let game = Game::new(GameConfig::default(), root).expect("should create game");
 
-        // 注意：在 tokio runtime 上下文中，Game::new 会将 root 的 on_attach
-        // 退化为 spawn 异步任务，因此这里等待它实际写入日志，避免竞态。
-        tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                if events.lock().unwrap().contains(&"root_attach") {
-                    break;
+        // 等待 root 的 on_attach 实际执行完毕（按实现它可能被 spawn）。
+        game.block_on(async {
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    if events.lock().unwrap().contains(&"root_attach") {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
                 }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("root on_attach should complete");
+            })
+            .await
+            .expect("root on_attach should complete");
+        });
 
-        {
-            let attach_future = {
-                let mut root_node = root.get_component_mut::<Node>().unwrap();
-                root_node.attach(child)
-            };
-            attach_future.await.unwrap();
+        // 驱动 attach，确保 on_attach 完成。
+        game.block_on(async {
+            tokio::time::timeout(Duration::from_secs(2), async {
+                let attach_future = {
+                    let mut root_node = root
+                        .get_component_mut::<Node>()
+                        .await
+                        .expect("should get root Node mut guard");
+                    root_node.attach(child)
+                };
+                attach_future.await.unwrap();
+            })
+            .await
+            .expect("attach should not block");
+        });
+
+        game.block_on(async {
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    if events.lock().unwrap().contains(&"child_attach") {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("child on_attach should complete");
+        });
+
+        let (drop_tx, drop_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            drop(game);
+            let _ = drop_tx.send(());
+        });
+        drop_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("dropping Game should not block");
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let log = events.lock().unwrap();
+            if log.contains(&"child_detach") && log.contains(&"root_detach") {
+                break;
+            }
+            drop(log);
+            assert!(Instant::now() < deadline, "on_detach should complete");
+            std::thread::yield_now();
         }
-
-        tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                if events.lock().unwrap().contains(&"child_attach") {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("child on_attach should complete");
-
-        tokio::task::spawn_blocking(move || {
-            std::thread::spawn(move || drop(game))
-                .join()
-                .expect("drop thread should not panic");
-        })
-        .await
-        .expect("should be able to drop Game off runtime context");
-
-        tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                let log = events.lock().unwrap();
-                if log.contains(&"child_detach") && log.contains(&"root_detach") {
-                    break;
-                }
-                drop(log);
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("on_detach should complete");
 
         let log = events.lock().unwrap().clone();
         assert_eq!(

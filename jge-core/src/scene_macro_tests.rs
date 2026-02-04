@@ -4,7 +4,7 @@ use crate::game::component::node::Node;
 use crate::game::component::renderable::Renderable;
 use crate::game::component::transform::Transform;
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn scene_macro_allows_forward_reference_to_as_binding_and_preserves_child_order()
 -> anyhow::Result<()> {
     let bindings = crate::scene! {
@@ -14,6 +14,7 @@ async fn scene_macro_allows_forward_reference_to_as_binding_and_preserves_child_
                 with(_n: Node) {
                     let _b_node = b
                         .get_component::<Node>()
+                        .await
                         .with_context(|| "b should exist before init")?;
                     Ok(())
                 };
@@ -26,13 +27,14 @@ async fn scene_macro_allows_forward_reference_to_as_binding_and_preserves_child_
     let root_node = bindings
         .root
         .get_component::<Node>()
+        .await
         .with_context(|| "root should have Node")?;
 
     assert_eq!(root_node.children(), &[bindings.a, bindings.b]);
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn scene_macro_can_report_progress() -> anyhow::Result<()> {
     let (tx, mut rx) = tokio::sync::mpsc::channel::<f64>(64);
     let progress_tx = tx.clone();
@@ -74,7 +76,7 @@ async fn scene_macro_can_report_progress() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn scene_macro_bindings_destroy_unregisters_explicit_components() -> anyhow::Result<()> {
     let bindings = crate::scene! {
         node "root" {
@@ -84,21 +86,21 @@ async fn scene_macro_bindings_destroy_unregisters_explicit_components() -> anyho
     .await?;
 
     assert!(
-        bindings.root.get_component::<Transform>().is_some(),
+        bindings.root.get_component::<Transform>().await.is_some(),
         "Transform 应已注册"
     );
-    bindings.destroy();
+    bindings.destroy().await;
 
     assert!(
-        bindings.root.get_component::<Transform>().is_none(),
+        bindings.root.get_component::<Transform>().await.is_none(),
         "destroy() 后 Transform 应被卸载"
     );
     // 幂等：重复 destroy 不应出错。
-    bindings.destroy();
+    bindings.destroy().await;
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn scene_macro_bindings_destroy_unregisters_components_for_all_entities() -> anyhow::Result<()>
 {
     let bindings = crate::scene! {
@@ -112,19 +114,19 @@ async fn scene_macro_bindings_destroy_unregisters_components_for_all_entities() 
     }
     .await?;
 
-    assert!(bindings.root.get_component::<Renderable>().is_some());
-    assert!(bindings.root.get_component::<Transform>().is_none());
-    assert!(bindings.child.get_component::<Transform>().is_some());
-    assert!(bindings.child.get_component::<Renderable>().is_some());
+    assert!(bindings.root.get_component::<Renderable>().await.is_some());
+    assert!(bindings.root.get_component::<Transform>().await.is_none());
+    assert!(bindings.child.get_component::<Transform>().await.is_some());
+    assert!(bindings.child.get_component::<Renderable>().await.is_some());
 
-    bindings.destroy();
+    bindings.destroy().await;
 
-    assert!(bindings.root.get_component::<Renderable>().is_none());
-    assert!(bindings.child.get_component::<Transform>().is_none());
-    assert!(bindings.child.get_component::<Renderable>().is_none());
+    assert!(bindings.root.get_component::<Renderable>().await.is_none());
+    assert!(bindings.child.get_component::<Transform>().await.is_none());
+    assert!(bindings.child.get_component::<Renderable>().await.is_none());
 
     // destroy() 不应影响默认 Node 的存在（实体句柄仍有效）。
-    assert!(bindings.root.get_component::<Node>().is_some());
-    assert!(bindings.child.get_component::<Node>().is_some());
+    assert!(bindings.root.get_component::<Node>().await.is_some());
+    assert!(bindings.child.get_component::<Node>().await.is_some());
     Ok(())
 }

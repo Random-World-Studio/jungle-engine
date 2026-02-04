@@ -15,6 +15,7 @@ use crate::{
         system::render::RenderSystem,
     },
 };
+use tokio::runtime::Runtime;
 use tracing::{trace, warn};
 
 /// 窗口与渲染上下文。
@@ -172,7 +173,12 @@ impl GameWindow {
     ///   这样可以避免“嵌套 Layer”被重复渲染；子 Layer 会作为独立根在各自子树内单独处理。
     ///
     /// 返回 `wgpu::SurfaceError` 表示 surface 获取当前帧纹理失败，通常可通过重试/重建 surface 恢复。
-    pub fn render(&mut self, root: &Entity, delta: Duration) -> Result<(), wgpu::SurfaceError> {
+    pub fn render(
+        &mut self,
+        runtime: &Runtime,
+        root: &Entity,
+        delta: Duration,
+    ) -> Result<(), wgpu::SurfaceError> {
         trace!(
             target: "jge-core",
             frame_time_ms = delta.as_secs_f64() * 1000.0,
@@ -182,7 +188,7 @@ impl GameWindow {
         // Profiling（仅 debug + JGE_PROFILE=1）：按帧初始化/刷入渲染耗时样本。
         self.renderer.begin_frame();
 
-        let layer_roots = Self::collect_layer_roots(*root);
+        let layer_roots = Self::collect_layer_roots(runtime, *root);
         trace!(
             target: "jge-core",
             layer_count = layer_roots.len(),
@@ -223,7 +229,7 @@ impl GameWindow {
                 } else {
                     wgpu::LoadOp::Load
                 };
-                self.render_layer(&mut encoder, &view, *layer_entity, load_op);
+                self.render_layer(runtime, &mut encoder, &view, *layer_entity, load_op);
             }
         }
 
@@ -237,12 +243,14 @@ impl GameWindow {
 
     fn render_layer(
         &mut self,
+        runtime: &Runtime,
         encoder: &mut wgpu::CommandEncoder,
         view: &wgpu::TextureView,
         layer_entity: Entity,
         load_op: wgpu::LoadOp<wgpu::Color>,
     ) {
         self.renderer.render_layer(
+            runtime,
             &self.device,
             &self.queue,
             encoder,
@@ -257,13 +265,13 @@ impl GameWindow {
     /// 从节点树中收集需要渲染的 Layer 根实体。
     ///
     /// 该方法与 [`Layer::renderable_entities`] 的“跳过嵌套 Layer 子树”策略保持一致。
-    fn collect_layer_roots(root: Entity) -> Vec<Entity> {
+    fn collect_layer_roots(runtime: &Runtime, root: Entity) -> Vec<Entity> {
         let mut result = Vec::new();
         let mut stack = Vec::new();
         stack.push(root);
 
         while let Some(entity) = stack.pop() {
-            let node_guard = match entity.get_component::<Node>() {
+            let node_guard = match runtime.block_on(entity.get_component::<Node>()) {
                 Some(node) => node,
                 None => {
                     warn!(
@@ -278,7 +286,7 @@ impl GameWindow {
             let children: Vec<Entity> = node_guard.children().iter().copied().collect();
             drop(node_guard);
 
-            if entity.get_component::<Layer>().is_some() {
+            if runtime.block_on(entity.get_component::<Layer>()).is_some() {
                 result.push(entity);
                 continue;
             }

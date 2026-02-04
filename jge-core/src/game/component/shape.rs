@@ -20,12 +20,17 @@ use nalgebra::Vector3;
 /// use nalgebra::Vector3;
 ///
 /// # fn main() -> anyhow::Result<()> {
-/// let e = Entity::new()?;
-/// e.register_component(Shape::from_triangles(vec![[
-///     Vector3::new(0.0, 0.0, 0.0),
-///     Vector3::new(1.0, 0.0, 0.0),
-///     Vector3::new(0.0, 1.0, 0.0),
-/// ]]))?;
+/// let rt = tokio::runtime::Runtime::new()?;
+/// rt.block_on(async {
+///     let e = Entity::new().await?;
+///     e.register_component(Shape::from_triangles(vec![[
+///         Vector3::new(0.0, 0.0, 0.0),
+///         Vector3::new(1.0, 0.0, 0.0),
+///         Vector3::new(0.0, 1.0, 0.0),
+///     ]]))
+///     .await?;
+///     Ok::<(), anyhow::Error>(())
+/// })?;
 /// Ok(())
 /// # }
 /// ```
@@ -138,10 +143,11 @@ mod tests {
     use nalgebra::Vector3;
 
     async fn detach_node(entity: Entity) {
-        if entity.get_component::<Node>().is_some() {
+        if entity.get_component::<Node>().await.is_some() {
             let detach_future = {
                 let mut node = entity
                     .get_component_mut::<Node>()
+                    .await
                     .expect("node component disappeared");
                 node.detach()
             };
@@ -150,58 +156,66 @@ mod tests {
     }
 
     async fn ensure_transform(entity: &Entity, name: &str) {
-        let _ = entity.unregister_component::<Shape>();
-        let _ = entity.unregister_component::<Transform>();
-        let _ = entity.unregister_component::<Renderable>();
+        let _ = entity.unregister_component::<Shape>().await;
+        let _ = entity.unregister_component::<Transform>().await;
+        let _ = entity.unregister_component::<Renderable>().await;
         detach_node(*entity).await;
-        let _ = entity.unregister_component::<Node>();
+        let _ = entity.unregister_component::<Node>().await;
 
         let _ = entity
             .register_component(Node::new(name).expect("应能创建节点"))
+            .await
             .expect("应能插入 Node");
         let _ = entity
             .register_component(Renderable::new())
+            .await
             .expect("应能插入 Renderable");
         let _ = entity
             .register_component(Transform::new())
+            .await
             .expect("应能插入 Transform");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn shape_requires_transform_dependency() {
-        let entity = Entity::new().expect("应能创建实体");
-        let _ = entity.unregister_component::<Shape>();
-        let _ = entity.unregister_component::<Transform>();
-        let _ = entity.unregister_component::<Renderable>();
+        let entity = Entity::new().await.expect("应能创建实体");
+        let _ = entity.unregister_component::<Shape>().await;
+        let _ = entity.unregister_component::<Transform>().await;
+        let _ = entity.unregister_component::<Renderable>().await;
         detach_node(entity).await;
-        let _ = entity.unregister_component::<Node>();
+        let _ = entity.unregister_component::<Node>().await;
 
         let inserted = entity
             .register_component(Shape::new(Vec::new(), Vec::new()))
+            .await
             .expect("缺少 Transform 时应自动注册依赖");
         assert!(inserted.is_none());
 
         assert!(
-            entity.get_component::<Transform>().is_some(),
+            entity.get_component::<Transform>().await.is_some(),
             "Transform 应被自动注册"
         );
         assert!(
-            entity.get_component::<Renderable>().is_some(),
+            entity.get_component::<Renderable>().await.is_some(),
             "Renderable 应被注册"
         );
-        assert!(entity.get_component::<Node>().is_some(), "Node 应被注册");
+        assert!(
+            entity.get_component::<Node>().await.is_some(),
+            "Node 应被注册"
+        );
 
         let previous = entity
             .register_component(Shape::new(Vec::new(), Vec::new()))
+            .await
             .expect("重复插入应返回旧的 Shape");
         assert!(previous.is_some());
 
-        let _ = entity.unregister_component::<Shape>();
+        let _ = entity.unregister_component::<Shape>().await;
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn triangles_iterates_triplets() {
-        let entity = Entity::new().expect("应能创建实体");
+        let entity = Entity::new().await.expect("应能创建实体");
         ensure_transform(&entity, "shape_triangles").await;
 
         let shape = Shape::new(
@@ -216,9 +230,13 @@ mod tests {
 
         entity
             .register_component(shape.clone())
+            .await
             .expect("应能插入 Shape");
 
-        let stored = entity.get_component::<Shape>().expect("应能读取 Shape");
+        let stored = entity
+            .get_component::<Shape>()
+            .await
+            .expect("应能读取 Shape");
 
         let count = stored.triangle_count();
         assert_eq!(count, 2);
@@ -233,6 +251,6 @@ mod tests {
         assert_eq!(*tris[1].2, Vector3::new(0.0, 0.0, 1.0));
 
         drop(stored);
-        let _ = entity.unregister_component::<Shape>();
+        let _ = entity.unregister_component::<Shape>().await;
     }
 }

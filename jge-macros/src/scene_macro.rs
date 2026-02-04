@@ -466,7 +466,16 @@ mod scene_dsl {
                     pub root: #entity_ty,
                     #(#fields,)*
                     #[doc(hidden)]
-                    pub __jge_scene_destroy: ::std::vec::Vec<(#entity_ty, ::std::vec::Vec<fn(&#entity_ty)>)>,
+                    pub __jge_scene_destroy: ::std::vec::Vec<(
+                        #entity_ty,
+                        ::std::vec::Vec<
+                            fn(
+                                #entity_ty,
+                            ) -> ::core::pin::Pin<
+                                ::std::boxed::Box<dyn ::core::future::Future<Output = ()>>,
+                            >,
+                        >,
+                    )>,
                 }
             }
         };
@@ -485,10 +494,10 @@ mod scene_dsl {
                 /// - 依赖：`Entity::unregister_component` 会调用组件的 `unregister_dependencies` 钩子；
                 ///   是否会卸载依赖组件取决于组件实现策略；
                 /// - 幂等：可重复调用，多次调用不会报错。
-                pub fn destroy(&self) {
+                pub async fn destroy(&self) {
                     for (e, ops) in &self.__jge_scene_destroy {
                         for op in ops {
-                            op(e);
+                            op(*e).await;
                         }
                     }
                 }
@@ -557,31 +566,38 @@ mod scene_dsl {
                         $message:expr,
                         $res:expr
                     ) => {
-                        ($res).map_err(|__e| {
-                            let __node_name: ::core::option::Option<::std::string::String> = match $entity_for_name {
-                                ::core::option::Option::Some(__e2) => __e2
-                                    .get_component::<#core_crate::game::component::node::Node>()
-                                    .map(|n| n.name().to_string()),
-                                ::core::option::Option::None => ::core::option::Option::None,
-                            };
-                            #core_crate::logger::__scene_log_error(
-                                $phase,
-                                $node,
-                                __node_name,
-                                $entity_id,
-                                $parent_id,
-                                $child_id,
-                                $component,
-                                $resource_expr,
-                                $resource_path,
-                                file!(),
-                                line!(),
-                                column!(),
-                                $message,
-                                &__e,
-                            );
-                            __e
-                        })
+                        {
+                            match ($res) {
+                                ::core::result::Result::Ok(__ok) => ::core::result::Result::Ok(__ok),
+                                ::core::result::Result::Err(__e) => {
+                                    let __node_name: ::core::option::Option<::std::string::String> = match $entity_for_name {
+                                        ::core::option::Option::Some(__e2) => __e2
+                                            .get_component::<#core_crate::game::component::node::Node>()
+                                            .await
+                                            .map(|n| n.name().to_string()),
+                                        ::core::option::Option::None => ::core::option::Option::None,
+                                    };
+
+                                    #core_crate::logger::__scene_log_error(
+                                        $phase,
+                                        $node,
+                                        __node_name,
+                                        $entity_id,
+                                        $parent_id,
+                                        $child_id,
+                                        $component,
+                                        $resource_expr,
+                                        $resource_path,
+                                        file!(),
+                                        line!(),
+                                        column!(),
+                                        $message,
+                                        &__e,
+                                    );
+                                    ::core::result::Result::Err(__e)
+                                }
+                            }
+                        }
                     };
                 }
                 #bindings_struct
@@ -702,6 +718,7 @@ mod scene_dsl {
                     ::core::option::Option::None::<&#core_crate::resource::ResourcePath>,
                     "scene!: 创建实体失败",
                     #core_crate::game::entity::Entity::new_with_id(#id_expr)
+                        .await
                         .with_context(|| "scene!: 创建实体失败")
                 )?;
             }
@@ -717,7 +734,9 @@ mod scene_dsl {
                     ::core::option::Option::None,
                     ::core::option::Option::None::<&#core_crate::resource::ResourcePath>,
                     "scene!: 创建实体失败",
-                    #core_crate::game::entity::Entity::new().with_context(|| "scene!: 创建实体失败")
+                    #core_crate::game::entity::Entity::new()
+                        .await
+                        .with_context(|| "scene!: 创建实体失败")
                 )?;
             }
         };
@@ -731,7 +750,13 @@ mod scene_dsl {
         let destroy_var = format_ident!("{}_destroy", out_var);
         destroy_pairs.push((out_var.clone(), destroy_var.clone()));
         create_stmts.push(quote_spanned! {span=>
-            let mut #destroy_var: ::std::vec::Vec<fn(&#entity_ty)> = ::std::vec::Vec::new();
+            let mut #destroy_var: ::std::vec::Vec<
+                fn(
+                    #entity_ty,
+                ) -> ::core::pin::Pin<
+                    ::std::boxed::Box<dyn ::core::future::Future<Output = ()>>,
+                >,
+            > = ::std::vec::Vec::new();
         });
 
         // 可选：as 绑定（这里用“赋值初始化”，允许在创建阶段结束后再使用该名字）
@@ -764,6 +789,7 @@ mod scene_dsl {
                         "scene!: 实体缺少 Node 组件（无法设置名称）",
                         #out_var
                             .get_component_mut::<#node_ty>()
+                            .await
                             .with_context(|| "scene!: 实体缺少 Node 组件（无法设置名称）")
                     )?;
                     __jge_scene_log_err!(
@@ -835,6 +861,7 @@ mod scene_dsl {
                                     ::core::option::Option::None::<&#core_crate::resource::ResourcePath>,
                                     "scene!: with 缺少组件",
                                     e.get_component_mut::<#ty>()
+                                        .await
                                         .with_context(|| format!(
                                             "scene!: with 缺少组件：{}",
                                             stringify!(#ty)
@@ -856,6 +883,7 @@ mod scene_dsl {
                                     ::core::option::Option::None::<&#core_crate::resource::ResourcePath>,
                                     "scene!: with 缺少组件",
                                     e.get_component::<#ty>()
+                                        .await
                                         .with_context(|| format!(
                                             "scene!: with 缺少组件：{}",
                                             stringify!(#ty)
@@ -882,7 +910,7 @@ mod scene_dsl {
                                 ::core::option::Option::None,
                                 ::core::option::Option::None::<&#core_crate::resource::ResourcePath>,
                                 "scene!: with 块执行失败",
-                                (|| -> ::anyhow::Result<()> #block)()
+                                (async move #block).await
                             )?;
                             #tick
                         }
@@ -897,18 +925,21 @@ mod scene_dsl {
                             quote_spanned! {comp_span=>
                                 let #name = {
                                     let __path: #core_crate::resource::ResourcePath = (#path_expr).into();
-                                    #core_crate::resource::Resource::from(__path)
-                                        .ok_or_else(|| {
+                                    match #core_crate::resource::Resource::from(__path.clone()) {
+                                        ::core::option::Option::Some(__res) => ::core::result::Result::Ok(__res),
+                                        ::core::option::Option::None => {
                                             let __e = ::anyhow::anyhow!(
                                                 "scene!: 资源未注册：{}",
                                                 stringify!(#path_expr)
                                             );
+                                            let __node_name = #out_var
+                                                .get_component::<#node_ty>()
+                                                .await
+                                                .map(|n| n.name().to_string());
                                             #core_crate::logger::__scene_log_error(
                                                 "resource_lookup",
                                                 #node_ctx_var,
-                                                #out_var
-                                                    .get_component::<#node_ty>()
-                                                    .map(|n| n.name().to_string()),
+                                                __node_name,
                                                 ::core::option::Option::Some(#out_var.id()),
                                                 ::core::option::Option::None,
                                                 ::core::option::Option::None,
@@ -921,8 +952,9 @@ mod scene_dsl {
                                                 "scene!: 资源未注册",
                                                 &__e,
                                             );
-                                            __e
-                                        })?
+                                            ::core::result::Result::Err(__e)
+                                        }
+                                    }?
                                 };
                             }
                         });
@@ -955,9 +987,15 @@ mod scene_dsl {
                                 {
                                     #(#resources)*
                                     let mut #comp_tmp = #comp_expr;
-                                    fn #unreg_fn<C: #core_crate::game::component::Component>(_: &C) -> fn(&#entity_ty) {
-                                        |e: &#entity_ty| {
-                                            let _ = e.unregister_component::<C>();
+                                    fn #unreg_fn<C: #core_crate::game::component::Component>(_: &C) -> fn(
+                                        #entity_ty,
+                                    ) -> ::core::pin::Pin<
+                                        ::std::boxed::Box<dyn ::core::future::Future<Output = ()>>,
+                                    > {
+                                        |e: #entity_ty| {
+                                            ::std::boxed::Box::pin(async move {
+                                                let _ = e.unregister_component::<C>().await;
+                                            })
                                         }
                                     }
                                     #destroy_var.push(#unreg_fn(&#comp_tmp));
@@ -993,6 +1031,7 @@ mod scene_dsl {
                                         "scene!: 注册组件失败",
                                         #out_var
                                             .register_component(#comp_tmp)
+                                            .await
                                             .with_context(|| format!(
                                                 "scene!: 注册组件失败：{}",
                                                 stringify!(#comp_expr)
@@ -1007,9 +1046,15 @@ mod scene_dsl {
                                 {
                                     #(#resources)*
                                     let mut #comp_tmp = #comp_expr;
-                                    fn #unreg_fn<C: #core_crate::game::component::Component>(_: &C) -> fn(&#entity_ty) {
-                                        |e: &#entity_ty| {
-                                            let _ = e.unregister_component::<C>();
+                                    fn #unreg_fn<C: #core_crate::game::component::Component>(_: &C) -> fn(
+                                        #entity_ty,
+                                    ) -> ::core::pin::Pin<
+                                        ::std::boxed::Box<dyn ::core::future::Future<Output = ()>>,
+                                    > {
+                                        |e: #entity_ty| {
+                                            ::std::boxed::Box::pin(async move {
+                                                let _ = e.unregister_component::<C>().await;
+                                            })
                                         }
                                     }
                                     #destroy_var.push(#unreg_fn(&#comp_tmp));
@@ -1045,6 +1090,7 @@ mod scene_dsl {
                                         "scene!: 注册组件失败",
                                         #out_var
                                             .register_component(#comp_tmp)
+                                            .await
                                             .with_context(|| format!(
                                                 "scene!: 注册组件失败：{}",
                                                 stringify!(#comp_expr)
@@ -1062,9 +1108,15 @@ mod scene_dsl {
                         init_stmts.push(quote_spanned! {comp_span=>
                             {
                                 let #comp_tmp = #comp_expr;
-                                fn #unreg_fn<C: #core_crate::game::component::Component>(_: &C) -> fn(&#entity_ty) {
-                                    |e: &#entity_ty| {
-                                        let _ = e.unregister_component::<C>();
+                                fn #unreg_fn<C: #core_crate::game::component::Component>(_: &C) -> fn(
+                                    #entity_ty,
+                                ) -> ::core::pin::Pin<
+                                    ::std::boxed::Box<dyn ::core::future::Future<Output = ()>>,
+                                > {
+                                    |e: #entity_ty| {
+                                        ::std::boxed::Box::pin(async move {
+                                            let _ = e.unregister_component::<C>().await;
+                                        })
                                     }
                                 }
                                 #destroy_var.push(#unreg_fn(&#comp_tmp));
@@ -1081,6 +1133,7 @@ mod scene_dsl {
                                     "scene!: 注册组件失败",
                                     #out_var
                                         .register_component(#comp_tmp)
+                                        .await
                                         .with_context(|| format!(
                                             "scene!: 注册组件失败：{}",
                                             stringify!(#comp_expr)
@@ -1111,6 +1164,7 @@ mod scene_dsl {
                                     "scene!: 实体缺少 Node 组件（无法挂载 GameLogic）",
                                     #out_var
                                         .get_component_mut::<#node_ty>()
+                                        .await
                                         .with_context(|| "scene!: 实体缺少 Node 组件（无法挂载 GameLogic）")
                                 )?;
                                 __node.set_logic(#logic_expr)
@@ -1144,6 +1198,7 @@ mod scene_dsl {
                             "scene!: 父节点缺少 Node 组件（无法挂载子节点）",
                             #out_var
                                 .get_component_mut::<#node_ty>()
+                                .await
                                 .with_context(|| "scene!: 父节点缺少 Node 组件（无法挂载子节点）")
                         )?;
                         __parent_node.attach(#child_var)
@@ -1200,16 +1255,26 @@ pub fn expand_scene(input: TokenStream) -> TokenStream {
                         struct SceneBindings {
                             pub root: ::jge_core::game::entity::Entity,
                             #[doc(hidden)]
-                            pub __jge_scene_destroy: ::std::vec::Vec<(::jge_core::game::entity::Entity, ::std::vec::Vec<fn(&::jge_core::game::entity::Entity)>)>,
+                            pub __jge_scene_destroy: ::std::vec::Vec<(
+                                ::jge_core::game::entity::Entity,
+                                ::std::vec::Vec<
+                                    fn(
+                                        ::jge_core::game::entity::Entity,
+                                    ) -> ::core::pin::Pin<
+                                        ::std::boxed::Box<dyn ::core::future::Future<Output = ()>>,
+                                    >,
+                                >,
+                            )>,
                         }
                         impl SceneBindings {
-                            pub fn destroy(&self) {
+                            pub async fn destroy(&self) {
                                 // rust-analyzer placeholder: no-op
                             }
                         }
                         SceneBindings {
                             root: ::jge_core::game::entity::Entity::new()
-                                .expect("scene!: rust-analyzer placeholder should create entity"),
+                                .await
+                                .expect("rust-analyzer placeholder should create entity"),
                             __jge_scene_destroy: ::std::vec::Vec::new(),
                         }
                     })

@@ -5,18 +5,18 @@
 //!
 //! ## 挂载组件（Registering Components）
 //!
-//! 1. 始终使用 `entity.register_component(T::new())`（或其他构造方式）来挂载组件。
+//! 1. 始终使用 `entity.register_component(T::new()).await?`（或其他构造方式）来挂载组件。
 //! 2. 不要在 `Entity` 之外直接调用以下 API：
 //!    - `Component::insert`
 //!    - `Component::storage`（以及任何基于它的静态辅助方法）
 //! 3. 若组件依赖其他基础组件（例如 `Scene3D` 依赖 `Layer`、`Transform`、`Renderable`），请通过 `#[component(DepA, DepB, ...)]`
-//!    声明依赖，或在 `register_dependencies` 中显式注册。宏生成的默认实现会先用 `entity.get_component()` 探测已有依赖，
+//!    声明依赖，或在 `register_dependencies` 中显式注册。宏生成的默认实现会先用 `entity.get_component().await` 探测已有依赖，
 //!    再按需插入默认值。
 //!
 //! ## 读取/写入组件（Reading Components）
 //!
-//! 1. 只读访问使用 `entity.get_component::<T>()`。
-//! 2. 可变访问使用 `entity.get_component_mut::<T>()`。
+//! 1. 只读访问使用 `entity.get_component::<T>().await`。
+//! 2. 可变访问使用 `entity.get_component_mut::<T>().await`。
 //! 3. 避免在 `Entity` 之外使用 `Component::read`/`Component::write`：直接访问存储会绕过依赖记账，并可能导致缓存（例如变换/场景）不同步。
 //!
 //! ## 关于在 async 中跨 `.await` 持有 guard（重要）
@@ -36,13 +36,13 @@
 //! use jge_core::game::{component::scene3d::Scene3D, entity::Entity};
 //! use jge_core::game::component::layer::{Layer, RenderPipelineStage, ShaderLanguage};
 //!
-//! fn ensure_scene3d(entity: Entity) -> anyhow::Result<()> {
-//!     if entity.get_component::<Scene3D>().is_none() {
-//!         entity.register_component(Scene3D::new())?;
+//! async fn ensure_scene3d(entity: Entity) -> anyhow::Result<()> {
+//!     if entity.get_component::<Scene3D>().await.is_none() {
+//!         entity.register_component(Scene3D::new()).await?;
 //!     }
 //!
 //!     // 通过 Entity API 安全地获取可变引用。
-//!     if let Some(mut layer) = entity.get_component_mut::<Layer>() {
+//!     if let Some(mut layer) = entity.get_component_mut::<Layer>().await {
 //!         layer.attach_shader_from_path(
 //!             RenderPipelineStage::Vertex,
 //!             ShaderLanguage::Wgsl,
@@ -67,10 +67,10 @@ pub mod shape;
 pub mod transform;
 pub use jge_macros::{component, component_impl};
 
-use parking_lot::{
-    ArcRwLockReadGuard, ArcRwLockWriteGuard, Mutex, RawRwLock, RwLock, RwLockUpgradableReadGuard,
-};
 use std::{any::type_name, collections::HashMap, fmt, sync::Arc};
+
+use async_trait::async_trait;
+use tokio::sync::{Mutex, OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 
 use crate::game::entity::{Entity, EntityId};
 
@@ -83,7 +83,8 @@ const CHUNK_SIZE: usize = 16;
 /// - 引擎内置组件（如 `Transform`、`Layer`、`Scene3D`）都已实现。
 /// - 自定义组件建议优先使用 `#[component]` / `#[component_impl]` 宏生成实现。
 /// - **不要**在游戏代码里直接调用 `insert/read/write/remove/storage`。
-///   统一使用 [`Entity`] 的 API（`register_component`/`get_component`/`get_component_mut`）。
+///   统一使用 [`Entity`] 的 API（`register_component`/`get_component`/`get_component_mut`），并在调用处 `.await`。
+#[async_trait]
 pub trait Component: Send + Sync + Sized + 'static {
     /// 返回该组件类型的全局存储。
     ///
@@ -93,12 +94,12 @@ pub trait Component: Send + Sync + Sized + 'static {
     /// 注册依赖组件。
     ///
     /// 当你通过 `Entity::register_component` 注册组件时，会先调用此函数。
-    fn register_dependencies(_entity: Entity) -> Result<(), ComponentDependencyError> {
+    async fn register_dependencies(_entity: Entity) -> Result<(), ComponentDependencyError> {
         Ok(())
     }
 
     /// 注销依赖组件。
-    fn unregister_dependencies(_entity: Entity) {}
+    async fn unregister_dependencies(_entity: Entity) {}
 
     /// 组件被挂载到实体时触发（生命周期钩子）。
     fn attach_entity(&mut self, _entity: Entity) {}
@@ -109,29 +110,35 @@ pub trait Component: Send + Sync + Sized + 'static {
     /// 将组件写入存储。
     ///
     /// 建议通过 `Entity::register_component` 间接调用。
-    fn insert(entity: Entity, component: Self) -> Result<Option<Self>, ComponentDependencyError> {
+    async fn insert(
+        entity: Entity,
+        component: Self,
+    ) -> Result<Option<Self>, ComponentDependencyError> {
         let mut component = component;
         component.attach_entity(entity);
-        let previous = Self::storage().insert(entity.id(), component);
+        let previous = Self::storage().insert(entity.id(), component).await;
         Ok(previous.map(|mut existing| {
             existing.detach_entity();
             existing
         }))
     }
 
-    fn read(entity: Entity) -> Option<ComponentRead<Self>> {
-        Self::storage().get(entity.id())
+    async fn read(entity: Entity) -> Option<ComponentRead<Self>> {
+        Self::storage().get(entity.id()).await
     }
 
-    fn write(entity: Entity) -> Option<ComponentWrite<Self>> {
-        Self::storage().get_mut(entity.id())
+    async fn write(entity: Entity) -> Option<ComponentWrite<Self>> {
+        Self::storage().get_mut(entity.id()).await
     }
 
-    fn remove(entity: Entity) -> Option<Self> {
-        Self::storage().remove(entity.id()).map(|mut component| {
-            component.detach_entity();
-            component
-        })
+    async fn remove(entity: Entity) -> Option<Self> {
+        Self::storage()
+            .remove(entity.id())
+            .await
+            .map(|mut component| {
+                component.detach_entity();
+                component
+            })
     }
 }
 
@@ -230,49 +237,42 @@ struct ComponentLocation {
     slot: usize,
 }
 
+#[derive(Debug)]
+struct SlotValue<C> {
+    entity_id: EntityId,
+    value: C,
+}
+
 struct ComponentSlot<C> {
-    value: Arc<RwLock<Option<C>>>,
-    entity_id: RwLock<Option<EntityId>>,
+    value: Arc<RwLock<Option<SlotValue<C>>>>,
 }
 
 impl<C> ComponentSlot<C> {
     fn new() -> Self {
         Self {
             value: Arc::new(RwLock::new(None)),
-            entity_id: RwLock::new(None),
         }
     }
 
-    fn replace(&self, entity_id: EntityId, value: C) -> Option<C> {
-        let mut guard = self.value.write();
-        let previous = guard.replace(value);
-        *self.entity_id.write() = Some(entity_id);
-        previous
+    async fn replace(&self, entity_id: EntityId, value: C) -> Option<C> {
+        let mut guard = self.value.write().await;
+        let previous = guard.replace(SlotValue { entity_id, value });
+        previous.map(|p| p.value)
     }
 
-    fn take(&self) -> Option<C> {
-        let mut guard = self.value.write();
-        let removed = guard.take();
-        if removed.is_some() {
-            *self.entity_id.write() = None;
-        }
-        removed
+    async fn take(&self) -> Option<C> {
+        let mut guard = self.value.write().await;
+        guard.take().map(|p| p.value)
     }
 
-    fn try_read(&self) -> Option<ArcRwLockReadGuard<RawRwLock, Option<C>>> {
-        let guard = self.value.try_read_arc()?;
+    async fn read_owned(&self) -> Option<OwnedRwLockReadGuard<Option<SlotValue<C>>>> {
+        let guard = Arc::clone(&self.value).read_owned().await;
         if guard.is_some() { Some(guard) } else { None }
     }
 
-    fn try_write(&self) -> Option<ArcRwLockWriteGuard<RawRwLock, Option<C>>> {
-        let guard = self.value.try_write_arc()?;
+    async fn write_owned(&self) -> Option<OwnedRwLockWriteGuard<Option<SlotValue<C>>>> {
+        let guard = Arc::clone(&self.value).write_owned().await;
         if guard.is_some() { Some(guard) } else { None }
-    }
-
-    fn entity_id(&self) -> EntityId {
-        self.entity_id
-            .read()
-            .expect("组件槽位出现不一致状态: entity_id 缺失")
     }
 }
 
@@ -290,24 +290,24 @@ impl<C> ComponentChunk<C> {
         Self { slots, freelist }
     }
 
-    fn allocate(&self, entity_id: EntityId, value: C) -> (usize, Option<C>, bool) {
-        let mut freelist = self.freelist.lock();
+    async fn allocate(&self, entity_id: EntityId, value: C) -> (usize, Option<C>, bool) {
+        let mut freelist = self.freelist.lock().await;
         let slot = freelist.pop().expect("尝试在已满的块中分配槽位");
         let has_more_free = !freelist.is_empty();
         drop(freelist);
-        let previous = self.slot(slot).replace(entity_id, value);
+        let previous = self.slot(slot).replace(entity_id, value).await;
         debug_assert!(previous.is_none(), "从空闲槽位分配时不应存在旧值");
         (slot, previous, has_more_free)
     }
 
-    fn replace(&self, slot: usize, entity_id: EntityId, value: C) -> Option<C> {
-        self.slot(slot).replace(entity_id, value)
+    async fn replace(&self, slot: usize, entity_id: EntityId, value: C) -> Option<C> {
+        self.slot(slot).replace(entity_id, value).await
     }
 
-    fn release(&self, slot: usize) -> (Option<C>, bool) {
-        let removed = self.slot(slot).take();
+    async fn release(&self, slot: usize) -> (Option<C>, bool) {
+        let removed = self.slot(slot).take().await;
         if removed.is_some() {
-            let mut freelist = self.freelist.lock();
+            let mut freelist = self.freelist.lock().await;
             let was_full = freelist.is_empty();
             freelist.push(slot);
             (removed, was_full)
@@ -325,13 +325,13 @@ pub struct ComponentStorage<C> {
     inner: RwLock<ComponentStorageInner<C>>,
 }
 
-impl<C> Default for ComponentStorage<C> {
+impl<C: 'static> Default for ComponentStorage<C> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<C> ComponentStorage<C> {
+impl<C: 'static> ComponentStorage<C> {
     /// 创建一个空的组件存储。
     ///
     /// 通常只在组件实现中作为 `static OnceLock<ComponentStorage<T>>` 的默认值使用。
@@ -344,22 +344,29 @@ impl<C> ComponentStorage<C> {
     /// 遍历所有已存在组件，并将其映射收集成一个 Vec。
     ///
     /// 这是偏底层的枚举接口，通常用于系统层做批处理/收集。
-    pub fn collect_with<T, F>(&self, mut f: F) -> Vec<T>
+    pub async fn collect_with<T, F>(&self, mut f: F) -> Vec<T>
     where
         F: FnMut(EntityId, &C) -> Option<T>,
     {
-        let guard = self.inner.read();
-        let mut results = Vec::new();
+        let slots: Vec<Arc<ComponentSlot<C>>> = {
+            let guard = self.inner.read().await;
+            guard
+                .chunks
+                .iter()
+                .flat_map(|chunk| chunk.slots.iter().cloned())
+                .collect()
+        };
 
-        for chunk in &guard.chunks {
-            for slot in &chunk.slots {
-                let value_guard = slot.value.read();
-                if let Some(component) = value_guard.as_ref() {
-                    let entity_id = slot.entity_id();
-                    if let Some(mapped) = f(entity_id, component) {
-                        results.push(mapped);
-                    }
-                }
+        let mut results = Vec::new();
+        for slot in slots {
+            let Some(value_guard) = slot.read_owned().await else {
+                continue;
+            };
+            let Some(slot_value) = value_guard.as_ref() else {
+                continue;
+            };
+            if let Some(mapped) = f(slot_value.entity_id, &slot_value.value) {
+                results.push(mapped);
             }
         }
 
@@ -369,22 +376,27 @@ impl<C> ComponentStorage<C> {
     /// 按 chunk 分组遍历并收集结果。
     ///
     /// 当你希望利用“分块”天然分组做并行/局部性优化时可用。
-    pub fn collect_chunks_with<T, F>(&self, mut f: F) -> Vec<Vec<T>>
+    pub async fn collect_chunks_with<T, F>(&self, mut f: F) -> Vec<Vec<T>>
     where
         F: FnMut(EntityId, &C) -> Option<T>,
     {
-        let guard = self.inner.read();
-        let mut results: Vec<Vec<T>> = Vec::new();
+        let chunks: Vec<Arc<ComponentChunk<C>>> = {
+            let guard = self.inner.read().await;
+            guard.chunks.clone()
+        };
 
-        for chunk in &guard.chunks {
+        let mut results: Vec<Vec<T>> = Vec::new();
+        for chunk in &chunks {
             let mut chunk_results = Vec::new();
             for slot in &chunk.slots {
-                let value_guard = slot.value.read();
-                if let Some(component) = value_guard.as_ref() {
-                    let entity_id = slot.entity_id();
-                    if let Some(mapped) = f(entity_id, component) {
-                        chunk_results.push(mapped);
-                    }
+                let Some(value_guard) = slot.read_owned().await else {
+                    continue;
+                };
+                let Some(slot_value) = value_guard.as_ref() else {
+                    continue;
+                };
+                if let Some(mapped) = f(slot_value.entity_id, &slot_value.value) {
+                    chunk_results.push(mapped);
                 }
             }
             if !chunk_results.is_empty() {
@@ -398,30 +410,54 @@ impl<C> ComponentStorage<C> {
     /// 插入或替换一个组件值。
     ///
     /// 建议通过 `Entity::register_component` 间接调用。
-    pub fn insert(&self, entity_id: EntityId, component: C) -> Option<C> {
-        let guard = self.inner.upgradable_read();
-        if let Some(location) = guard.entity_to_location.get(&entity_id).copied() {
-            let chunk = guard.chunks[location.chunk].clone();
-            drop(guard);
-            return chunk.replace(location.slot, entity_id, component);
+    pub async fn insert(&self, entity_id: EntityId, component: C) -> Option<C> {
+        // fast path: existing component
+        if let Some(location) = {
+            let guard = self.inner.read().await;
+            guard.entity_to_location.get(&entity_id).copied()
+        } {
+            let chunk = {
+                let guard = self.inner.read().await;
+                guard.chunks[location.chunk].clone()
+            };
+            return chunk.replace(location.slot, entity_id, component).await;
         }
 
-        let mut guard = RwLockUpgradableReadGuard::upgrade(guard);
-        let (chunk_index, chunk) = match guard.chunks_with_free_slots.pop() {
-            Some(index) => {
-                let chunk = guard.chunks[index].clone();
-                (index, chunk)
+        // slow path: allocate a new slot
+        let (chunk_index, _chunk, slot, previous, has_more_free) = {
+            let mut guard = self.inner.write().await;
+
+            // re-check under write lock (in case another task inserted)
+            if let Some(location) = guard.entity_to_location.get(&entity_id).copied() {
+                let chunk = guard.chunks[location.chunk].clone();
+                drop(guard);
+                let previous = chunk.replace(location.slot, entity_id, component).await;
+                return previous;
             }
-            None => {
-                let index = guard.chunks.len();
-                let chunk = Arc::new(ComponentChunk::new());
-                guard.chunks.push(chunk.clone());
-                (index, chunk)
-            }
+
+            let (chunk_index, chunk) = match guard.chunks_with_free_slots.pop() {
+                Some(index) => {
+                    let chunk = guard.chunks[index].clone();
+                    (index, chunk)
+                }
+                None => {
+                    let index = guard.chunks.len();
+                    let chunk = Arc::new(ComponentChunk::new());
+                    guard.chunks.push(chunk.clone());
+                    (index, chunk)
+                }
+            };
+
+            // allocate outside of the inner lock to reduce contention
+            drop(guard);
+
+            let (slot, previous, has_more_free) = chunk.allocate(entity_id, component).await;
+            (chunk_index, chunk, slot, previous, has_more_free)
         };
 
-        let (slot, previous, has_more_free) = chunk.allocate(entity_id, component);
         debug_assert!(previous.is_none(), "从空闲槽位分配时不应存在旧值");
+
+        let mut guard = self.inner.write().await;
         guard.entity_to_location.insert(
             entity_id,
             ComponentLocation {
@@ -436,37 +472,37 @@ impl<C> ComponentStorage<C> {
     }
 
     /// 获取组件的只读 guard。
-    pub fn get(&'static self, entity_id: EntityId) -> Option<ComponentRead<C>> {
+    pub async fn get(&self, entity_id: EntityId) -> Option<ComponentRead<C>> {
         let (chunk, slot) = {
-            let guard = self.inner.read();
+            let guard = self.inner.read().await;
             let location = guard.entity_to_location.get(&entity_id)?;
             (guard.chunks[location.chunk].clone(), location.slot)
         };
-        ComponentRead::new(chunk, slot)
+        ComponentRead::new(chunk, slot).await
     }
 
     /// 获取组件的可写 guard。
-    pub fn get_mut(&'static self, entity_id: EntityId) -> Option<ComponentWrite<C>> {
+    pub async fn get_mut(&self, entity_id: EntityId) -> Option<ComponentWrite<C>> {
         let (chunk, slot) = {
-            let guard = self.inner.read();
+            let guard = self.inner.read().await;
             let location = guard.entity_to_location.get(&entity_id)?;
             (guard.chunks[location.chunk].clone(), location.slot)
         };
-        ComponentWrite::new(chunk, slot)
+        ComponentWrite::new(chunk, slot).await
     }
 
     /// 移除组件并返回旧值。
-    pub fn remove(&self, entity_id: EntityId) -> Option<C> {
-        let guard = self.inner.upgradable_read();
-        let location = match guard.entity_to_location.get(&entity_id).copied() {
-            Some(location) => location,
-            None => return None,
+    pub async fn remove(&self, entity_id: EntityId) -> Option<C> {
+        let (chunk, location) = {
+            let mut guard = self.inner.write().await;
+            let location = guard.entity_to_location.remove(&entity_id)?;
+            let chunk = guard.chunks[location.chunk].clone();
+            (chunk, location)
         };
-        let chunk = guard.chunks[location.chunk].clone();
-        let mut guard = RwLockUpgradableReadGuard::upgrade(guard);
-        guard.entity_to_location.remove(&entity_id);
-        let (removed, became_available) = chunk.release(location.slot);
+
+        let (removed, became_available) = chunk.release(location.slot).await;
         if became_available {
+            let mut guard = self.inner.write().await;
             guard.chunks_with_free_slots.push(location.chunk);
         }
         removed
@@ -475,28 +511,28 @@ impl<C> ComponentStorage<C> {
 
 /// 组件只读访问 guard。
 ///
-/// 通过 `Entity::get_component::<T>()` 获得。
+/// 通过 `Entity::get_component::<T>().await` 获得。
 /// 该类型实现了 `Deref<Target = T>`，因此可以像 `&T` 一样使用。
 pub struct ComponentRead<C: 'static> {
     _chunk: Arc<ComponentChunk<C>>,
     _slot: Arc<ComponentSlot<C>>,
-    guard: ArcRwLockReadGuard<RawRwLock, Option<C>>,
+    guard: OwnedRwLockReadGuard<Option<SlotValue<C>>>,
 }
 
 /// 组件可写访问 guard。
 ///
-/// 通过 `Entity::get_component_mut::<T>()` 获得。
+/// 通过 `Entity::get_component_mut::<T>().await` 获得。
 /// 该类型实现了 `DerefMut`，因此可以直接修改组件字段/调用 setter。
 pub struct ComponentWrite<C: 'static> {
     _chunk: Arc<ComponentChunk<C>>,
     _slot: Arc<ComponentSlot<C>>,
-    guard: ArcRwLockWriteGuard<RawRwLock, Option<C>>,
+    guard: OwnedRwLockWriteGuard<Option<SlotValue<C>>>,
 }
 
 impl<C: 'static> ComponentRead<C> {
-    fn new(chunk: Arc<ComponentChunk<C>>, index: usize) -> Option<Self> {
+    async fn new(chunk: Arc<ComponentChunk<C>>, index: usize) -> Option<Self> {
         let slot = chunk.slot(index);
-        let guard = slot.try_read()?;
+        let guard = slot.read_owned().await?;
         Some(Self {
             _chunk: chunk,
             _slot: slot,
@@ -506,14 +542,19 @@ impl<C: 'static> ComponentRead<C> {
 
     /// 返回拥有该组件的实体。
     pub fn entity(&self) -> Entity {
-        Entity::from(self._slot.entity_id())
+        Entity::from(
+            self.guard
+                .as_ref()
+                .expect("组件存储出现不一致状态: 读到空槽位")
+                .entity_id,
+        )
     }
 }
 
 impl<C: 'static> ComponentWrite<C> {
-    fn new(chunk: Arc<ComponentChunk<C>>, index: usize) -> Option<Self> {
+    async fn new(chunk: Arc<ComponentChunk<C>>, index: usize) -> Option<Self> {
         let slot = chunk.slot(index);
-        let guard = slot.try_write()?;
+        let guard = slot.write_owned().await?;
         Some(Self {
             _chunk: chunk,
             _slot: slot,
@@ -523,7 +564,12 @@ impl<C: 'static> ComponentWrite<C> {
 
     /// 返回拥有该组件的实体。
     pub fn entity(&self) -> Entity {
-        Entity::from(self._slot.entity_id())
+        Entity::from(
+            self.guard
+                .as_ref()
+                .expect("组件存储出现不一致状态: 写到空槽位")
+                .entity_id,
+        )
     }
 }
 
@@ -531,9 +577,11 @@ impl<C: 'static> std::ops::Deref for ComponentRead<C> {
     type Target = C;
 
     fn deref(&self) -> &Self::Target {
-        self.guard
+        &self
+            .guard
             .as_ref()
             .expect("组件存储出现不一致状态: 读到空槽位")
+            .value
     }
 }
 
@@ -541,22 +589,28 @@ impl<C: 'static> std::ops::Deref for ComponentWrite<C> {
     type Target = C;
 
     fn deref(&self) -> &Self::Target {
-        self.guard
+        &self
+            .guard
             .as_ref()
             .expect("组件存储出现不一致状态: 写到空槽位")
+            .value
     }
 }
 
 impl<C: 'static> std::ops::DerefMut for ComponentWrite<C> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        self.guard
+        &mut self
+            .guard
             .as_mut()
             .expect("组件存储出现不一致状态: 写到空槽位")
+            .value
     }
 }
 
-pub fn require_component<C: Component>(entity: Entity) -> Result<(), ComponentDependencyError> {
-    if entity.get_component::<C>().is_some() {
+pub async fn require_component<C: Component>(
+    entity: Entity,
+) -> Result<(), ComponentDependencyError> {
+    if entity.get_component::<C>().await.is_some() {
         Ok(())
     } else {
         Err(ComponentDependencyError::new(entity, type_name::<C>()))
@@ -646,16 +700,18 @@ mod tests {
         future
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn component_write_can_cross_await_in_send_future() {
-        let entity = Entity::new().expect("应能创建实体");
+        let entity = Entity::new().await.expect("应能创建实体");
         entity
             .register_component(TestComponent { value: 0 })
+            .await
             .expect("应能注册测试组件");
 
         let fut = async move {
             let mut guard = entity
                 .get_component_mut::<TestComponent>()
+                .await
                 .expect("应能获取写 guard");
             tokio::task::yield_now().await;
             guard.value += 1;
@@ -666,6 +722,7 @@ mod tests {
 
         let guard = entity
             .get_component::<TestComponent>()
+            .await
             .expect("应能获取读 guard");
         assert_eq!(guard.value, 1);
     }
@@ -678,87 +735,117 @@ mod tests {
         }
     }
 
-    #[test]
-    fn insert_and_read_component() {
-        let entity = Entity::new().expect("应能创建实体");
+    #[tokio::test(flavor = "multi_thread")]
+    async fn insert_and_read_component() {
+        let entity = Entity::new().await.expect("应能创建实体");
 
         assert!(
             entity
                 .register_component(TestComponent::new(5))
+                .await
                 .expect("首次插入组件不应触发依赖错误")
                 .is_none()
         );
 
         let component = entity
             .get_component::<TestComponent>()
+            .await
             .expect("应当能读取到刚插入的组件");
         assert_eq!(component.value, 5);
         drop(component);
 
-        assert!(entity.unregister_component::<TestComponent>().is_some());
+        assert!(
+            entity
+                .unregister_component::<TestComponent>()
+                .await
+                .is_some()
+        );
     }
 
-    #[test]
-    fn insert_replaces_existing_value() {
-        let entity = Entity::new().expect("应能创建实体");
+    #[tokio::test(flavor = "multi_thread")]
+    async fn insert_replaces_existing_value() {
+        let entity = Entity::new().await.expect("应能创建实体");
 
         assert!(
             entity
                 .register_component(TestComponent::new(7))
+                .await
                 .expect("首次插入组件不应触发依赖错误")
                 .is_none()
         );
         let previous = entity
             .register_component(TestComponent::new(9))
+            .await
             .expect("重复插入不应触发依赖错误")
             .expect("重复插入应返回旧的组件值");
         assert_eq!(previous.value, 7);
 
         let component = entity
             .get_component::<TestComponent>()
+            .await
             .expect("更新后仍应能读取组件");
         assert_eq!(component.value, 9);
         drop(component);
 
-        assert!(entity.unregister_component::<TestComponent>().is_some());
+        assert!(
+            entity
+                .unregister_component::<TestComponent>()
+                .await
+                .is_some()
+        );
     }
 
-    #[test]
-    fn get_mut_allows_in_place_mutation() {
-        let entity = Entity::new().expect("应能创建实体");
+    #[tokio::test(flavor = "multi_thread")]
+    async fn get_mut_allows_in_place_mutation() {
+        let entity = Entity::new().await.expect("应能创建实体");
         entity
             .register_component(TestComponent::new(11))
+            .await
             .expect("插入组件不应触发依赖错误");
 
         {
             let mut component = entity
                 .get_component_mut::<TestComponent>()
+                .await
                 .expect("应当能获取可写引用");
             component.value = 42;
         }
 
         let component = entity
             .get_component::<TestComponent>()
+            .await
             .expect("写入后组件仍应存在");
         assert_eq!(component.value, 42);
         drop(component);
 
-        assert!(entity.unregister_component::<TestComponent>().is_some());
+        assert!(
+            entity
+                .unregister_component::<TestComponent>()
+                .await
+                .is_some()
+        );
     }
 
-    #[test]
-    fn remove_clears_component_slot() {
-        let entity = Entity::new().expect("应能创建实体");
+    #[tokio::test(flavor = "multi_thread")]
+    async fn remove_clears_component_slot() {
+        let entity = Entity::new().await.expect("应能创建实体");
         entity
             .register_component(TestComponent::new(21))
+            .await
             .expect("插入组件不应触发依赖错误");
 
         let removed = entity
             .unregister_component::<TestComponent>()
+            .await
             .expect("应当能移除组件");
         assert_eq!(removed.value, 21);
-        assert!(entity.get_component::<TestComponent>().is_none());
-        assert!(entity.unregister_component::<TestComponent>().is_none());
+        assert!(entity.get_component::<TestComponent>().await.is_none());
+        assert!(
+            entity
+                .unregister_component::<TestComponent>()
+                .await
+                .is_none()
+        );
     }
 
     #[component(TestComponent)]
@@ -773,61 +860,70 @@ mod tests {
     #[derive(Debug, Default)]
     struct NeedsFailingDefault;
 
-    #[test]
-    fn component_dependency_checks_for_required_components() {
-        let entity = Entity::new().expect("应能创建实体");
+    #[tokio::test(flavor = "multi_thread")]
+    async fn component_dependency_checks_for_required_components() {
+        let entity = Entity::new().await.expect("应能创建实体");
 
         let inserted = entity
             .register_component(NeedsTestComponent::default())
+            .await
             .expect("依赖应能通过默认构造自动满足");
         assert!(inserted.is_none());
 
         let dependency = entity
             .get_component::<TestComponent>()
+            .await
             .expect("应自动注册缺失的依赖组件");
         assert_eq!(dependency.value, 0);
         drop(dependency);
 
         let previous = entity
             .register_component(TestComponent::new(3))
+            .await
             .expect("更新依赖组件不应触发错误")
             .expect("应当获取到默认注册的依赖组件");
         assert_eq!(previous.value, 0);
 
         let previous_needs = entity
             .register_component(NeedsTestComponent::default())
+            .await
             .expect("依赖已满足时仍应允许注册组件");
         assert!(previous_needs.is_some());
 
-        let _ = entity.unregister_component::<NeedsTestComponent>();
-        let _ = entity.unregister_component::<TestComponent>();
+        let _ = entity.unregister_component::<NeedsTestComponent>().await;
+        let _ = entity.unregister_component::<TestComponent>().await;
     }
 
-    #[test]
-    fn dependency_supports_non_new_default_methods() {
-        let entity = Entity::new().expect("应能创建实体");
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dependency_supports_non_new_default_methods() {
+        let entity = Entity::new().await.expect("应能创建实体");
 
         let inserted = entity
             .register_component(NeedsAlternateDefault::default())
+            .await
             .expect("依赖应能通过默认方法自动满足");
         assert!(inserted.is_none());
 
         let dependency = entity
             .get_component::<AlternateDefaultComponent>()
+            .await
             .expect("依赖组件应被默认方法创建");
         assert_eq!(dependency.created_by, "build");
         drop(dependency);
 
-        let _ = entity.unregister_component::<NeedsAlternateDefault>();
-        let _ = entity.unregister_component::<AlternateDefaultComponent>();
+        let _ = entity.unregister_component::<NeedsAlternateDefault>().await;
+        let _ = entity
+            .unregister_component::<AlternateDefaultComponent>()
+            .await;
     }
 
-    #[test]
-    fn dependency_default_errors_propagate_sources() {
-        let entity = Entity::new().expect("应能创建实体");
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dependency_default_errors_propagate_sources() {
+        let entity = Entity::new().await.expect("应能创建实体");
 
         let err = entity
             .register_component(NeedsFailingDefault::default())
+            .await
             .expect_err("失败的默认方法应向上传播错误");
         assert_eq!(err.entity(), entity);
         assert_eq!(err.required(), type_name::<FailingDefaultComponent>());
@@ -839,25 +935,38 @@ mod tests {
         assert_eq!(source.kind(), ErrorKind::Other);
         assert_eq!(source.to_string(), "default failure");
 
-        assert!(entity.get_component::<FailingDefaultComponent>().is_none());
-        assert!(entity.get_component::<NeedsFailingDefault>().is_none());
+        assert!(
+            entity
+                .get_component::<FailingDefaultComponent>()
+                .await
+                .is_none()
+        );
+        assert!(
+            entity
+                .get_component::<NeedsFailingDefault>()
+                .await
+                .is_none()
+        );
     }
 
-    #[test]
-    fn collect_chunks_with_groups_values_by_chunk() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn collect_chunks_with_groups_values_by_chunk() {
         let total = CHUNK_SIZE + 2;
-        let entities: Vec<Entity> = (0..total)
-            .map(|_| Entity::new().expect("应能创建实体"))
-            .collect();
+        let mut entities = Vec::with_capacity(total);
+        for _ in 0..total {
+            entities.push(Entity::new().await.expect("应能创建实体"));
+        }
 
         for (index, entity) in entities.iter().enumerate() {
             entity
                 .register_component(ChunkProbeGroupComponent::new(index))
+                .await
                 .expect("插入组件不应触发依赖错误");
         }
 
         let chunks = ChunkProbeGroupComponent::storage()
-            .collect_chunks_with(|_entity_id, component| Some(component.index));
+            .collect_chunks_with(|_entity_id, component| Some(component.index))
+            .await;
 
         assert_eq!(chunks.len(), 2, "应跨越 CHUNK_SIZE 形成两个 chunk");
         assert_eq!(
@@ -868,31 +977,38 @@ mod tests {
         assert_eq!(chunks[1].len(), 2, "第二个 chunk 应只包含剩余 2 个组件");
 
         // 清理，避免影响后续测试。
-        for entity in entities {
-            let _ = entity.unregister_component::<ChunkProbeGroupComponent>();
+        for entity in entities.drain(..) {
+            let _ = entity
+                .unregister_component::<ChunkProbeGroupComponent>()
+                .await;
         }
     }
 
-    #[test]
-    fn collect_chunks_with_skips_empty_chunks() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn collect_chunks_with_skips_empty_chunks() {
         let total = CHUNK_SIZE + 1;
-        let entities: Vec<Entity> = (0..total)
-            .map(|_| Entity::new().expect("应能创建实体"))
-            .collect();
+        let mut entities = Vec::with_capacity(total);
+        for _ in 0..total {
+            entities.push(Entity::new().await.expect("应能创建实体"));
+        }
 
         for (index, entity) in entities.iter().enumerate() {
             entity
                 .register_component(ChunkProbeSkipComponent::new(index))
+                .await
                 .expect("插入组件不应触发依赖错误");
         }
 
         // 移除第一个 chunk 的所有组件，使其成为空 chunk。
         for entity in &entities[..CHUNK_SIZE] {
-            let _ = entity.unregister_component::<ChunkProbeSkipComponent>();
+            let _ = entity
+                .unregister_component::<ChunkProbeSkipComponent>()
+                .await;
         }
 
         let chunks = ChunkProbeSkipComponent::storage()
-            .collect_chunks_with(|_entity_id, component| Some(component.index));
+            .collect_chunks_with(|_entity_id, component| Some(component.index))
+            .await;
 
         assert_eq!(chunks.len(), 1, "空 chunk 应被跳过");
         assert_eq!(
@@ -902,6 +1018,8 @@ mod tests {
         );
 
         // 清理。
-        let _ = entities[CHUNK_SIZE].unregister_component::<ChunkProbeSkipComponent>();
+        let _ = entities[CHUNK_SIZE]
+            .unregister_component::<ChunkProbeSkipComponent>()
+            .await;
     }
 }

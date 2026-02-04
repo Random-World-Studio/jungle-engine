@@ -81,7 +81,10 @@ impl RenderSystem {
         entity: Entity,
         context: &mut LayerRenderContext<'_, '_>,
     ) {
-        let mut scene_guard = match entity.get_component_mut::<Scene2D>() {
+        let mut scene_guard = match context
+            .runtime
+            .block_on(entity.get_component_mut::<Scene2D>())
+        {
             Some(scene) => scene,
             None => return,
         };
@@ -95,7 +98,7 @@ impl RenderSystem {
             .map(|viewport| (viewport.width, viewport.height))
             .unwrap_or(context.framebuffer_size);
 
-        let layer_guard = match entity.get_component::<Layer>() {
+        let layer_guard = match context.runtime.block_on(entity.get_component::<Layer>()) {
             Some(layer) => layer,
             None => {
                 warn!(
@@ -161,7 +164,9 @@ impl RenderSystem {
                 }
             };
 
-        let point_light_entities = match Layer::point_light_entities(entity) {
+        let runtime = context.runtime;
+
+        let point_light_entities = match runtime.block_on(Layer::point_light_entities(entity)) {
             Ok(lights) => lights,
             Err(error) => {
                 warn!(
@@ -174,11 +179,12 @@ impl RenderSystem {
             }
         };
 
-        let parallel_light_brightness = match Layer::parallel_light_entities(entity) {
+        let parallel_light_brightness =
+            match runtime.block_on(Layer::parallel_light_entities(entity)) {
             Ok(lights) => lights
                 .into_iter()
                 .filter_map(|light_entity| {
-                    let light = light_entity.get_component::<Light>()?;
+                    let light = runtime.block_on(light_entity.get_component::<Light>())?;
                     let value = light.lightness();
                     drop(light);
                     if value <= 0.0 { None } else { Some(value) }
@@ -204,9 +210,9 @@ impl RenderSystem {
         let point_lights: Vec<ScenePointLight> = point_light_entities
             .into_iter()
             .filter_map(|light_entity| {
-                let light = light_entity.get_component::<Light>()?;
-                let point = light_entity.get_component::<PointLight>()?;
-                let transform = light_entity.get_component::<Transform>()?;
+                let light = runtime.block_on(light_entity.get_component::<Light>())?;
+                let point = runtime.block_on(light_entity.get_component::<PointLight>())?;
+                let transform = runtime.block_on(light_entity.get_component::<Transform>())?;
                 let radius = point.distance();
                 let lightness = light.lightness();
                 let position = transform.position();
@@ -245,7 +251,7 @@ impl RenderSystem {
             total
         }
 
-        let renderables = match Layer::collect_renderables(entity) {
+        let renderables = match runtime.block_on(Layer::collect_renderables(entity)) {
             Ok(collection) => collection,
             Err(error) => {
                 warn!(
@@ -258,7 +264,7 @@ impl RenderSystem {
             }
         };
 
-        let scene_guard = match entity.get_component::<Scene2D>() {
+        let scene_guard = match context.runtime.block_on(entity.get_component::<Scene2D>()) {
             Some(scene) => scene,
             None => {
                 warn!(
@@ -269,7 +275,7 @@ impl RenderSystem {
                 return;
             }
         };
-        let layer_guard = match entity.get_component::<Layer>() {
+        let layer_guard = match context.runtime.block_on(entity.get_component::<Layer>()) {
             Some(layer) => layer,
             None => {
                 warn!(
@@ -313,7 +319,10 @@ impl RenderSystem {
                 continue;
             }
 
-            let _profile_scope = context.caches.profiler.entity_scope(group.entity());
+            let _profile_scope = context
+                .caches
+                .profiler
+                .entity_scope(context.runtime, group.entity());
 
             let (material_regions, bind_group) = match renderables.material(group.entity()) {
                 Some(descriptor) => {

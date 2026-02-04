@@ -9,6 +9,8 @@
 
 extern crate self as jge_core;
 
+pub use async_trait::async_trait;
+
 pub mod config;
 pub mod event;
 pub mod game;
@@ -47,11 +49,11 @@ pub use game::Game;
 ///   - `node (id = <expr>) { ... }`：指定实体 id
 ///   - `node ... as ident { ... }`：把实体绑定到局部变量名（在同一 `scene!` 块内可见）
 /// - 在 `node` 体内：
-///   - `+ CompExpr;`：把组件注册到当前实体（等价于 `e.register_component(CompExpr)`）
+///   - `+ CompExpr;`：把组件注册到当前实体（等价于 `e.register_component(CompExpr).await?`）
 ///   - `+ CompExpr => |e, c| { ... };`：注册前配置组件（`c` 为 `&T`）
 ///   - `+ CompExpr => |e, mut c| { ... };`：注册前配置组件（`c` 为 `&mut T`）
 ///   - `resource(name = path, ...) |e, c| { ... }`：在配置闭包前注入资源句柄
-///   - `with(...) { ... }`：在块内自动执行 `get_component/get_component_mut` 并提供引用
+///   - `with(...) { ... }`：在块内自动执行 `get_component/get_component_mut`（内部会 `.await`）并提供引用
 ///   - `* LogicExpr;`：为当前节点挂载 `GameLogic`（宏会在内部把逻辑设置与 `attach` 阶段的生命周期回调衔接起来）
 ///
 /// `scene!` 会展开成一段普通 Rust 语句块，但为了支持 `as ident` 的前向引用，展开是“分阶段”的：
@@ -87,13 +89,13 @@ pub use game::Game;
 /// # }
 /// ```
 ///
-/// ## 销毁语义：`SceneBindings::destroy()`
+/// ## 销毁语义：`SceneBindings::destroy().await`
 ///
-/// `scene!` 返回的 `SceneBindings` 提供 `destroy()` 方法，用于销毁本次构建出来的场景。
+/// `scene!` 返回的 `SceneBindings` 提供 `destroy()` 方法（async），用于销毁本次构建出来的场景；调用时需要 `destroy().await`。
 ///
-/// - `destroy()` 会对场景中每个实体，卸载 DSL 中显式声明的 `+ CompExpr;` 组件。
+/// - `destroy().await` 会对场景中每个实体，卸载 DSL 中显式声明的 `+ CompExpr;` 组件。
 /// - 依赖关系：[`game::entity::Entity::unregister_component`] 会调用组件的 `unregister_dependencies` 钩子。
-/// - 幂等：重复调用 `destroy()` 不会报错。
+/// - 幂等：重复调用 `destroy().await` 不会报错。
 ///
 /// # 示例
 ///

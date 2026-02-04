@@ -15,9 +15,13 @@ use crate::game::entity::Entity;
 /// use jge_core::game::{component::light::{Light, PointLight}, entity::Entity};
 ///
 /// # fn main() -> anyhow::Result<()> {
-/// let e = Entity::new()?;
-/// e.register_component(Light::new(2.0))?;
-/// e.register_component(PointLight::new(10.0))?;
+/// let rt = tokio::runtime::Runtime::new()?;
+/// rt.block_on(async {
+///     let e = Entity::new().await?;
+///     e.register_component(Light::new(2.0)).await?;
+///     e.register_component(PointLight::new(10.0)).await?;
+///     Ok::<(), anyhow::Error>(())
+/// })?;
 /// Ok(())
 /// # }
 /// ```
@@ -134,96 +138,112 @@ mod tests {
     };
     use nalgebra::Vector3;
 
-    #[test]
-    fn light_defaults_and_clamping() {
-        let entity = Entity::new().expect("应能创建实体");
+    #[tokio::test(flavor = "multi_thread")]
+    async fn light_defaults_and_clamping() {
+        let entity = Entity::new().await.expect("应能创建实体");
         let _ = entity
             .register_component(Renderable::new())
+            .await
             .expect("应能插入 Renderable");
-        if let Some(mut renderable) = entity.get_component_mut::<Renderable>() {
+        if let Some(mut renderable) = entity.get_component_mut::<Renderable>().await {
             renderable.set_enabled(false);
         }
         let _ = entity
             .register_component(Transform::new())
+            .await
             .expect("应能插入 Transform");
         let light = Light::new(1.5);
         let previous = entity
             .register_component(light)
+            .await
             .expect("首次插入 Light 不应失败");
         assert!(previous.is_none());
 
         {
             let mut guard = entity
                 .get_component_mut::<Light>()
+                .await
                 .expect("应能读取 Light 组件");
             guard.set_lightness(-5.0);
         }
         let guard = entity
             .get_component::<Light>()
+            .await
             .expect("应能读取 Light 组件");
         assert_eq!(guard.lightness(), 0.0);
     }
 
-    #[test]
-    fn point_light_depends_on_light_and_applies_distance() {
-        let entity = Entity::new().expect("应能创建实体");
+    #[tokio::test(flavor = "multi_thread")]
+    async fn point_light_depends_on_light_and_applies_distance() {
+        let entity = Entity::new().await.expect("应能创建实体");
         let _ = entity
             .register_component(Renderable::new())
+            .await
             .expect("应能插入 Renderable");
-        if let Some(mut renderable) = entity.get_component_mut::<Renderable>() {
+        if let Some(mut renderable) = entity.get_component_mut::<Renderable>().await {
             renderable.set_enabled(false);
         }
         let _ = entity
             .register_component(Transform::new())
+            .await
             .expect("应能插入 Transform");
-        if let Some(mut transform) = entity.get_component_mut::<Transform>() {
+        if let Some(mut transform) = entity.get_component_mut::<Transform>().await {
             transform.set_position(Vector3::new(1.0, 2.0, 0.5));
         }
         let _ = entity
             .register_component(Light::new(2.0))
+            .await
             .expect("应能插入 Light");
         let light = PointLight::new(5.0);
         let previous = entity
             .register_component(light)
+            .await
             .expect("插入 PointLight 时依赖应满足");
         assert!(previous.is_none());
 
         {
             let mut guard = entity
                 .get_component_mut::<PointLight>()
+                .await
                 .expect("应能读取 PointLight");
             guard.set_distance(-10.0);
         }
 
         let guard = entity
             .get_component::<PointLight>()
+            .await
             .expect("应能读取 PointLight");
         assert!(guard.distance() > 0.0);
         let transform = entity
             .get_component::<Transform>()
+            .await
             .expect("应能读取 Transform");
         assert_eq!(transform.position(), Vector3::new(1.0, 2.0, 0.5));
     }
 
-    #[test]
-    fn parallel_light_depends_on_light() {
-        let entity = Entity::new().expect("应能创建实体");
+    #[tokio::test(flavor = "multi_thread")]
+    async fn parallel_light_depends_on_light() {
+        let entity = Entity::new().await.expect("应能创建实体");
         let _ = entity
             .register_component(Renderable::new())
+            .await
             .expect("应能插入 Renderable");
-        if let Some(mut renderable) = entity.get_component_mut::<Renderable>() {
+        if let Some(mut renderable) = entity.get_component_mut::<Renderable>().await {
             renderable.set_enabled(false);
         }
         let _ = entity
             .register_component(Transform::new())
+            .await
             .expect("应能插入 Transform");
         let _ = entity
             .register_component(Light::new(0.75))
+            .await
             .expect("应能插入 Light");
         let previous = entity
             .register_component(ParallelLight::new())
+            .await
             .expect("插入 ParallelLight 时依赖应满足");
         assert!(previous.is_none());
-        assert!(entity.get_component::<ParallelLight>().is_some());
+        assert!(entity.get_component::<ParallelLight>().await.is_some());
     }
 }

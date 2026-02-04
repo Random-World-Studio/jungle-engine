@@ -115,7 +115,7 @@ mod tests {
         assert!(boxed.is_ok());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn handle_clone_shares_same_logic_instance() {
         let counter = Arc::new(StdMutex::new(0u32));
         let handle = GameLogicHandle::new(CounterLogic {

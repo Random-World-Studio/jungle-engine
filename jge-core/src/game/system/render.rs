@@ -14,6 +14,7 @@ use crate::game::{
 };
 
 use cache::{LayerRenderContext, LayerRendererCache};
+use tokio::runtime::Runtime;
 
 /// 渲染系统。
 ///
@@ -37,6 +38,7 @@ impl RenderSystem {
     /// - 渲染路径选择：优先使用 `Scene2D`；若不存在则尝试 `Scene3D`；两者都不存在则跳过。
     pub fn render_layer(
         &mut self,
+        runtime: &Runtime,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
@@ -46,12 +48,13 @@ impl RenderSystem {
         layer_entity: Entity,
         load_op: wgpu::LoadOp<wgpu::Color>,
     ) {
-        let viewport = layer_entity
-            .get_component::<Layer>()
+        let viewport = runtime
+            .block_on(layer_entity.get_component::<Layer>())
             .and_then(|layer| layer.viewport())
             .and_then(|viewport| util::viewport_pixels_from_normalized(framebuffer_size, viewport));
 
         let mut context = LayerRenderContext {
+            runtime,
             device,
             queue,
             encoder,
@@ -63,7 +66,7 @@ impl RenderSystem {
             caches: &mut self.caches,
         };
 
-        if layer_entity.get_component::<Layer>().is_some() {
+        if runtime.block_on(layer_entity.get_component::<Layer>()).is_some() {
             Self::render_layer_entity(layer_entity, &mut context);
         } else {
             warn!(
@@ -92,9 +95,17 @@ impl RenderSystem {
             context.load_op = wgpu::LoadOp::Load;
         }
 
-        if entity.get_component::<Scene2D>().is_some() {
+        if context
+            .runtime
+            .block_on(entity.get_component::<Scene2D>())
+            .is_some()
+        {
             Self::render_scene2d(entity, context);
-        } else if entity.get_component::<Scene3D>().is_some() {
+        } else if context
+            .runtime
+            .block_on(entity.get_component::<Scene3D>())
+            .is_some()
+        {
             Self::render_scene3d(entity, context);
         } else {
             debug!(

@@ -23,10 +23,14 @@ pub type MaterialPatch = [Vector2<f32>; 3];
 /// use jge_core::resource::Resource;
 ///
 /// # fn main() -> anyhow::Result<()> {
-/// let e = Entity::new()?;
-/// // resource 的具体内容（纹理/材质数据）由渲染路径解释。
-/// let resource = Resource::from_memory(vec![1, 2, 3]);
-/// e.register_component(Material::new(resource, Vec::new()))?;
+/// let rt = tokio::runtime::Runtime::new()?;
+/// rt.block_on(async {
+///     let e = Entity::new().await?;
+///     // resource 的具体内容（纹理/材质数据）由渲染路径解释。
+///     let resource = Resource::from_memory(vec![1, 2, 3]);
+///     e.register_component(Material::new(resource, Vec::new())).await?;
+///     Ok::<(), anyhow::Error>(())
+/// })?;
 /// Ok(())
 /// # }
 /// ```
@@ -90,10 +94,11 @@ mod tests {
     use nalgebra::{Vector2, Vector3};
 
     async fn detach_node(entity: Entity) {
-        if entity.get_component::<Node>().is_some() {
+        if entity.get_component::<Node>().await.is_some() {
             let detach_future = {
                 let mut node = entity
                     .get_component_mut::<Node>()
+                    .await
                     .expect("node component disappeared");
                 node.detach()
             };
@@ -102,29 +107,35 @@ mod tests {
     }
 
     async fn prepare_entity(name: &str) -> Entity {
-        let entity = Entity::new().expect("应能创建实体");
-        let _ = entity.unregister_component::<Material>();
-        let _ = entity.unregister_component::<Shape>();
-        let _ = entity.unregister_component::<Transform>();
-        let _ = entity.unregister_component::<Renderable>();
+        let entity = Entity::new().await.expect("应能创建实体");
+        let _ = entity.unregister_component::<Material>().await;
+        let _ = entity.unregister_component::<Shape>().await;
+        let _ = entity.unregister_component::<Transform>().await;
+        let _ = entity.unregister_component::<Renderable>().await;
         detach_node(entity).await;
-        let _ = entity.unregister_component::<Node>();
+        let _ = entity.unregister_component::<Node>().await;
 
         let _ = entity
             .register_component(Node::new(name).expect("应能创建节点"))
+            .await
             .expect("应能插入 Node");
         let _ = entity
             .register_component(Renderable::new())
+            .await
             .expect("应能插入 Renderable");
         let _ = entity
             .register_component(Transform::new())
+            .await
             .expect("应能插入 Transform");
         let shape = Shape::from_triangles(vec![[
             Vector3::new(0.0, 0.0, 0.0),
             Vector3::new(1.0, 0.0, 0.0),
             Vector3::new(0.0, 1.0, 0.0),
         ]]);
-        let _ = entity.register_component(shape).expect("应能插入 Shape");
+        let _ = entity
+            .register_component(shape)
+            .await
+            .expect("应能插入 Shape");
         entity
     }
 
@@ -132,28 +143,32 @@ mod tests {
         Resource::from_memory(vec![1, 2, 3])
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn material_requires_shape_dependency() {
-        let entity = Entity::new().expect("应能创建实体");
+        let entity = Entity::new().await.expect("应能创建实体");
         let resource = mock_resource();
         let inserted = entity
             .register_component(Material::new(resource.clone(), Vec::new()))
+            .await
             .expect("缺少 Shape 时应自动注册依赖");
         assert!(inserted.is_none());
 
         assert!(
-            entity.get_component::<Shape>().is_some(),
+            entity.get_component::<Shape>().await.is_some(),
             "Shape 应被自动注册"
         );
         assert!(
-            entity.get_component::<Transform>().is_some(),
+            entity.get_component::<Transform>().await.is_some(),
             "Transform 应作为 Shape 依赖被注册"
         );
         assert!(
-            entity.get_component::<Renderable>().is_some(),
+            entity.get_component::<Renderable>().await.is_some(),
             "Renderable 应被注册"
         );
-        assert!(entity.get_component::<Node>().is_some(), "Node 应被注册");
+        assert!(
+            entity.get_component::<Node>().await.is_some(),
+            "Node 应被注册"
+        );
 
         let entity = prepare_entity("material_dependency").await;
         let resource = mock_resource();
@@ -167,16 +182,19 @@ mod tests {
         );
         let previous = entity
             .register_component(material)
+            .await
             .expect("满足依赖应能插入 Material");
         assert!(previous.is_none());
 
         let stored = entity
             .get_component::<Material>()
+            .await
             .expect("应能读取 Material");
         assert_eq!(stored.regions().len(), 1);
         drop(stored);
         let mut guard = entity
             .get_component_mut::<Material>()
+            .await
             .expect("应能写入 Material");
         guard.set_regions(vec![[
             Vector2::new(0.0, 0.0),
@@ -185,7 +203,12 @@ mod tests {
         ]]);
         drop(guard);
         assert_eq!(
-            entity.get_component::<Material>().unwrap().regions().len(),
+            entity
+                .get_component::<Material>()
+                .await
+                .unwrap()
+                .regions()
+                .len(),
             1
         );
     }

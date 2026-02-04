@@ -16,6 +16,8 @@ use nalgebra::{Vector2, Vector3};
 
 use lodtree::{LodVec, coords::OctVec};
 
+use async_trait::async_trait;
+
 use super::{
     component_impl,
     layer::{
@@ -61,9 +63,13 @@ use crate::resource::ResourcePath;
 /// ```no_run
 /// # use jge_core::game::{entity::Entity, component::{scene2d::Scene2D, layer::Layer}};
 /// # fn main() -> anyhow::Result<()> {
-/// let layer_root = Entity::new()?;
-/// layer_root.register_component(Layer::new())?;
-/// layer_root.register_component(Scene2D::new())?;
+/// let rt = tokio::runtime::Runtime::new()?;
+/// rt.block_on(async {
+///     let layer_root = Entity::new().await?;
+///     layer_root.register_component(Layer::new()).await?;
+///     layer_root.register_component(Scene2D::new()).await?;
+///     Ok::<(), anyhow::Error>(())
+/// })?;
 /// Ok(())
 /// # }
 /// ```
@@ -193,10 +199,17 @@ impl Scene2D {
     pub fn visible_world_bounds(&self) -> Option<Scene2DVisibleWorldBounds> {
         let framebuffer_size = self.framebuffer_size?;
 
-        let viewport = self
-            .entity_id
-            .and_then(|entity| entity.get_component::<Layer>())
-            .and_then(|layer| layer.viewport());
+        let viewport = match (self.entity_id, tokio::runtime::Handle::try_current()) {
+            (Some(entity), Ok(handle)) => tokio::task::block_in_place(|| {
+                handle.block_on(async {
+                    entity
+                        .get_component::<Layer>()
+                        .await
+                        .and_then(|layer| layer.viewport())
+                })
+            }),
+            _ => None,
+        };
 
         let (vp_width_px, vp_height_px) =
             Self::viewport_framebuffer_size(framebuffer_size, viewport);
@@ -278,22 +291,30 @@ impl Scene2D {
     }
 
     fn ensure_default_layer_shaders(entity: Entity) {
-        if let Some(mut layer) = entity.get_component_mut::<Layer>() {
-            if layer.shader(RenderPipelineStage::Vertex).is_none() {
-                let _ = layer.attach_shader_from_path(
-                    RenderPipelineStage::Vertex,
-                    ShaderLanguage::Wgsl,
-                    ResourcePath::from("shaders/2d.vs"),
-                );
-            }
-            if layer.shader(RenderPipelineStage::Fragment).is_none() {
-                let _ = layer.attach_shader_from_path(
-                    RenderPipelineStage::Fragment,
-                    ShaderLanguage::Wgsl,
-                    ResourcePath::from("shaders/2d.fs"),
-                );
-            }
-        }
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+
+        tokio::task::block_in_place(|| {
+            handle.block_on(async {
+                if let Some(mut layer) = entity.get_component_mut::<Layer>().await {
+                    if layer.shader(RenderPipelineStage::Vertex).is_none() {
+                        let _ = layer.attach_shader_from_path(
+                            RenderPipelineStage::Vertex,
+                            ShaderLanguage::Wgsl,
+                            ResourcePath::from("shaders/2d.vs"),
+                        );
+                    }
+                    if layer.shader(RenderPipelineStage::Fragment).is_none() {
+                        let _ = layer.attach_shader_from_path(
+                            RenderPipelineStage::Fragment,
+                            ShaderLanguage::Wgsl,
+                            ResourcePath::from("shaders/2d.fs"),
+                        );
+                    }
+                }
+            })
+        });
     }
 
     /// 基于 Layer 的八叉树推进 LOD。
@@ -332,12 +353,22 @@ impl Scene2D {
         let entity = self
             .entity_id
             .expect("Scene2D::visible_faces requires the component to be attached to an entity");
-        let layer = entity
-            .get_component::<Layer>()
-            .expect("Scene2D::visible_faces requires Layer component");
-        let renderables = layer
-            .world_renderables()
-            .map_err(Scene2DVisibilityError::from)?;
+
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return Err(Scene2DVisibilityError::LayerTraversal(
+                LayerTraversalError::MissingLayer(entity),
+            ));
+        };
+
+        let (layer, renderables) = tokio::task::block_in_place(|| {
+            let layer = handle
+                .block_on(entity.get_component::<Layer>())
+                .expect("Scene2D::visible_faces requires Layer component");
+            let renderables = handle
+                .block_on(layer.world_renderables())
+                .map_err(Scene2DVisibilityError::from)?;
+            Ok::<_, Scene2DVisibilityError>((layer, renderables))
+        })?;
         self.visible_faces_with_renderables(&layer, &renderables)
     }
 
@@ -570,15 +601,16 @@ impl fmt::Display for Scene2DVisibilityError {
 
 impl std::error::Error for Scene2DVisibilityError {}
 
+#[async_trait]
 impl Component for Scene2D {
     fn storage() -> &'static ComponentStorage<Self> {
         SCENE2D_STORAGE.get_or_init(ComponentStorage::new)
     }
 
-    fn register_dependencies(entity: Entity) -> Result<(), ComponentDependencyError> {
-        if entity.get_component::<Layer>().is_none() {
+    async fn register_dependencies(entity: Entity) -> Result<(), ComponentDependencyError> {
+        if entity.get_component::<Layer>().await.is_none() {
             let component = Layer::__jge_component_default(entity)?;
-            let _ = entity.register_component(component)?;
+            let _ = entity.register_component(component).await?;
         }
         Ok(())
     }
@@ -609,10 +641,11 @@ mod tests {
     use nalgebra::{Vector2, Vector3};
 
     async fn detach_node(entity: Entity) {
-        if entity.get_component::<Node>().is_some() {
+        if entity.get_component::<Node>().await.is_some() {
             let detach_future = {
                 let mut node = entity
                     .get_component_mut::<Node>()
+                    .await
                     .expect("node component disappeared");
                 node.detach()
             };
@@ -624,36 +657,44 @@ mod tests {
         let attach_future = {
             let mut parent_node = parent
                 .get_component_mut::<Node>()
+                .await
                 .expect("父实体应持有 Node 组件");
             parent_node.attach(entity)
         };
         attach_future.await.expect(message);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn scene2d_requires_layer_dependency() {
-        let entity = Entity::new().expect("应能创建实体");
-        let _ = entity.unregister_component::<Scene2D>();
-        let _ = entity.unregister_component::<Layer>();
-        let _ = entity.unregister_component::<Renderable>();
+        let entity = Entity::new().await.expect("应能创建实体");
+        let _ = entity.unregister_component::<Scene2D>().await;
+        let _ = entity.unregister_component::<Layer>().await;
+        let _ = entity.unregister_component::<Renderable>().await;
         detach_node(entity).await;
-        let _ = entity.unregister_component::<Node>();
+        let _ = entity.unregister_component::<Node>().await;
 
         let inserted = entity
             .register_component(Scene2D::new())
+            .await
             .expect("缺少 Layer 时应自动注册依赖");
         assert!(inserted.is_none());
 
         assert!(
-            entity.get_component::<Layer>().is_some(),
+            entity.get_component::<Layer>().await.is_some(),
             "Layer 应被自动注册"
         );
         assert!(
-            entity.get_component::<Renderable>().is_some(),
+            entity.get_component::<Renderable>().await.is_some(),
             "Renderable 应被注册"
         );
-        assert!(entity.get_component::<Node>().is_some(), "Node 应被注册");
-        let layer = entity.get_component::<Layer>().expect("应能读取 Layer");
+        assert!(
+            entity.get_component::<Node>().await.is_some(),
+            "Node 应被注册"
+        );
+        let layer = entity
+            .get_component::<Layer>()
+            .await
+            .expect("应能读取 Layer");
         assert!(
             layer.shader(RenderPipelineStage::Vertex).is_some(),
             "默认应挂载顶点着色器"
@@ -678,14 +719,14 @@ mod tests {
         );
 
         drop(layer);
-        let _ = entity.unregister_component::<Scene2D>();
-        let _ = entity.unregister_component::<Layer>();
-        let _ = entity.unregister_component::<Renderable>();
+        let _ = entity.unregister_component::<Scene2D>().await;
+        let _ = entity.unregister_component::<Layer>().await;
+        let _ = entity.unregister_component::<Renderable>().await;
         detach_node(entity).await;
-        let _ = entity.unregister_component::<Node>();
+        let _ = entity.unregister_component::<Node>().await;
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn scene2d_offset_and_scale_configuration() {
         let mut scene = Scene2D::new();
         scene.set_offset(Vector2::new(3.0, -2.0));
@@ -699,7 +740,7 @@ mod tests {
         assert!((scene.pixels_per_unit() - 64.0).abs() < f32::EPSILON);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn scene2d_visible_world_bounds_defaults_to_center_origin() {
         let mut scene = Scene2D::new();
         scene.set_framebuffer_size((200, 100));
@@ -715,35 +756,46 @@ mod tests {
         assert!((bounds.max.y - (0.5)).abs() < 1.0e-6);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn scene2d_visible_world_bounds_uses_layer_viewport_when_attached() {
-        let entity = Entity::new().expect("应能创建实体");
+        let entity = Entity::new().await.expect("应能创建实体");
 
         // Layer + Scene2D 需要 Renderable 依赖（Scene2D 依赖 Layer，Layer 依赖 Renderable）。
         entity
             .register_component(Renderable::new())
+            .await
             .expect("应能注册 Renderable");
 
         let mut layer = Layer::new();
         layer.set_viewport(crate::game::component::layer::LayerViewport::normalized(
             0.0, 0.0, 0.5, 0.5,
         ));
-        entity.register_component(layer).expect("应能注册 Layer");
+        entity
+            .register_component(layer)
+            .await
+            .expect("应能注册 Layer");
 
         let mut scene = Scene2D::new();
         scene.set_offset(Vector2::new(0.0, 0.0));
         scene.set_pixels_per_unit(100.0);
-        entity.register_component(scene).expect("应能注册 Scene2D");
+        entity
+            .register_component(scene)
+            .await
+            .expect("应能注册 Scene2D");
 
         // 模拟引擎在渲染阶段更新的 framebuffer size。
         {
             let mut scene = entity
                 .get_component_mut::<Scene2D>()
+                .await
                 .expect("应能读取 Scene2D");
             scene.set_framebuffer_size((200, 100));
         }
 
-        let scene = entity.get_component::<Scene2D>().expect("应能读取 Scene2D");
+        let scene = entity
+            .get_component::<Scene2D>()
+            .await
+            .expect("应能读取 Scene2D");
 
         // framebuffer 200x100，viewport 0.5x0.5 => 100x50 pixels.
         // ppu=100 => half width=50px => 0.5 world units; half height=25px => 0.25 world units.
@@ -756,29 +808,38 @@ mod tests {
         assert!((bounds.max.y - 0.25).abs() < 1.0e-6);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn scene2d_visible_world_bounds_respects_offset_and_pixels_per_unit_when_attached() {
-        let entity = Entity::new().expect("应能创建实体");
+        let entity = Entity::new().await.expect("应能创建实体");
         entity
             .register_component(Renderable::new())
+            .await
             .expect("应能注册 Renderable");
         entity
             .register_component(Layer::new())
+            .await
             .expect("应能注册 Layer");
 
         let mut scene = Scene2D::new();
         scene.set_offset(Vector2::new(10.0, -4.0));
         scene.set_pixels_per_unit(50.0);
-        entity.register_component(scene).expect("应能注册 Scene2D");
+        entity
+            .register_component(scene)
+            .await
+            .expect("应能注册 Scene2D");
 
         {
             let mut scene = entity
                 .get_component_mut::<Scene2D>()
+                .await
                 .expect("应能读取 Scene2D");
             scene.set_framebuffer_size((400, 200));
         }
 
-        let scene = entity.get_component::<Scene2D>().expect("应能读取 Scene2D");
+        let scene = entity
+            .get_component::<Scene2D>()
+            .await
+            .expect("应能读取 Scene2D");
         let bounds = scene
             .visible_world_bounds()
             .expect("framebuffer size should be set");
@@ -791,7 +852,7 @@ mod tests {
         assert!((bounds.max.y - (-2.0)).abs() < 1.0e-6);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn scene2d_pixel_to_world_respects_framebuffer_size_and_axis_directions() {
         let mut scene = Scene2D::new();
         scene.set_framebuffer_size((200, 100));
@@ -818,32 +879,43 @@ mod tests {
         assert!((br.y - (-0.5)).abs() < 1.0e-6);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn scene2d_pixel_to_world_uses_layer_viewport_when_attached() {
-        let entity = Entity::new().expect("应能创建实体");
+        let entity = Entity::new().await.expect("应能创建实体");
         entity
             .register_component(Renderable::new())
+            .await
             .expect("应能注册 Renderable");
 
         let mut layer = Layer::new();
         layer.set_viewport(crate::game::component::layer::LayerViewport::normalized(
             0.0, 0.0, 0.5, 0.5,
         ));
-        entity.register_component(layer).expect("应能注册 Layer");
+        entity
+            .register_component(layer)
+            .await
+            .expect("应能注册 Layer");
 
         let mut scene = Scene2D::new();
         scene.set_offset(Vector2::new(0.0, 0.0));
         scene.set_pixels_per_unit(100.0);
-        entity.register_component(scene).expect("应能注册 Scene2D");
+        entity
+            .register_component(scene)
+            .await
+            .expect("应能注册 Scene2D");
 
         {
             let mut scene = entity
                 .get_component_mut::<Scene2D>()
+                .await
                 .expect("应能读取 Scene2D");
             scene.set_framebuffer_size((200, 100));
         }
 
-        let scene = entity.get_component::<Scene2D>().expect("应能读取 Scene2D");
+        let scene = entity
+            .get_component::<Scene2D>()
+            .await
+            .expect("应能读取 Scene2D");
 
         // viewport 0.5x0.5 => 100x50 pixels，可见范围为 x:[-0.5,0.5], y:[-0.25,0.25]
         let p0 = scene
@@ -860,30 +932,35 @@ mod tests {
     }
 
     async fn register_layer_scene(entity: Entity) {
-        let _ = Scene2D::remove(entity);
-        let _ = Layer::remove(entity);
-        let _ = Renderable::remove(entity);
+        let _ = Scene2D::remove(entity).await;
+        let _ = Layer::remove(entity).await;
+        let _ = Renderable::remove(entity).await;
         detach_node(entity).await;
 
         let _ = entity
             .register_component(Renderable::new())
+            .await
             .expect("应能插入 Renderable");
         let _ = entity
             .register_component(Layer::new())
+            .await
             .expect("应能插入 Layer");
 
         let inserted = entity
             .register_component(Scene2D::new())
+            .await
             .expect("满足依赖后应能插入 Scene2D");
         assert!(inserted.is_none());
     }
 
-    fn activate_root_chunk(entity: Entity) {
+    async fn activate_root_chunk(entity: Entity) {
         let scene = entity
             .get_component::<Scene2D>()
+            .await
             .expect("Scene2D 组件应已注册");
         let mut layer = entity
             .get_component_mut::<Layer>()
+            .await
             .expect("Scene2D 应持有 Layer");
         let update = scene.step_lod(&mut layer, &[OctVec::root()], 0);
         assert!(
@@ -893,12 +970,12 @@ mod tests {
         drop(layer);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn visible_faces_no_longer_requires_lod_warmup() {
-        let root = Entity::new().expect("应能创建根实体");
+        let root = Entity::new().await.expect("应能创建根实体");
         register_layer_scene(root).await;
 
-        let child = Entity::new().expect("应能创建子实体");
+        let child = Entity::new().await.expect("应能创建子实体");
         let triangle = [
             Vector3::new(-0.2, -0.2, 0.2),
             Vector3::new(0.2, -0.2, 0.2),
@@ -910,6 +987,7 @@ mod tests {
         let visible = {
             let scene = root
                 .get_component::<Scene2D>()
+                .await
                 .expect("根节点应挂载 Scene2D");
             scene.visible_faces().expect("应能收集可见面片")
         };
@@ -919,13 +997,13 @@ mod tests {
         assert_eq!(visible[0].faces()[0], triangle);
 
         detach_node(child).await;
-        let _ = Scene2D::remove(root);
-        let _ = Layer::remove(root);
-        let _ = Renderable::remove(root);
+        let _ = Scene2D::remove(root).await;
+        let _ = Layer::remove(root).await;
+        let _ = Renderable::remove(root).await;
 
-        let _ = Shape::remove(child);
-        let _ = Transform::remove(child);
-        let _ = Renderable::remove(child);
+        let _ = Shape::remove(child).await;
+        let _ = Transform::remove(child).await;
+        let _ = Renderable::remove(child).await;
     }
 
     async fn register_shape(
@@ -933,32 +1011,37 @@ mod tests {
         triangles: &[[Vector3<f32>; 3]],
         translation: Vector3<f32>,
     ) {
-        let _ = Shape::remove(entity);
-        let _ = Transform::remove(entity);
-        let _ = Renderable::remove(entity);
+        let _ = Shape::remove(entity).await;
+        let _ = Transform::remove(entity).await;
+        let _ = Renderable::remove(entity).await;
         detach_node(entity).await;
 
         let _ = entity
             .register_component(Renderable::new())
+            .await
             .expect("应能插入 Renderable");
         let transform =
             Transform::with_components(translation, Vector3::zeros(), Vector3::repeat(1.0));
         let _ = entity
             .register_component(transform)
+            .await
             .expect("应能插入 Transform");
 
         let shape = Shape::from_triangles(triangles.to_vec());
-        let _ = entity.register_component(shape).expect("应能插入 Shape");
+        let _ = entity
+            .register_component(shape)
+            .await
+            .expect("应能插入 Shape");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn visible_faces_excludes_fully_occluded_triangles() {
-        let root = Entity::new().expect("应能创建根实体");
+        let root = Entity::new().await.expect("应能创建根实体");
         register_layer_scene(root).await;
-        activate_root_chunk(root);
+        activate_root_chunk(root).await;
 
-        let back = Entity::new().expect("应能创建后景实体");
-        let front = Entity::new().expect("应能创建前景实体");
+        let back = Entity::new().await.expect("应能创建后景实体");
+        let front = Entity::new().await.expect("应能创建前景实体");
 
         let far_triangle = [
             Vector3::new(-0.25, -0.25, -0.5),
@@ -980,6 +1063,7 @@ mod tests {
         let visible = {
             let scene = root
                 .get_component::<Scene2D>()
+                .await
                 .expect("根节点应挂载 Scene2D");
             scene.visible_faces().expect("应能收集可见面片")
         };
@@ -989,26 +1073,26 @@ mod tests {
 
         detach_node(front).await;
         detach_node(back).await;
-        let _ = Scene2D::remove(root);
-        let _ = Layer::remove(root);
-        let _ = Renderable::remove(root);
+        let _ = Scene2D::remove(root).await;
+        let _ = Layer::remove(root).await;
+        let _ = Renderable::remove(root).await;
 
-        let _ = Shape::remove(front);
-        let _ = Transform::remove(front);
-        let _ = Renderable::remove(front);
-        let _ = Shape::remove(back);
-        let _ = Transform::remove(back);
-        let _ = Renderable::remove(back);
+        let _ = Shape::remove(front).await;
+        let _ = Transform::remove(front).await;
+        let _ = Renderable::remove(front).await;
+        let _ = Shape::remove(back).await;
+        let _ = Transform::remove(back).await;
+        let _ = Renderable::remove(back).await;
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn visible_faces_keep_partially_occluded_triangles() {
-        let root = Entity::new().expect("应能创建根实体");
+        let root = Entity::new().await.expect("应能创建根实体");
         register_layer_scene(root).await;
-        activate_root_chunk(root);
+        activate_root_chunk(root).await;
 
-        let partial = Entity::new().expect("应能创建部分遮挡实体");
-        let ground = Entity::new().expect("应能创建背景实体");
+        let partial = Entity::new().await.expect("应能创建部分遮挡实体");
+        let ground = Entity::new().await.expect("应能创建背景实体");
 
         let partial_triangle = [
             Vector3::new(-0.25, -0.25, -0.4),
@@ -1030,6 +1114,7 @@ mod tests {
         let visible = {
             let scene = root
                 .get_component::<Scene2D>()
+                .await
                 .expect("根节点应挂载 Scene2D");
             scene.visible_faces().expect("应能收集可见面片")
         };
@@ -1041,26 +1126,26 @@ mod tests {
 
         detach_node(ground).await;
         detach_node(partial).await;
-        let _ = Scene2D::remove(root);
-        let _ = Layer::remove(root);
-        let _ = Renderable::remove(root);
+        let _ = Scene2D::remove(root).await;
+        let _ = Layer::remove(root).await;
+        let _ = Renderable::remove(root).await;
 
-        let _ = Shape::remove(ground);
-        let _ = Transform::remove(ground);
-        let _ = Renderable::remove(ground);
-        let _ = Shape::remove(partial);
-        let _ = Transform::remove(partial);
-        let _ = Renderable::remove(partial);
+        let _ = Shape::remove(ground).await;
+        let _ = Transform::remove(ground).await;
+        let _ = Renderable::remove(ground).await;
+        let _ = Shape::remove(partial).await;
+        let _ = Transform::remove(partial).await;
+        let _ = Renderable::remove(partial).await;
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn visible_faces_ignores_disabled_renderables() {
-        let root = Entity::new().expect("应能创建根实体");
+        let root = Entity::new().await.expect("应能创建根实体");
         register_layer_scene(root).await;
-        activate_root_chunk(root);
+        activate_root_chunk(root).await;
 
-        let visible_entity = Entity::new().expect("应能创建可见实体");
-        let hidden_entity = Entity::new().expect("应能创建隐藏实体");
+        let visible_entity = Entity::new().await.expect("应能创建可见实体");
+        let hidden_entity = Entity::new().await.expect("应能创建隐藏实体");
 
         let visible_triangle = [
             Vector3::new(-0.2, -0.2, 0.2),
@@ -1082,6 +1167,7 @@ mod tests {
         {
             let mut hidden_renderable = hidden_entity
                 .get_component_mut::<Renderable>()
+                .await
                 .expect("隐藏实体应有 Renderable");
             hidden_renderable.set_enabled(false);
         }
@@ -1089,6 +1175,7 @@ mod tests {
         let visible = {
             let scene = root
                 .get_component::<Scene2D>()
+                .await
                 .expect("根节点应挂载 Scene2D");
             scene.visible_faces().expect("应能收集可见面片")
         };
@@ -1098,15 +1185,15 @@ mod tests {
 
         detach_node(hidden_entity).await;
         detach_node(visible_entity).await;
-        let _ = Scene2D::remove(root);
-        let _ = Layer::remove(root);
-        let _ = Renderable::remove(root);
+        let _ = Scene2D::remove(root).await;
+        let _ = Layer::remove(root).await;
+        let _ = Renderable::remove(root).await;
 
-        let _ = Shape::remove(hidden_entity);
-        let _ = Transform::remove(hidden_entity);
-        let _ = Renderable::remove(hidden_entity);
-        let _ = Shape::remove(visible_entity);
-        let _ = Transform::remove(visible_entity);
-        let _ = Renderable::remove(visible_entity);
+        let _ = Shape::remove(hidden_entity).await;
+        let _ = Transform::remove(hidden_entity).await;
+        let _ = Renderable::remove(hidden_entity).await;
+        let _ = Shape::remove(visible_entity).await;
+        let _ = Transform::remove(visible_entity).await;
+        let _ = Renderable::remove(visible_entity).await;
     }
 }

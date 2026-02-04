@@ -20,11 +20,15 @@ use nalgebra::{Matrix4, Rotation3, Translation3, Vector3};
 /// use nalgebra::Vector3;
 ///
 /// # fn main() -> anyhow::Result<()> {
-/// let e = Entity::new()?;
-/// e.register_component(Transform::new())?;
-/// if let Some(mut t) = e.get_component_mut::<Transform>() {
-///     t.set_position(Vector3::new(1.0, 2.0, 3.0));
-/// }
+/// let rt = tokio::runtime::Runtime::new()?;
+/// rt.block_on(async {
+///     let e = Entity::new().await?;
+///     e.register_component(Transform::new()).await?;
+///     if let Some(mut t) = e.get_component_mut::<Transform>().await {
+///         t.set_position(Vector3::new(1.0, 2.0, 3.0));
+///     }
+///     Ok::<(), anyhow::Error>(())
+/// })?;
 /// Ok(())
 /// # }
 /// ```
@@ -125,10 +129,11 @@ mod tests {
     use std::f32::consts::FRAC_PI_2;
 
     async fn detach_node(entity: Entity) {
-        if entity.get_component::<Node>().is_some() {
+        if entity.get_component::<Node>().await.is_some() {
             let detach_future = {
                 let mut node = entity
                     .get_component_mut::<Node>()
+                    .await
                     .expect("node component disappeared");
                 node.detach()
             };
@@ -137,39 +142,41 @@ mod tests {
     }
 
     async fn clear_components(entity: &Entity) {
-        let _ = entity.unregister_component::<Transform>();
-        let _ = entity.unregister_component::<Renderable>();
+        let _ = entity.unregister_component::<Transform>().await;
+        let _ = entity.unregister_component::<Renderable>().await;
         detach_node(*entity).await;
-        let _ = entity.unregister_component::<Node>();
+        let _ = entity.unregister_component::<Node>().await;
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn transform_requires_node_dependency() {
-        let entity = Entity::new().expect("应能创建实体");
+        let entity = Entity::new().await.expect("应能创建实体");
         clear_components(&entity).await;
 
         let inserted = entity
             .register_component(Transform::new())
+            .await
             .expect("缺少 Node/Renderable 时应自动注册依赖");
         assert!(inserted.is_none());
 
         assert!(
-            entity.get_component::<Node>().is_some(),
+            entity.get_component::<Node>().await.is_some(),
             "Node 应被自动注册"
         );
         assert!(
-            entity.get_component::<Renderable>().is_some(),
+            entity.get_component::<Renderable>().await.is_some(),
             "Renderable 应被注册"
         );
 
         let previous = entity
             .register_component(Transform::new())
+            .await
             .expect("重复插入应返回旧的 Transform");
         assert!(previous.is_some());
 
-        let _ = entity.unregister_component::<Transform>();
-        let _ = entity.unregister_component::<Renderable>();
-        let _ = entity.unregister_component::<Node>();
+        let _ = entity.unregister_component::<Transform>().await;
+        let _ = entity.unregister_component::<Renderable>().await;
+        let _ = entity.unregister_component::<Node>().await;
     }
 
     #[test]
