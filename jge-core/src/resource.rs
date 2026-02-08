@@ -1,11 +1,10 @@
 use std::{
     fmt::Display,
-    mem,
     path::{Path, PathBuf},
     sync::{Arc, OnceLock},
 };
 
-use parking_lot::{RwLock, RwLockWriteGuard};
+use parking_lot::RwLock;
 
 /// 资源本体。
 ///
@@ -15,7 +14,7 @@ use parking_lot::{RwLock, RwLockWriteGuard};
 pub struct Resource {
     fs_path: Option<String>,
     cached: bool, // fs_path 为 None 时，表示资源仅存在于内存中，cached 总为 true
-    data: Vec<u8>,
+    data: Arc<[u8]>,
 }
 
 /// 资源路径（逻辑路径）。
@@ -127,7 +126,7 @@ impl AsRef<[String]> for ResourcePath {
 pub type ResourceHandle<T = Resource> = Arc<RwLock<T>>;
 
 enum NodeData {
-    Directory(RwLock<Vec<Box<ResourceNode>>>),
+    Directory(RwLock<Vec<ResourceNode>>),
     Resource(ResourceHandle),
 }
 
@@ -170,7 +169,7 @@ impl Resource {
         Self {
             fs_path: None,
             cached: true,
-            data: Vec::new(),
+            data: Arc::<[u8]>::from(Vec::new()),
         }
     }
 
@@ -178,7 +177,7 @@ impl Resource {
         Self {
             fs_path: None,
             cached: true,
-            data,
+            data: Arc::<[u8]>::from(data),
         }
     }
 
@@ -186,7 +185,7 @@ impl Resource {
         Self {
             fs_path: Some(path.to_string_lossy().to_string()),
             cached: false,
-            data: Vec::new(),
+            data: Arc::<[u8]>::from(Vec::new()),
         }
     }
 
@@ -205,101 +204,112 @@ impl Resource {
         Arc::new(RwLock::new(Self::new_file(path)))
     }
 
-    fn resources() -> &'static RwLock<Vec<Box<ResourceNode>>> {
-        static RESOURCES: OnceLock<RwLock<Vec<Box<ResourceNode>>>> = OnceLock::new();
+    fn resources() -> &'static RwLock<Vec<ResourceNode>> {
+        static RESOURCES: OnceLock<RwLock<Vec<ResourceNode>>> = OnceLock::new();
         RESOURCES.get_or_init(|| {
             let res = RwLock::new(Vec::new());
-            Self::register_inner(
-                unsafe { mem::transmute(res.write()) },
-                ResourcePath::from("shaders/2d.vs"),
-                Resource::from_memory(Vec::from(include_bytes!("resource/shaders/2d.vs"))),
-            )
-            .unwrap();
-            Self::register_inner(
-                unsafe { mem::transmute(res.write()) },
-                ResourcePath::from("shaders/2d.fs"),
-                Resource::from_memory(Vec::from(include_bytes!("resource/shaders/2d.fs"))),
-            )
-            .unwrap();
-            Self::register_inner(
-                unsafe { mem::transmute(res.write()) },
-                ResourcePath::from("shaders/3d.vs"),
-                Resource::from_memory(Vec::from(include_bytes!("resource/shaders/3d.vs"))),
-            )
-            .unwrap();
-            Self::register_inner(
-                unsafe { mem::transmute(res.write()) },
-                ResourcePath::from("shaders/3d.fs"),
-                Resource::from_memory(Vec::from(include_bytes!("resource/shaders/3d.fs"))),
-            )
-            .unwrap();
-            Self::register_inner(
-                unsafe { mem::transmute(res.write()) },
-                ResourcePath::from("shaders/background.vs"),
-                Resource::from_memory(Vec::from(include_bytes!("resource/shaders/background.vs"))),
-            )
-            .unwrap();
-            Self::register_inner(
-                unsafe { mem::transmute(res.write()) },
-                ResourcePath::from("shaders/background.fs"),
-                Resource::from_memory(Vec::from(include_bytes!("resource/shaders/background.fs"))),
-            )
-            .unwrap();
+            {
+                let mut root = res.write();
+                Self::register_inner_in_list(
+                    &mut root,
+                    &ResourcePath::from("shaders/2d.vs").0,
+                    0,
+                    Resource::from_memory(Vec::from(include_bytes!("resource/shaders/2d.vs"))),
+                )
+                .unwrap();
+                Self::register_inner_in_list(
+                    &mut root,
+                    &ResourcePath::from("shaders/2d.fs").0,
+                    0,
+                    Resource::from_memory(Vec::from(include_bytes!("resource/shaders/2d.fs"))),
+                )
+                .unwrap();
+                Self::register_inner_in_list(
+                    &mut root,
+                    &ResourcePath::from("shaders/3d.vs").0,
+                    0,
+                    Resource::from_memory(Vec::from(include_bytes!("resource/shaders/3d.vs"))),
+                )
+                .unwrap();
+                Self::register_inner_in_list(
+                    &mut root,
+                    &ResourcePath::from("shaders/3d.fs").0,
+                    0,
+                    Resource::from_memory(Vec::from(include_bytes!("resource/shaders/3d.fs"))),
+                )
+                .unwrap();
+                Self::register_inner_in_list(
+                    &mut root,
+                    &ResourcePath::from("shaders/background.vs").0,
+                    0,
+                    Resource::from_memory(Vec::from(include_bytes!(
+                        "resource/shaders/background.vs"
+                    ))),
+                )
+                .unwrap();
+                Self::register_inner_in_list(
+                    &mut root,
+                    &ResourcePath::from("shaders/background.fs").0,
+                    0,
+                    Resource::from_memory(Vec::from(include_bytes!(
+                        "resource/shaders/background.fs"
+                    ))),
+                )
+                .unwrap();
+            }
             res
         })
     }
 
-    fn register_inner(
-        mut list: RwLockWriteGuard<'static, Vec<Box<ResourceNode>>>,
-        path: ResourcePath,
+    fn register_inner_in_list(
+        list: &mut Vec<ResourceNode>,
+        segments: &[String],
+        index: usize,
         resource: ResourceHandle,
     ) -> Result<(), ResourceError> {
-        let transmute = |r: RwLockWriteGuard<Vec<Box<ResourceNode>>>| -> RwLockWriteGuard<'static, Vec<Box<ResourceNode>>> {
-            unsafe { mem::transmute(r) }
-        };
+        let seg = segments.get(index).ok_or(ResourceError::PathConflict)?;
 
-        let l = path.len();
-        for (i, s) in path.into_iter().enumerate() {
-            let mut node = None;
-            for n in list.iter() {
-                if n.name == s {
-                    node = Some(&n.data);
-                    break;
-                }
-            }
+        let existing_pos = list.iter().position(|n| n.name == seg.as_str());
+        let is_leaf = index + 1 == segments.len();
 
-            if let None = node {
-                if i + 1 == l {
-                    list.push(Box::new(ResourceNode {
-                        name: s.clone(),
-                        data: NodeData::Resource(resource),
-                        fs_root: None,
-                    }));
-                    return Ok(());
-                } else {
-                    list.push(Box::new(ResourceNode {
-                        name: s.clone(),
-                        data: NodeData::Directory(RwLock::new(Vec::new())),
-                        fs_root: None,
-                    }));
-                    node = Some(&list.last().unwrap().data);
-                };
+        if is_leaf {
+            if existing_pos.is_some() {
+                return Err(ResourceError::PathConflict);
             }
-
-            match node.unwrap() {
-                NodeData::Directory(resource_nodes) => list = transmute(resource_nodes.write()),
-                NodeData::Resource(_) => break,
-            }
+            list.push(ResourceNode {
+                name: seg.clone(),
+                data: NodeData::Resource(resource),
+                fs_root: None,
+            });
+            return Ok(());
         }
 
-        Err(ResourceError::PathConflict)
+        let dir_pos = if let Some(pos) = existing_pos {
+            pos
+        } else {
+            list.push(ResourceNode {
+                name: seg.clone(),
+                data: NodeData::Directory(RwLock::new(Vec::new())),
+                fs_root: None,
+            });
+            list.len() - 1
+        };
+
+        let node = &mut list[dir_pos];
+        let NodeData::Directory(children) = &mut node.data else {
+            return Err(ResourceError::PathConflict);
+        };
+        let mut guard = children.write();
+        Self::register_inner_in_list(&mut guard, segments, index + 1, resource)
     }
 
     /// 注册资源句柄到全局资源树。
     ///
     /// 若路径与已有节点发生冲突（例如 `a/b` 已经是资源，但又尝试注册 `a/b/c`），将返回 [`ResourceError::PathConflict`]。
     pub fn register(path: ResourcePath, resource: ResourceHandle) -> Result<(), ResourceError> {
-        Self::register_inner(Self::resources().write(), path, resource)
+        let ResourcePath(segments) = path;
+        let mut root = Self::resources().write();
+        Self::register_inner_in_list(&mut root, &segments, 0, resource)
     }
 
     /// 注册一个“运行时从文件系统映射的目录子树”。
@@ -311,22 +321,22 @@ impl Resource {
     ///   - [`Self::list_children`] 会读取该目录并把一级子项懒注册到资源树。
     pub fn register_dir(path: ResourcePath, fs_root: PathBuf) -> Result<(), ResourceError> {
         fn find_or_insert_dir_node_mut<'a>(
-            list: &'a mut Vec<Box<ResourceNode>>,
+            list: &'a mut Vec<ResourceNode>,
             segment: &str,
         ) -> Result<&'a mut ResourceNode, ResourceError> {
             if let Some(pos) = list.iter().position(|n| n.name == segment) {
                 return Ok(&mut list[pos]);
             }
-            list.push(Box::new(ResourceNode {
+            list.push(ResourceNode {
                 name: segment.to_string(),
                 data: NodeData::Directory(RwLock::new(Vec::new())),
                 fs_root: None,
-            }));
+            });
             Ok(list.last_mut().expect("just pushed"))
         }
 
         fn register_dir_in_list(
-            list: &mut Vec<Box<ResourceNode>>,
+            list: &mut Vec<ResourceNode>,
             segments: &[String],
             index: usize,
             fs_root: &PathBuf,
@@ -348,7 +358,7 @@ impl Resource {
                 return Err(ResourceError::PathConflict);
             };
             let mut guard = children.write();
-            register_dir_in_list(&mut *guard, segments, index + 1, fs_root)
+            register_dir_in_list(&mut guard, segments, index + 1, fs_root)
         }
 
         let ResourcePath(segments) = path;
@@ -357,29 +367,29 @@ impl Resource {
             return Err(ResourceError::PathConflict);
         }
         let mut root = Self::resources().write();
-        register_dir_in_list(&mut *root, &segments, 0, &fs_root)
+        register_dir_in_list(&mut root, &segments, 0, &fs_root)
     }
 
     fn ensure_child_from_fs(
-        list: &mut Vec<Box<ResourceNode>>,
+        list: &mut Vec<ResourceNode>,
         parent_fs_root: &Path,
         child_name: &str,
     ) -> Option<usize> {
         let child_path = parent_fs_root.join(child_name);
         if child_path.is_dir() {
-            list.push(Box::new(ResourceNode {
+            list.push(ResourceNode {
                 name: child_name.to_string(),
                 data: NodeData::Directory(RwLock::new(Vec::new())),
                 fs_root: Some(child_path),
-            }));
+            });
             return Some(list.len() - 1);
         }
         if child_path.is_file() {
-            list.push(Box::new(ResourceNode {
+            list.push(ResourceNode {
                 name: child_name.to_string(),
                 data: NodeData::Resource(Resource::from_file(child_path.as_path())),
                 fs_root: None,
-            }));
+            });
             return Some(list.len() - 1);
         }
         None
@@ -392,9 +402,7 @@ impl Resource {
         if let Some(root) = &node.fs_root {
             return Some(root.clone());
         }
-        let Some(parent) = parent_fs_root else {
-            return None;
-        };
+        let parent = parent_fs_root?;
         let candidate = parent.join(&node.name);
         if candidate.is_dir() {
             node.fs_root = Some(candidate.clone());
@@ -405,7 +413,7 @@ impl Resource {
     }
 
     fn from_in_list(
-        list: &mut Vec<Box<ResourceNode>>,
+        list: &mut Vec<ResourceNode>,
         parent_fs_root: Option<PathBuf>,
         segments: &[String],
         index: usize,
@@ -416,11 +424,11 @@ impl Resource {
 
         let seg = &segments[index];
 
-        let mut node_index = list.iter().position(|n| n.name == *seg);
-        if node_index.is_none() {
-            if let Some(root) = parent_fs_root.as_deref() {
-                node_index = Self::ensure_child_from_fs(list, root, seg);
-            }
+        let mut node_index = list.iter().position(|n| n.name == seg.as_str());
+        if node_index.is_none()
+            && let Some(root) = parent_fs_root.as_deref()
+        {
+            node_index = Self::ensure_child_from_fs(list, root, seg);
         }
         let node_index = node_index?;
 
@@ -437,7 +445,7 @@ impl Resource {
                     return None;
                 }
                 let mut guard = children.write();
-                Self::from_in_list(&mut *guard, next_root, segments, index + 1)
+                Self::from_in_list(&mut guard, next_root, segments, index + 1)
             }
             NodeData::Resource(handle) => {
                 if index + 1 == segments.len() {
@@ -455,7 +463,7 @@ impl Resource {
     pub fn from(path: ResourcePath) -> Option<ResourceHandle> {
         let ResourcePath(segments) = path;
         let mut root = Self::resources().write();
-        Self::from_in_list(&mut *root, None, &segments, 0)
+        Self::from_in_list(&mut root, None, &segments, 0)
     }
 
     /// 列出指定目录资源路径下的直接子项名称（不区分资源类型）。
@@ -463,7 +471,7 @@ impl Resource {
     /// 返回 `None` 表示该路径未注册或路径不是目录。
     pub fn list_children(path: ResourcePath) -> Option<Vec<String>> {
         fn list_children_in_list(
-            list: &mut Vec<Box<ResourceNode>>,
+            list: &mut Vec<ResourceNode>,
             parent_fs_root: Option<PathBuf>,
             segments: &[String],
             index: usize,
@@ -472,17 +480,17 @@ impl Resource {
                 // 当前 list 对应目标目录。
                 let mut names: Vec<String> = list.iter().map(|n| n.name.clone()).collect();
 
-                if let Some(root) = parent_fs_root.as_deref() {
-                    if let Ok(rd) = std::fs::read_dir(root) {
-                        for entry in rd.flatten() {
-                            let Ok(name) = entry.file_name().into_string() else {
-                                continue;
-                            };
-                            if !names.iter().any(|n| n == &name) {
-                                // 懒注册一级节点（若磁盘项存在但不是文件/目录，ensure 会返回 None）
-                                let _ = Resource::ensure_child_from_fs(list, root, &name);
-                                names.push(name);
-                            }
+                if let Some(root) = parent_fs_root.as_deref()
+                    && let Ok(rd) = std::fs::read_dir(root)
+                {
+                    for entry in rd.flatten() {
+                        let Ok(name) = entry.file_name().into_string() else {
+                            continue;
+                        };
+                        if !names.iter().any(|n| n == &name) {
+                            // 懒注册一级节点（若磁盘项存在但不是文件/目录，ensure 会返回 None）
+                            let _ = Resource::ensure_child_from_fs(list, root, &name);
+                            names.push(name);
                         }
                     }
                 }
@@ -493,17 +501,17 @@ impl Resource {
             }
 
             let seg = &segments[index];
-            let mut node_index = list.iter().position(|n| n.name == *seg);
+            let mut node_index = list.iter().position(|n| n.name == seg.as_str());
             if node_index.is_none() {
                 // list_children 需要目录：若磁盘上存在对应目录，则惰性创建。
                 if let Some(root) = parent_fs_root.as_deref() {
                     let p = root.join(seg);
                     if p.is_dir() {
-                        list.push(Box::new(ResourceNode {
+                        list.push(ResourceNode {
                             name: seg.clone(),
                             data: NodeData::Directory(RwLock::new(Vec::new())),
                             fs_root: Some(p),
-                        }));
+                        });
                         node_index = Some(list.len() - 1);
                     }
                 }
@@ -516,12 +524,12 @@ impl Resource {
                 return None;
             };
             let mut guard = children.write();
-            list_children_in_list(&mut *guard, next_root, segments, index + 1)
+            list_children_in_list(&mut guard, next_root, segments, index + 1)
         }
 
         let ResourcePath(segments) = path;
         let mut root = Self::resources().write();
-        list_children_in_list(&mut *root, None, &segments, 0)
+        list_children_in_list(&mut root, None, &segments, 0)
     }
 
     pub fn data_loaded(&self) -> bool {
@@ -536,12 +544,15 @@ impl Resource {
     ///
     /// - 当资源已缓存时，返回内部数据的引用，避免写锁竞争。
     /// - 若尚未加载，将返回 `None`，调用方应退回到 [`Self::get_data`].
-    pub fn try_get_data(&self) -> Option<&'static Vec<u8>> {
-        if self.cached {
-            unsafe { Some(mem::transmute(&self.data)) }
-        } else {
-            None
-        }
+    pub fn try_get_data(&self) -> Option<&[u8]> {
+        self.cached.then_some(self.data.as_ref())
+    }
+
+    /// 当资源已缓存时，返回共享的字节缓存（零拷贝，clone 为 O(1)）。
+    ///
+    /// 适合在拿到数据后立即释放锁，然后在锁外进行解码/解析等耗时操作。
+    pub fn try_get_data_arc(&self) -> Option<Arc<[u8]>> {
+        self.cached.then(|| Arc::clone(&self.data))
     }
 
     /// 确保资源已加载并返回内部数据。
@@ -549,16 +560,22 @@ impl Resource {
     /// - 当资源尚未缓存时，会尝试从文件系统读取并缓存。
     /// - 调用该方法需要可变引用，建议在调用前先尝试 [`Self::try_get_data`]
     ///   以减少不必要的写锁获取。
-    pub fn get_data(&mut self) -> &'static Vec<u8> {
-        if let Some(fspath) = &self.fs_path {
-            if !self.cached {
-                if let Ok(bytes) = std::fs::read(fspath) {
-                    self.data = bytes;
-                }
-                self.cached = true;
+    pub fn get_data(&mut self) -> &[u8] {
+        if let Some(fspath) = &self.fs_path
+            && !self.cached
+        {
+            if let Ok(bytes) = std::fs::read(fspath) {
+                self.data = Arc::<[u8]>::from(bytes);
             }
+            self.cached = true;
         }
-        unsafe { mem::transmute(&self.data) }
+        self.data.as_ref()
+    }
+
+    /// 确保资源已加载并返回共享字节缓存（零拷贝）。
+    pub fn get_data_arc(&mut self) -> Arc<[u8]> {
+        let _ = self.get_data();
+        Arc::clone(&self.data)
     }
 
     /// 预加载资源确保其数据已缓存。
@@ -624,21 +641,25 @@ mod tests {
             "未缓存时应返回 None"
         );
 
-        let bytes = if resource_guard.data_loaded() {
-            resource_guard
-                .try_get_data()
-                .expect("缓存存在时应能直接读取")
-        } else {
-            resource_guard.get_data()
+        let bytes_ptr = {
+            let bytes = if resource_guard.data_loaded() {
+                resource_guard
+                    .try_get_data()
+                    .expect("缓存存在时应能直接读取")
+            } else {
+                resource_guard.get_data()
+            };
+            assert_eq!(bytes, b"content");
+            bytes.as_ptr()
         };
-        assert_eq!(bytes, &b"content".to_vec());
         assert!(resource_guard.data_loaded(), "访问后应标记为已缓存");
 
         // 再次访问应命中缓存，不需写锁。
-        let cached = resource_guard
+        let cached_ptr = resource_guard
             .try_get_data()
-            .expect("缓存应在首次加载后保持可用");
-        assert!(std::ptr::eq(bytes, cached));
+            .expect("缓存应在首次加载后保持可用")
+            .as_ptr();
+        assert_eq!(bytes_ptr, cached_ptr);
     }
 
     #[test]
@@ -659,7 +680,7 @@ mod tests {
         let bytes = guard
             .try_get_data()
             .expect("memory resource should be loaded");
-        assert_eq!(bytes.as_slice(), &[0x00, 0xff, 0x7a, 0x10, 0x20]);
+        assert_eq!(bytes, &[0x00, 0xff, 0x7a, 0x10, 0x20]);
         Ok(())
     }
 
@@ -697,7 +718,7 @@ mod tests {
                 } else {
                     guard.get_data()
                 };
-                assert_eq!(bytes.as_slice(), b"hello\n");
+                assert_eq!(bytes, b"hello\n");
             }
 
             let world = Resource::from(ResourcePath::from("dir_test/bundle/nested/world.txt"))
@@ -711,7 +732,7 @@ mod tests {
                 } else {
                     guard.get_data()
                 };
-                assert_eq!(bytes.as_slice(), b"world\n");
+                assert_eq!(bytes, b"world\n");
             }
 
             assert_eq!(
@@ -732,6 +753,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(unused_must_use)]
     fn resource_macro_embeddir_embeds_files_recursively() -> anyhow::Result<()> {
         crate::resource!("resource_testdata/resources_embeddir.yaml")?;
 
@@ -743,7 +765,7 @@ mod tests {
             let bytes = guard
                 .try_get_data()
                 .expect("embedded resource should be loaded");
-            assert_eq!(bytes.as_slice(), b"hello\n");
+            assert_eq!(bytes, b"hello\n");
         }
 
         let world = Resource::from(ResourcePath::from("embeddir_test/bundle/nested/world.txt"))
@@ -753,7 +775,7 @@ mod tests {
             let bytes = guard
                 .try_get_data()
                 .expect("embedded resource should be loaded");
-            assert_eq!(bytes.as_slice(), b"world\n");
+            assert_eq!(bytes, b"world\n");
         }
 
         assert_eq!(

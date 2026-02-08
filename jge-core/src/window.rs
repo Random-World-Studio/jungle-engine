@@ -9,14 +9,10 @@ use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
 use crate::{
     config::WindowConfig,
-    game::{
-        component::{layer::Layer, node::Node},
-        entity::Entity,
-        system::render::RenderSystem,
-    },
+    game::system::render::{RenderSnapshot, RenderSystem},
 };
 use tokio::runtime::Runtime;
-use tracing::{trace, warn};
+use tracing::trace;
 
 /// 窗口与渲染上下文。
 ///
@@ -39,6 +35,10 @@ pub struct GameWindow {
 }
 
 impl GameWindow {
+    pub(crate) fn framebuffer_size(&self) -> (u32, u32) {
+        (self.size.width, self.size.height)
+    }
+
     /// 创建一个 `GameWindow`。
     ///
     /// 会初始化 wgpu 实例/适配器/设备，并根据 [`WindowConfig`] 配置表面（例如 vsync）。
@@ -162,21 +162,10 @@ impl GameWindow {
         }
     }
 
-    /// 渲染一帧。
-    ///
-    /// - `root`：场景树根实体（用于收集 Layer 根）
-    /// - `delta`：上一帧到当前帧的时间间隔（用于统计/日志/可能的动画驱动）
-    ///
-    /// Layer 根的收集规则：
-    /// - 从 `root` 开始深度优先遍历节点树。
-    /// - 遇到挂载了 [`Layer`] 的实体时，将其视为一个可渲染 Layer 根：加入结果，并**不再深入遍历其子树**。
-    ///   这样可以避免“嵌套 Layer”被重复渲染；子 Layer 会作为独立根在各自子树内单独处理。
-    ///
-    /// 返回 `wgpu::SurfaceError` 表示 surface 获取当前帧纹理失败，通常可通过重试/重建 surface 恢复。
-    pub fn render(
+    pub fn render_snapshot(
         &mut self,
         runtime: &Runtime,
-        root: &Entity,
+        snapshot: &RenderSnapshot,
         delta: Duration,
     ) -> Result<(), wgpu::SurfaceError> {
         trace!(
@@ -185,15 +174,7 @@ impl GameWindow {
             "begin frame"
         );
 
-        // Profiling（仅 debug + JGE_PROFILE=1）：按帧初始化/刷入渲染耗时样本。
         self.renderer.begin_frame();
-
-        let layer_roots = Self::collect_layer_roots(runtime, *root);
-        trace!(
-            target: "jge-core",
-            layer_count = layer_roots.len(),
-            "collected layers for rendering"
-        );
 
         let output = self.surface.get_current_texture()?;
         let view = output
@@ -205,7 +186,8 @@ impl GameWindow {
                 label: Some("Render Encoder"),
             });
 
-        if layer_roots.is_empty() {
+        let layers = snapshot.layers();
+        if layers.is_empty() {
             let ops = wgpu::Operations {
                 load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
                 store: wgpu::StoreOp::Store,
@@ -223,13 +205,25 @@ impl GameWindow {
                 timestamp_writes: None,
             });
         } else {
-            for (index, layer_entity) in layer_roots.iter().enumerate() {
+            for (index, layer_snapshot) in layers.iter().enumerate() {
                 let load_op = if index == 0 {
                     wgpu::LoadOp::Clear(wgpu::Color::BLACK)
                 } else {
                     wgpu::LoadOp::Load
                 };
-                self.render_layer(runtime, &mut encoder, &view, *layer_entity, load_op);
+                self.renderer.render_layer_snapshot(
+                    layer_snapshot,
+                    crate::game::system::render::RenderLayerParams {
+                        runtime,
+                        device: &self.device,
+                        queue: &self.queue,
+                        encoder: &mut encoder,
+                        target_view: &view,
+                        surface_format: self.surf_config.format,
+                        framebuffer_size: (self.size.width, self.size.height),
+                        load_op,
+                    },
+                );
             }
         }
 
@@ -239,63 +233,5 @@ impl GameWindow {
         self.renderer.end_frame();
 
         Ok(())
-    }
-
-    fn render_layer(
-        &mut self,
-        runtime: &Runtime,
-        encoder: &mut wgpu::CommandEncoder,
-        view: &wgpu::TextureView,
-        layer_entity: Entity,
-        load_op: wgpu::LoadOp<wgpu::Color>,
-    ) {
-        self.renderer.render_layer(
-            runtime,
-            &self.device,
-            &self.queue,
-            encoder,
-            view,
-            self.surf_config.format,
-            (self.size.width, self.size.height),
-            layer_entity,
-            load_op,
-        );
-    }
-
-    /// 从节点树中收集需要渲染的 Layer 根实体。
-    ///
-    /// 该方法与 [`Layer::renderable_entities`] 的“跳过嵌套 Layer 子树”策略保持一致。
-    fn collect_layer_roots(runtime: &Runtime, root: Entity) -> Vec<Entity> {
-        let mut result = Vec::new();
-        let mut stack = Vec::new();
-        stack.push(root);
-
-        while let Some(entity) = stack.pop() {
-            let node_guard = match runtime.block_on(entity.get_component::<Node>()) {
-                Some(node) => node,
-                None => {
-                    warn!(
-                        target: "jge-core",
-                        entity_id = %entity.id(),
-                        "entity missing Node component, skip layer traversal"
-                    );
-                    continue;
-                }
-            };
-
-            let children: Vec<Entity> = node_guard.children().iter().copied().collect();
-            drop(node_guard);
-
-            if runtime.block_on(entity.get_component::<Layer>()).is_some() {
-                result.push(entity);
-                continue;
-            }
-
-            for child in children.into_iter().rev() {
-                stack.push(child);
-            }
-        }
-
-        result
     }
 }

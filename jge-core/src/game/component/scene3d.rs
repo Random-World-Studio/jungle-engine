@@ -83,6 +83,12 @@ pub struct Scene3D {
     attached_camera: Option<Entity>,
 }
 
+impl Default for Scene3D {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[component_impl]
 impl Scene3D {
     /// 创建一个 3D 场景组件。
@@ -105,31 +111,23 @@ impl Scene3D {
         self.entity_id.expect("Scene3D 组件尚未绑定实体")
     }
 
-    fn ensure_default_layer_shaders(entity: Entity) {
-        let Ok(handle) = tokio::runtime::Handle::try_current() else {
-            return;
-        };
-
-        tokio::task::block_in_place(|| {
-            handle.block_on(async {
-                if let Some(mut layer) = entity.get_component_mut::<Layer>().await {
-                    if layer.shader(RenderPipelineStage::Vertex).is_none() {
-                        let _ = layer.attach_shader_from_path(
-                            RenderPipelineStage::Vertex,
-                            ShaderLanguage::Wgsl,
-                            ResourcePath::from("shaders/3d.vs"),
-                        );
-                    }
-                    if layer.shader(RenderPipelineStage::Fragment).is_none() {
-                        let _ = layer.attach_shader_from_path(
-                            RenderPipelineStage::Fragment,
-                            ShaderLanguage::Wgsl,
-                            ResourcePath::from("shaders/3d.fs"),
-                        );
-                    }
-                }
-            })
-        });
+    async fn ensure_default_layer_shaders(entity: Entity) {
+        if let Some(mut layer) = entity.get_component_mut::<Layer>().await {
+            if layer.shader(RenderPipelineStage::Vertex).is_none() {
+                let _ = layer.attach_shader_from_path(
+                    RenderPipelineStage::Vertex,
+                    ShaderLanguage::Wgsl,
+                    ResourcePath::from("shaders/3d.vs"),
+                );
+            }
+            if layer.shader(RenderPipelineStage::Fragment).is_none() {
+                let _ = layer.attach_shader_from_path(
+                    RenderPipelineStage::Fragment,
+                    ShaderLanguage::Wgsl,
+                    ResourcePath::from("shaders/3d.fs"),
+                );
+            }
+        }
     }
 
     /// 当前垂直视场角（弧度）。
@@ -413,9 +411,9 @@ impl Scene3D {
         let camera_position = camera_transform.position();
         let basis = Camera::orientation_basis(&camera_transform).normalize();
 
-        let layer = scene_entity.get_component::<Layer>().await.ok_or_else(|| {
-            Scene3DVisibilityError::LayerTraversal(LayerTraversalError::MissingLayer(scene_entity))
-        })?;
+        let layer = scene_entity.get_component::<Layer>().await.ok_or(
+            Scene3DVisibilityError::LayerTraversal(LayerTraversalError::MissingLayer(scene_entity)),
+        )?;
         let collection = layer
             .collect_renderables()
             .await
@@ -770,12 +768,12 @@ impl Component for Scene3D {
         Ok(())
     }
 
-    fn attach_entity(&mut self, entity: Entity) {
+    async fn attach_entity(&mut self, entity: Entity) {
         self.entity_id = Some(entity);
-        Self::ensure_default_layer_shaders(entity);
+        Self::ensure_default_layer_shaders(entity).await;
     }
 
-    fn detach_entity(&mut self) {
+    async fn detach_entity(&mut self) {
         self.entity_id = None;
     }
 }

@@ -26,7 +26,7 @@ fn env_truthy(name: &str) -> bool {
     matches!(v.as_str(), "1" | "true" | "yes" | "on")
 }
 
-fn resolve_from_for_yaml_file(from: &str, yaml_dir: Option<&PathBuf>) -> String {
+fn resolve_from_for_yaml_file(from: &str, yaml_dir: Option<&Path>) -> String {
     let Some(yaml_dir) = yaml_dir else {
         return from.to_string();
     };
@@ -122,7 +122,7 @@ fn collect_files_recursively(root: &Path) -> Result<Vec<PathBuf>, syn::Error> {
 
 fn expand_embeddir_entries(
     callsite_dir: &Path,
-    yaml_dir_for_from: Option<&PathBuf>,
+    yaml_dir_for_from: Option<&Path>,
     prefix: &[String],
     res_name: &str,
     from_raw: &str,
@@ -369,7 +369,7 @@ pub fn expand_resource(input: TokenStream) -> TokenStream {
     if let Err(err) = parse_root(
         &doc,
         &callsite_dir,
-        yaml_dir_for_from.as_ref(),
+        yaml_dir_for_from.as_deref(),
         &mut entries,
         &mut used_embeddir,
     ) {
@@ -515,7 +515,7 @@ fn looks_like_yaml_path(s: &str) -> bool {
 fn maybe_read_yaml_file(
     lit: &LitStr,
     raw: &str,
-    callsite_dir: &PathBuf,
+    callsite_dir: &Path,
 ) -> Result<(String, proc_macro2::TokenStream, Option<PathBuf>), syn::Error> {
     if !looks_like_yaml_path(raw) {
         return Ok((raw.to_string(), quote! {}, None));
@@ -573,8 +573,8 @@ fn maybe_read_yaml_file(
 
 fn parse_root(
     doc: &serde_yaml::Value,
-    callsite_dir: &PathBuf,
-    yaml_dir_for_from: Option<&PathBuf>,
+    callsite_dir: &Path,
+    yaml_dir_for_from: Option<&Path>,
     out: &mut Vec<ResourceEntry>,
     used_embeddir: &mut bool,
 ) -> Result<(), syn::Error> {
@@ -601,8 +601,8 @@ fn parse_root(
 
 fn parse_node(
     node: &serde_yaml::Value,
-    callsite_dir: &PathBuf,
-    yaml_dir_for_from: Option<&PathBuf>,
+    callsite_dir: &Path,
+    yaml_dir_for_from: Option<&Path>,
     prefix: &mut Vec<String>,
     out: &mut Vec<ResourceEntry>,
     used_embeddir: &mut bool,
@@ -617,23 +617,23 @@ fn parse_node(
     // 目录：只有一个 key，且 value 是 sequence
     if map.len() == 1 {
         let (k, v) = map.iter().next().unwrap();
-        if let Some(dir_name) = as_plain_key(k) {
-            if let Some(children) = v.as_sequence() {
-                validate_segment(&dir_name)?;
-                prefix.push(dir_name);
-                for child in children {
-                    parse_node(
-                        child,
-                        callsite_dir,
-                        yaml_dir_for_from,
-                        prefix,
-                        out,
-                        used_embeddir,
-                    )?;
-                }
-                prefix.pop();
-                return Ok(());
+        if let Some(dir_name) = as_plain_key(k)
+            && let Some(children) = v.as_sequence()
+        {
+            validate_segment(&dir_name)?;
+            prefix.push(dir_name);
+            for child in children {
+                parse_node(
+                    child,
+                    callsite_dir,
+                    yaml_dir_for_from,
+                    prefix,
+                    out,
+                    used_embeddir,
+                )?;
             }
+            prefix.pop();
+            return Ok(());
         }
     }
 
@@ -753,7 +753,7 @@ fn parse_node(
             }
 
             let entries = expand_embeddir_entries(
-                callsite_dir.as_path(),
+                callsite_dir,
                 yaml_dir_for_from,
                 prefix,
                 &res_name,

@@ -99,11 +99,11 @@ impl RenderProfiler {
     ) -> EntityRenderScope {
         if self.enabled {
             let entity_id = entity.id();
-            if !self.node_names.contains_key(&entity_id) {
-                if let Some(node) = runtime.block_on(entity.get_component::<Node>()) {
-                    self.node_names
-                        .insert(entity_id, node.name().to_string());
-                }
+            if let std::collections::hash_map::Entry::Vacant(entry) =
+                self.node_names.entry(entity_id)
+                && let Some(node) = runtime.block_on(entity.get_component::<Node>())
+            {
+                entry.insert(node.name().to_string());
             }
         }
         EntityRenderScope::new(self, entity)
@@ -130,11 +130,7 @@ impl RenderProfiler {
             let p99_ns = percentile_nearest_rank(&sorted, 0.99);
             let p999_ns = percentile_nearest_rank(&sorted, 0.999);
 
-            let node_name = self
-                .node_names
-                .get(entity_id)
-                .cloned()
-                .unwrap_or_default();
+            let node_name = self.node_names.get(entity_id).cloned().unwrap_or_default();
 
             rows.push(ReportRow {
                 entity_id: *entity_id,

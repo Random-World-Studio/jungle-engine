@@ -11,6 +11,7 @@ extern crate self as jge_core;
 
 pub use async_trait::async_trait;
 
+pub mod aabb;
 pub mod config;
 pub mod event;
 pub mod game;
@@ -20,6 +21,7 @@ pub mod scenes;
 pub mod text;
 mod window;
 
+pub use aabb::{Aabb2, Aabb3};
 pub use game::Game;
 
 /// 场景 DSL 宏：用声明式语法构建一棵 `Node` 树，并返回绑定集。

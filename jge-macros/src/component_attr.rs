@@ -59,32 +59,32 @@ pub fn expand_component(args: TokenStream, input: TokenStream) -> TokenStream {
     let mut has_entity_field = false;
     if let syn::Data::Struct(struct_data) = &derive_input.data {
         for field in struct_data.fields.iter() {
-            if let Some(ident) = &field.ident {
-                if ident == "entity_id" {
-                    has_entity_field = true;
-                    break;
-                }
+            if let Some(ident) = &field.ident
+                && ident == "entity_id"
+            {
+                has_entity_field = true;
+                break;
             }
         }
     }
 
     let attach_entity_fn = if has_entity_field {
         quote! {
-            fn attach_entity(&mut self, entity: ::jge_core::game::entity::Entity) {
+            async fn attach_entity(&mut self, entity: ::jge_core::game::entity::Entity) {
                 self.entity_id = ::std::option::Option::Some(entity);
             }
 
-            fn detach_entity(&mut self) {
+            async fn detach_entity(&mut self) {
                 self.entity_id = ::std::option::Option::None;
             }
         }
     } else {
         quote! {
-            fn attach_entity(&mut self, entity: ::jge_core::game::entity::Entity) {
+            async fn attach_entity(&mut self, entity: ::jge_core::game::entity::Entity) {
                 let _ = entity;
             }
 
-            fn detach_entity(&mut self) {}
+            async fn detach_entity(&mut self) {}
         }
     };
 

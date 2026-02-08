@@ -2,9 +2,9 @@ use std::{collections::HashSet, fmt};
 
 use super::layer::Layer;
 use super::{Component, ComponentWrite, component, component_impl};
+use crate::game::reachability::{is_reachable_from_engine_root, set_subtree_reachable};
 use crate::game::system::logic::GameLogic;
 use crate::game::{entity::Entity, system::logic::GameLogicHandle};
-use crate::game::{is_reachable_from_engine_root, set_subtree_reachable};
 use tracing::warn;
 
 /// 节点组件：用于构建实体之间的树形层级（父子关系）并携带节点名称。
@@ -202,17 +202,16 @@ impl Node {
             });
         }
 
-        if child.get_component::<Layer>().await.is_some() {
-            if let Some(ancestor_layer) =
+        if child.get_component::<Layer>().await.is_some()
+            && let Some(ancestor_layer) =
                 Self::nearest_layer_ancestor_with_hint(parent_entity, parent_hint).await?
-            {
-                warn!(
-                    child_id = %child.id(),
-                    parent_id = %parent_entity.id(),
-                    ancestor_layer_id = %ancestor_layer.id(),
-                    "尝试在已有 Layer 树中挂载子 Layer，子 Layer 将在遍历时被忽略"
-                );
-            }
+        {
+            warn!(
+                child_id = %child.id(),
+                parent_id = %parent_entity.id(),
+                ancestor_layer_id = %ancestor_layer.id(),
+                "尝试在已有 Layer 树中挂载子 Layer，子 Layer 将在遍历时被忽略"
+            );
         }
 
         let (child_logic, previous_parent) = {

@@ -1,9 +1,13 @@
 mod background;
 mod cache;
 mod profile;
+mod resource_io;
 mod scene2d;
 mod scene3d;
+mod snapshot;
 mod util;
+
+pub(crate) use snapshot::RenderSnapshot;
 
 use tracing::{debug, warn};
 use wgpu;
@@ -14,7 +18,19 @@ use crate::game::{
 };
 
 use cache::{LayerRenderContext, LayerRendererCache};
+use snapshot::{LayerSceneKind, LayerSnapshot};
 use tokio::runtime::Runtime;
+
+pub struct RenderLayerParams<'a> {
+    pub runtime: &'a Runtime,
+    pub device: &'a wgpu::Device,
+    pub queue: &'a wgpu::Queue,
+    pub encoder: &'a mut wgpu::CommandEncoder,
+    pub target_view: &'a wgpu::TextureView,
+    pub surface_format: wgpu::TextureFormat,
+    pub framebuffer_size: (u32, u32),
+    pub load_op: wgpu::LoadOp<wgpu::Color>,
+}
 
 /// 渲染系统。
 ///
@@ -36,20 +52,21 @@ impl RenderSystem {
     /// - 若 `layer_entity` 未挂载 [`Layer`]，将跳过并输出警告日志。
     /// - `load_op` 控制该 Layer 的渲染是清屏还是在已有内容上叠加。
     /// - 渲染路径选择：优先使用 `Scene2D`；若不存在则尝试 `Scene3D`；两者都不存在则跳过。
-    pub fn render_layer(
-        &mut self,
-        runtime: &Runtime,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        encoder: &mut wgpu::CommandEncoder,
-        target_view: &wgpu::TextureView,
-        surface_format: wgpu::TextureFormat,
-        framebuffer_size: (u32, u32),
-        layer_entity: Entity,
-        load_op: wgpu::LoadOp<wgpu::Color>,
-    ) {
-        let viewport = runtime
-            .block_on(layer_entity.get_component::<Layer>())
+    pub fn render_layer(&mut self, layer_entity: Entity, params: RenderLayerParams<'_>) {
+        let RenderLayerParams {
+            runtime,
+            device,
+            queue,
+            encoder,
+            target_view,
+            surface_format,
+            framebuffer_size,
+            load_op,
+        } = params;
+
+        let layer = runtime.block_on(layer_entity.get_component::<Layer>());
+        let viewport = layer
+            .as_ref()
             .and_then(|layer| layer.viewport())
             .and_then(|viewport| util::viewport_pixels_from_normalized(framebuffer_size, viewport));
 
@@ -66,7 +83,7 @@ impl RenderSystem {
             caches: &mut self.caches,
         };
 
-        if runtime.block_on(layer_entity.get_component::<Layer>()).is_some() {
+        if layer.is_some() {
             Self::render_layer_entity(layer_entity, &mut context);
         } else {
             warn!(
@@ -75,6 +92,40 @@ impl RenderSystem {
                 "skip rendering for entity missing Layer component"
             );
         }
+    }
+
+    pub(crate) fn render_layer_snapshot(
+        &mut self,
+        layer_snapshot: &LayerSnapshot,
+        params: RenderLayerParams<'_>,
+    ) {
+        let RenderLayerParams {
+            runtime,
+            device,
+            queue,
+            encoder,
+            target_view,
+            surface_format,
+            framebuffer_size,
+            load_op,
+        } = params;
+
+        let viewport = layer_snapshot.viewport();
+
+        let mut context = LayerRenderContext {
+            runtime,
+            device,
+            queue,
+            encoder,
+            target_view,
+            surface_format,
+            framebuffer_size,
+            viewport,
+            load_op,
+            caches: &mut self.caches,
+        };
+
+        Self::render_layer_snapshot_entity(layer_snapshot, &mut context);
     }
 
     /// 标记一帧渲染开始。
@@ -113,6 +164,51 @@ impl RenderSystem {
                 layer_id = %entity.id(),
                 "skip layer without registered renderer"
             );
+        }
+    }
+
+    fn render_layer_snapshot_entity(
+        layer_snapshot: &LayerSnapshot,
+        context: &mut LayerRenderContext<'_, '_>,
+    ) {
+        let entity = layer_snapshot.entity();
+
+        if let Some(background_snapshot) = layer_snapshot.background() {
+            if background::render_background_from_snapshot(entity, background_snapshot, context) {
+                context.load_op = wgpu::LoadOp::Load;
+            }
+        }
+
+        match layer_snapshot.scene_kind() {
+            Some(LayerSceneKind::Scene2D) => {
+                if let Some(scene2d_snapshot) = layer_snapshot.scene2d() {
+                    Self::render_scene2d_from_snapshot(entity, scene2d_snapshot, context);
+                } else {
+                    warn!(
+                        target: "jge-core",
+                        layer_id = %entity.id(),
+                        "skip Scene2D rendering: missing Scene2D snapshot"
+                    );
+                }
+            }
+            Some(LayerSceneKind::Scene3D) => {
+                if let Some(scene3d_snapshot) = layer_snapshot.scene3d() {
+                    Self::render_scene3d_from_snapshot(entity, scene3d_snapshot, context);
+                } else {
+                    warn!(
+                        target: "jge-core",
+                        layer_id = %entity.id(),
+                        "skip Scene3D rendering: missing Scene3D snapshot"
+                    );
+                }
+            }
+            None => {
+                debug!(
+                    target: "jge-core",
+                    layer_id = %entity.id(),
+                    "skip layer without scene kind in snapshot"
+                );
+            }
         }
     }
 }

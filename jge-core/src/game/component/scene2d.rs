@@ -25,6 +25,7 @@ use super::{
         RenderPipelineStage, ShaderLanguage,
     },
 };
+use crate::Aabb2;
 use crate::game::{
     component::{Component, ComponentDependencyError, ComponentStorage},
     entity::Entity,
@@ -83,17 +84,11 @@ pub struct Scene2D {
 
 /// Scene2D 在当前视口内可见的世界坐标范围（单位：世界单位）。
 ///
-/// `min/max` 对应的轴向边界为：
+/// 该范围以 [`Aabb2`] 表示：
 /// - `min.x`：左边界
 /// - `max.x`：右边界
 /// - `min.y`：下边界
 /// - `max.y`：上边界
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Scene2DVisibleWorldBounds {
-    pub min: Vector2<f32>,
-    pub max: Vector2<f32>,
-}
-
 const DEFAULT_PIXELS_PER_UNIT: f32 = 100.0;
 
 static SCENE2D_STORAGE: OnceLock<ComponentStorage<Scene2D>> = OnceLock::new();
@@ -196,7 +191,7 @@ impl Scene2D {
     /// 注意：该函数不依赖 wgpu/winit；但它依赖“窗口/渲染目标像素尺寸”。
     /// 引擎会在渲染阶段（以及窗口 resize 后的下一帧渲染）自动更新该尺寸。
     /// 在尺寸尚未初始化时会返回 `None`。
-    pub fn visible_world_bounds(&self) -> Option<Scene2DVisibleWorldBounds> {
+    pub fn visible_world_bounds(&self) -> Option<Aabb2> {
         let framebuffer_size = self.framebuffer_size?;
 
         let viewport = match (self.entity_id, tokio::runtime::Handle::try_current()) {
@@ -221,10 +216,10 @@ impl Scene2D {
         let dx = half_width / ppu;
         let dy = half_height / ppu;
 
-        Some(Scene2DVisibleWorldBounds {
-            min: Vector2::new(self.offset.x - dx, self.offset.y - dy),
-            max: Vector2::new(self.offset.x + dx, self.offset.y + dy),
-        })
+        Some(Aabb2::new(
+            Vector2::new(self.offset.x - dx, self.offset.y - dy),
+            Vector2::new(self.offset.x + dx, self.offset.y + dy),
+        ))
     }
 
     /// 把“视口内像素坐标”转换为世界坐标。
@@ -290,31 +285,23 @@ impl Scene2D {
         !chunks.is_empty()
     }
 
-    fn ensure_default_layer_shaders(entity: Entity) {
-        let Ok(handle) = tokio::runtime::Handle::try_current() else {
-            return;
-        };
-
-        tokio::task::block_in_place(|| {
-            handle.block_on(async {
-                if let Some(mut layer) = entity.get_component_mut::<Layer>().await {
-                    if layer.shader(RenderPipelineStage::Vertex).is_none() {
-                        let _ = layer.attach_shader_from_path(
-                            RenderPipelineStage::Vertex,
-                            ShaderLanguage::Wgsl,
-                            ResourcePath::from("shaders/2d.vs"),
-                        );
-                    }
-                    if layer.shader(RenderPipelineStage::Fragment).is_none() {
-                        let _ = layer.attach_shader_from_path(
-                            RenderPipelineStage::Fragment,
-                            ShaderLanguage::Wgsl,
-                            ResourcePath::from("shaders/2d.fs"),
-                        );
-                    }
-                }
-            })
-        });
+    async fn ensure_default_layer_shaders(entity: Entity) {
+        if let Some(mut layer) = entity.get_component_mut::<Layer>().await {
+            if layer.shader(RenderPipelineStage::Vertex).is_none() {
+                let _ = layer.attach_shader_from_path(
+                    RenderPipelineStage::Vertex,
+                    ShaderLanguage::Wgsl,
+                    ResourcePath::from("shaders/2d.vs"),
+                );
+            }
+            if layer.shader(RenderPipelineStage::Fragment).is_none() {
+                let _ = layer.attach_shader_from_path(
+                    RenderPipelineStage::Fragment,
+                    ShaderLanguage::Wgsl,
+                    ResourcePath::from("shaders/2d.fs"),
+                );
+            }
+        }
     }
 
     /// 基于 Layer 的八叉树推进 LOD。
@@ -405,23 +392,22 @@ impl Scene2D {
             vertices: [Vector3<f32>; 3],
             min_z: f32,
             max_z: f32,
-            min_xy: Vector2<f32>,
-            max_xy: Vector2<f32>,
+            xy_bounds: Aabb2,
         }
 
         fn bounding_box_contains(container: &FaceRecord, target: &FaceRecord) -> bool {
             const XY_EPSILON: f32 = 1e-4;
-            container.min_xy.x - XY_EPSILON <= target.min_xy.x
-                && container.min_xy.y - XY_EPSILON <= target.min_xy.y
-                && container.max_xy.x + XY_EPSILON >= target.max_xy.x
-                && container.max_xy.y + XY_EPSILON >= target.max_xy.y
+            container
+                .xy_bounds
+                .expanded(XY_EPSILON)
+                .contains_aabb(&target.xy_bounds)
         }
 
         let mut faces_per_chunk: Vec<Vec<FaceRecord>> = vec![Vec::new(); chunks.len()];
 
         for bundle in renderables {
             for world_vertices in bundle.triangles() {
-                let vertices = world_vertices.clone();
+                let vertices = *world_vertices;
 
                 let mut chunk_indices = BTreeSet::new();
                 for depth in &depths {
@@ -464,8 +450,7 @@ impl Scene2D {
                     vertices,
                     min_z,
                     max_z,
-                    min_xy,
-                    max_xy,
+                    xy_bounds: Aabb2::new(min_xy, max_xy),
                 };
 
                 for index in chunk_indices {
@@ -523,13 +508,13 @@ impl Scene2D {
                 current_faces.push(face.vertices);
             }
 
-            if let Some(entity_id) = current_entity {
-                if !current_faces.is_empty() {
-                    result.push(Scene2DFaceGroup {
-                        entity: entity_id,
-                        faces: current_faces,
-                    });
-                }
+            if let Some(entity_id) = current_entity
+                && !current_faces.is_empty()
+            {
+                result.push(Scene2DFaceGroup {
+                    entity: entity_id,
+                    faces: current_faces,
+                });
             }
         }
 
@@ -548,6 +533,12 @@ impl Scene2D {
         let clamped = value.clamp(-1.0, 1.0);
         let normalized = ((clamped + 1.0) * 0.5) as f64;
         normalized.clamp(0.0, NORMALIZED_MAX)
+    }
+}
+
+impl Default for Scene2D {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -615,12 +606,12 @@ impl Component for Scene2D {
         Ok(())
     }
 
-    fn attach_entity(&mut self, entity: Entity) {
+    async fn attach_entity(&mut self, entity: Entity) {
         self.entity_id = Some(entity);
-        Self::ensure_default_layer_shaders(entity);
+        Self::ensure_default_layer_shaders(entity).await;
     }
 
-    fn detach_entity(&mut self) {
+    async fn detach_entity(&mut self) {
         self.entity_id = None;
     }
 }

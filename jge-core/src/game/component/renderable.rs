@@ -57,23 +57,16 @@ impl Component for Renderable {
         Ok(())
     }
 
-    fn attach_entity(&mut self, entity: Entity) {
+    async fn attach_entity(&mut self, entity: Entity) {
         self.entity_id = Some(entity);
 
         // Renderable 的实际可见性由“是否对引擎根可达”驱动。
         // 这一步用于覆盖“先建树、后注册 Renderable”的场景。
-        // 该钩子是同步的，但可达性计算依赖 async ECS。
-        // 这里做“最佳努力”：若处在 Tokio runtime 中则同步阻塞计算；否则回退为可达。
-        let reachable = match tokio::runtime::Handle::try_current() {
-            Ok(handle) => tokio::task::block_in_place(|| {
-                handle.block_on(crate::game::is_reachable_from_engine_root(entity))
-            }),
-            Err(_) => true,
-        };
+        let reachable = crate::game::reachability::is_reachable_from_engine_root(entity).await;
         self.set_reachable(reachable);
     }
 
-    fn detach_entity(&mut self) {
+    async fn detach_entity(&mut self) {
         self.entity_id = None;
         self.set_reachable(false);
     }
@@ -115,6 +108,12 @@ impl Renderable {
         } else {
             false
         };
+    }
+}
+
+impl Default for Renderable {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -187,8 +186,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn renderable_visibility_is_driven_by_engine_root_reachability() {
         let engine_root = Entity::new().await.expect("应能创建根实体");
-        crate::game::register_engine_root(engine_root);
-        crate::game::set_subtree_reachable(engine_root, true).await;
+        crate::game::reachability::register_engine_root(engine_root);
+        crate::game::reachability::set_subtree_reachable(engine_root, true).await;
 
         let child = Entity::new().await.expect("应能创建子实体");
         prepare_node(&child, "renderable_child").await;
@@ -236,6 +235,6 @@ mod tests {
                 .is_enabled()
         );
 
-        crate::game::unregister_engine_root(engine_root);
+        crate::game::reachability::unregister_engine_root(engine_root);
     }
 }

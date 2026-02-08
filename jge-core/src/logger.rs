@@ -96,38 +96,41 @@ pub fn init() -> anyhow::Result<()> {
 }
 
 #[doc(hidden)]
-pub fn __scene_log_error(
-    phase: &'static str,
-    node: &'static str,
-    node_name: Option<String>,
-    entity_id: Option<crate::game::entity::EntityId>,
-    parent_id: Option<crate::game::entity::EntityId>,
-    child_id: Option<crate::game::entity::EntityId>,
-    component: Option<&'static str>,
-    resource_expr: Option<&'static str>,
-    resource_path: Option<&crate::resource::ResourcePath>,
-    file: &'static str,
-    line: u32,
-    column: u32,
-    message: &'static str,
-    err: &anyhow::Error,
-) {
+pub struct SceneLogErrorContext<'a> {
+    pub phase: &'static str,
+    pub node: &'static str,
+    pub node_name: Option<String>,
+    pub entity_id: Option<crate::game::entity::EntityId>,
+    pub parent_id: Option<crate::game::entity::EntityId>,
+    pub child_id: Option<crate::game::entity::EntityId>,
+    pub component: Option<&'static str>,
+    pub resource_expr: Option<&'static str>,
+    pub resource_path: Option<&'a crate::resource::ResourcePath>,
+    pub file: &'static str,
+    pub line: u32,
+    pub column: u32,
+    pub message: &'static str,
+}
+
+#[doc(hidden)]
+pub fn __scene_log_error(ctx: SceneLogErrorContext<'_>, err: &anyhow::Error) {
     tracing::error!(
         target: "jge-scene",
-        phase = phase,
-        node = node,
-        node_name = ?node_name,
-        entity_id = ?entity_id,
-        parent_id = ?parent_id,
-        child_id = ?child_id,
-        component = ?component,
-        resource_expr = ?resource_expr,
-        resource_path = ?resource_path,
-        file = file,
-        line = line,
-        column = column,
+        phase = ctx.phase,
+        node = ctx.node,
+        node_name = ?ctx.node_name,
+        entity_id = ?ctx.entity_id,
+        parent_id = ?ctx.parent_id,
+        child_id = ?ctx.child_id,
+        component = ?ctx.component,
+        resource_expr = ?ctx.resource_expr,
+        resource_path = ?ctx.resource_path,
+        file = ctx.file,
+        line = ctx.line,
+        column = ctx.column,
         error = ?err,
-        "{message}"
+        "{message}",
+        message = ctx.message,
     );
 }
 
@@ -155,18 +158,18 @@ fn format_short_backtrace() -> String {
         }
 
         out.push_str(&format!("{:>4}: {}\n", printed, name));
-        if let Some(symbol) = symbol {
-            if let (Some(file), Some(line)) = (symbol.filename(), symbol.lineno()) {
-                if let Some(col) = symbol.colno() {
-                    out.push_str(&format!(
-                        "             at {}:{}:{}\n",
-                        file.display(),
-                        line,
-                        col
-                    ));
-                } else {
-                    out.push_str(&format!("             at {}:{}\n", file.display(), line));
-                }
+        if let Some(symbol) = symbol
+            && let (Some(file), Some(line)) = (symbol.filename(), symbol.lineno())
+        {
+            if let Some(col) = symbol.colno() {
+                out.push_str(&format!(
+                    "             at {}:{}:{}\n",
+                    file.display(),
+                    line,
+                    col
+                ));
+            } else {
+                out.push_str(&format!("             at {}:{}\n", file.display(), line));
             }
         }
 

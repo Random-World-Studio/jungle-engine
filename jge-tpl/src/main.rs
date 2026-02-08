@@ -1,3 +1,5 @@
+#![allow(clippy::type_complexity)]
+
 use std::{
     collections::HashSet,
     f32::consts::FRAC_PI_4,
@@ -157,10 +159,7 @@ fn main() -> anyhow::Result<()> {
                             return None;
                         }
 
-                        let Some(window) = state.window.clone() else {
-                            return None;
-                        };
-                        window
+                        state.window.clone()?
                     };
 
                     // 同步事件回调里无法 await；这里用 try_lock，若当前持锁则直接丢弃本次事件。
@@ -256,26 +255,26 @@ enum InputEvent {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum CameraAction {
-    MoveForward,
-    MoveBackward,
-    MoveLeft,
-    MoveRight,
-    MoveUp,
-    MoveDown,
+    Forward,
+    Backward,
+    Left,
+    Right,
+    Up,
+    Down,
 }
 
 fn map_key_event_to_camera_action(event: &KeyEvent) -> Option<CameraAction> {
     match &event.logical_key {
         Key::Character(value) => match value.as_str() {
-            "w" | "W" => Some(CameraAction::MoveForward),
-            "s" | "S" => Some(CameraAction::MoveBackward),
-            "a" | "A" => Some(CameraAction::MoveLeft),
-            "d" | "D" => Some(CameraAction::MoveRight),
+            "w" | "W" => Some(CameraAction::Forward),
+            "s" | "S" => Some(CameraAction::Backward),
+            "a" | "A" => Some(CameraAction::Left),
+            "d" | "D" => Some(CameraAction::Right),
             _ => None,
         },
-        Key::Named(NamedKey::Space) => Some(CameraAction::MoveUp),
+        Key::Named(NamedKey::Space) => Some(CameraAction::Up),
         _ => match event.physical_key {
-            PhysicalKey::Code(KeyCode::AltLeft) => Some(CameraAction::MoveDown),
+            PhysicalKey::Code(KeyCode::AltLeft) => Some(CameraAction::Down),
             _ => None,
         },
     }
@@ -622,22 +621,22 @@ impl GameLogic for CameraControllerLogic {
         let up = Vector3::new(0.0, 1.0, 0.0);
 
         let mut move_dir = Vector3::new(0.0, 0.0, 0.0);
-        if self.is_pressed(CameraAction::MoveForward) {
+        if self.is_pressed(CameraAction::Forward) {
             move_dir += forward;
         }
-        if self.is_pressed(CameraAction::MoveBackward) {
+        if self.is_pressed(CameraAction::Backward) {
             move_dir -= forward;
         }
-        if self.is_pressed(CameraAction::MoveRight) {
+        if self.is_pressed(CameraAction::Right) {
             move_dir += right;
         }
-        if self.is_pressed(CameraAction::MoveLeft) {
+        if self.is_pressed(CameraAction::Left) {
             move_dir -= right;
         }
-        if self.is_pressed(CameraAction::MoveUp) {
+        if self.is_pressed(CameraAction::Up) {
             move_dir += up;
         }
-        if self.is_pressed(CameraAction::MoveDown) {
+        if self.is_pressed(CameraAction::Down) {
             move_dir -= up;
         }
 
@@ -666,12 +665,12 @@ impl GameLogic for CameraControllerLogic {
         // 视角（垂直半视场角）调节：滚轮上推 = 缩小视角（更“放大”）。
         let wheel_steps = self.wheel_steps;
         self.wheel_steps = 0.0;
-        if wheel_steps.abs() > f32::EPSILON {
-            if let Some(mut camera) = entity.get_component_mut::<Camera>().await {
-                let current = camera.vertical_half_fov_degrees();
-                let candidate = current - wheel_steps * self.zoom_sensitivity_degrees;
-                let _ = camera.set_vertical_half_fov_degrees(candidate);
-            }
+        if wheel_steps.abs() > f32::EPSILON
+            && let Some(mut camera) = entity.get_component_mut::<Camera>().await
+        {
+            let current = camera.vertical_half_fov_degrees();
+            let candidate = current - wheel_steps * self.zoom_sensitivity_degrees;
+            let _ = camera.set_vertical_half_fov_degrees(candidate);
         }
 
         Ok(())

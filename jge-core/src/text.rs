@@ -8,7 +8,7 @@
 //! - 支持从系统字体或资源字体文件（ttf/otf/ttc）加载
 //! - 支持按颜色与偏移绘制阴影
 
-use std::io::Cursor;
+use std::{io::Cursor, sync::Arc};
 
 use anyhow::{Context, anyhow};
 use image::{DynamicImage, ImageFormat, RgbaImage};
@@ -179,16 +179,19 @@ fn rasterize_text_rgba(
 
     let mut rgba = vec![0u8; width as usize * height as usize * 4];
 
+    let mut target = DrawRgbaTarget {
+        rgba: &mut rgba,
+        width,
+        height,
+    };
+
     // 先绘制阴影，再绘制正文。
     if let Some(shadow) = options.shadow {
         draw_layout_pass(
             &layout,
             font,
-            &mut rgba,
-            width,
-            height,
-            origin_x + shadow.offset_px.0,
-            origin_y + shadow.offset_px.1,
+            &mut target,
+            (origin_x + shadow.offset_px.0, origin_y + shadow.offset_px.1),
             shadow.color,
         );
     }
@@ -196,25 +199,25 @@ fn rasterize_text_rgba(
     draw_layout_pass(
         &layout,
         font,
-        &mut rgba,
-        width,
-        height,
-        origin_x,
-        origin_y,
+        &mut target,
+        (origin_x, origin_y),
         options.color,
     );
 
     Ok((width, height, rgba))
 }
 
+struct DrawRgbaTarget<'a> {
+    rgba: &'a mut [u8],
+    width: u32,
+    height: u32,
+}
+
 fn draw_layout_pass(
     layout: &fontdue::layout::Layout,
     font: &fontdue::Font,
-    rgba: &mut [u8],
-    width: u32,
-    height: u32,
-    origin_x: i32,
-    origin_y: i32,
+    target: &mut DrawRgbaTarget<'_>,
+    (origin_x, origin_y): (i32, i32),
     color: [u8; 4],
 ) {
     for g in layout.glyphs() {
@@ -222,9 +225,7 @@ fn draw_layout_pass(
             continue;
         }
 
-        let (metrics, bitmap) = match font.rasterize_config(g.key) {
-            v => v,
-        };
+        let (metrics, bitmap) = font.rasterize_config(g.key);
         if metrics.width == 0 || metrics.height == 0 {
             continue;
         }
@@ -234,13 +235,13 @@ fn draw_layout_pass(
 
         for y in 0..metrics.height as i32 {
             let dst_y = start_y + y;
-            if dst_y < 0 || dst_y >= height as i32 {
+            if dst_y < 0 || dst_y >= target.height as i32 {
                 continue;
             }
 
             for x in 0..metrics.width as i32 {
                 let dst_x = start_x + x;
-                if dst_x < 0 || dst_x >= width as i32 {
+                if dst_x < 0 || dst_x >= target.width as i32 {
                     continue;
                 }
 
@@ -255,11 +256,11 @@ fn draw_layout_pass(
                     continue;
                 }
 
-                let idx = ((dst_y as u32 * width + dst_x as u32) as usize) * 4;
-                let dst_r = rgba[idx] as u32;
-                let dst_g = rgba[idx + 1] as u32;
-                let dst_b = rgba[idx + 2] as u32;
-                let dst_a = rgba[idx + 3] as u32;
+                let idx = ((dst_y as u32 * target.width + dst_x as u32) as usize) * 4;
+                let dst_r = target.rgba[idx] as u32;
+                let dst_g = target.rgba[idx + 1] as u32;
+                let dst_b = target.rgba[idx + 2] as u32;
+                let dst_a = target.rgba[idx + 3] as u32;
 
                 let sa = src_a as u32;
                 let inv = 255u32.saturating_sub(sa);
@@ -269,21 +270,24 @@ fn draw_layout_pass(
                 let out_g = (color[1] as u32 * sa + dst_g * inv) / 255;
                 let out_b = (color[2] as u32 * sa + dst_b * inv) / 255;
 
-                rgba[idx] = out_r as u8;
-                rgba[idx + 1] = out_g as u8;
-                rgba[idx + 2] = out_b as u8;
-                rgba[idx + 3] = out_a as u8;
+                target.rgba[idx] = out_r as u8;
+                target.rgba[idx + 1] = out_g as u8;
+                target.rgba[idx + 2] = out_b as u8;
+                target.rgba[idx + 3] = out_a as u8;
             }
         }
     }
 }
 
 fn load_fontdue_font(font: &Font) -> anyhow::Result<fontdue::Font> {
-    let (bytes, collection_index) = match font {
-        Font::System(name) => load_system_font_bytes(name)?,
+    let (bytes, collection_index): (Arc<[u8]>, u32) = match font {
+        Font::System(name) => {
+            let (bytes, index) = load_system_font_bytes(name)?;
+            (Arc::<[u8]>::from(bytes), index)
+        }
         Font::Resource(handle, face_name) => {
             let bytes = load_bytes_from_resource(handle)?;
-            let index = find_face_index_in_bytes(&bytes, face_name)?;
+            let index = find_face_index_in_bytes(bytes.as_ref(), face_name)?;
             (bytes, index)
         }
     };
@@ -293,20 +297,21 @@ fn load_fontdue_font(font: &Font) -> anyhow::Result<fontdue::Font> {
         ..fontdue::FontSettings::default()
     };
 
-    fontdue::Font::from_bytes(bytes, settings)
+    fontdue::Font::from_bytes(bytes.as_ref(), settings)
         .map_err(|err| anyhow!(err))
         .context("failed to parse font bytes")
 }
 
-fn load_bytes_from_resource(handle: &ResourceHandle) -> anyhow::Result<Vec<u8>> {
-    let mut guard = handle.write();
-    let bytes = if guard.data_loaded() {
-        guard
-            .try_get_data()
-            .ok_or_else(|| anyhow!("resource reports cached but missing data"))?
-            .clone()
-    } else {
-        guard.get_data().clone()
+fn load_bytes_from_resource(handle: &ResourceHandle) -> anyhow::Result<Arc<[u8]>> {
+    let bytes: Arc<[u8]> = {
+        let mut guard = handle.write();
+        if guard.data_loaded() {
+            guard
+                .try_get_data_arc()
+                .ok_or_else(|| anyhow!("resource reports cached but missing data"))?
+        } else {
+            guard.get_data_arc()
+        }
     };
     Ok(bytes)
 }
@@ -350,16 +355,19 @@ fn find_face_index_in_bytes(bytes: &[u8], face_name: &str) -> anyhow::Result<u32
 
         let mut matched = false;
         for name in face.names() {
-            if let Some(s) = name.to_string() {
-                if !s.is_empty() {
-                    // 收集可用名称，便于排错。
-                    if available.len() < 64 {
-                        available.push(s.clone());
-                    }
-                    if s.eq_ignore_ascii_case(face_name) {
-                        matched = true;
-                        break;
-                    }
+            if let Some(s) = name.to_string()
+                && !s.is_empty()
+            {
+                let is_match = s.eq_ignore_ascii_case(face_name);
+
+                // 收集可用名称，便于排错。
+                if available.len() < 64 {
+                    available.push(s.clone());
+                }
+
+                if is_match {
+                    matched = true;
+                    break;
                 }
             }
         }

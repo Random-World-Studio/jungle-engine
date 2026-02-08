@@ -10,6 +10,12 @@ use crate::game::component::{
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct EntityId(Uuid);
 
+impl Default for EntityId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl EntityId {
     /// 创建一个新的随机实体 ID。
     pub fn new() -> Self {

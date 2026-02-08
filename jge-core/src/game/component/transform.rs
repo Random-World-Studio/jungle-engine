@@ -39,6 +39,12 @@ pub struct Transform {
     scale: Vector3<f32>,
 }
 
+impl Default for Transform {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[component_impl]
 impl Transform {
     /// 创建一个默认的变换组件，位置为原点、旋转为零（弧度），缩放为单位向量。

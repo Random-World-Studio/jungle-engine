@@ -98,6 +98,12 @@ pub struct Layer {
     viewport: Option<LayerViewport>,
 }
 
+impl Default for Layer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[component_impl]
 impl Layer {
     /// 创建一个 Layer。
@@ -197,10 +203,10 @@ impl Layer {
         let mut renderables = Vec::new();
 
         for entity in ordered {
-            if let Some(renderable) = entity.get_component::<Renderable>().await {
-                if renderable.is_enabled() {
-                    renderables.push(entity);
-                }
+            if let Some(renderable) = entity.get_component::<Renderable>().await
+                && renderable.is_enabled()
+            {
+                renderables.push(entity);
             }
         }
 
@@ -313,8 +319,7 @@ impl Layer {
                 .get_component::<Material>()
                 .await
                 .map(|material_guard| {
-                    let regions: Vec<MaterialPatch> =
-                        material_guard.regions().iter().copied().collect();
+                    let regions: Vec<MaterialPatch> = material_guard.regions().to_vec();
                     let regions_arc = Arc::<[MaterialPatch]>::from(regions);
                     LayerMaterialDescriptor::new(material_guard.resource(), regions_arc)
                 });
@@ -357,7 +362,7 @@ impl Layer {
                     .get_component::<Node>()
                     .await
                     .ok_or(LayerTraversalError::MissingNode(current))?;
-                let mut ids: Vec<Entity> = node_guard.children().iter().copied().collect();
+                let mut ids: Vec<Entity> = node_guard.children().to_vec();
                 ids.reverse();
                 ids
             };
@@ -789,9 +794,7 @@ impl LayerSpatialIndex {
             return update;
         }
 
-        let needs_update = self
-            .tree
-            .prepare_update(targets, detail, |position| LayerChunk::new(position));
+        let needs_update = self.tree.prepare_update(targets, detail, LayerChunk::new);
 
         if !needs_update {
             return update;

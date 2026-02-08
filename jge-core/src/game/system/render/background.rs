@@ -14,6 +14,8 @@ use crate::resource::{Resource, ResourceHandle};
 
 use super::RenderSystem;
 use super::cache::LayerRenderContext;
+use super::resource_io;
+use super::snapshot::BackgroundSnapshot;
 use super::util;
 use crate::game::component::{camera::Camera, scene3d::Scene3D};
 
@@ -167,18 +169,10 @@ impl BackgroundPipeline {
     }
 }
 
+#[derive(Default)]
 pub(in crate::game::system::render) struct BackgroundPipelineCache {
     pipeline: Option<BackgroundPipeline>,
     generation: u64,
-}
-
-impl Default for BackgroundPipelineCache {
-    fn default() -> Self {
-        Self {
-            pipeline: None,
-            generation: 0,
-        }
-    }
 }
 
 impl BackgroundPipelineCache {
@@ -215,20 +209,11 @@ pub(in crate::game::system::render) struct BackgroundTextureInstance {
     pub(in crate::game::system::render) view: wgpu::TextureView,
 }
 
+#[derive(Default)]
 pub(in crate::game::system::render) struct BackgroundTextureCache {
     sampler: Option<wgpu::Sampler>,
     fallback: Option<BackgroundTextureInstance>,
     textures: HashMap<usize, BackgroundTextureInstance>,
-}
-
-impl Default for BackgroundTextureCache {
-    fn default() -> Self {
-        Self {
-            sampler: None,
-            fallback: None,
-            textures: HashMap::new(),
-        }
-    }
 }
 
 impl BackgroundTextureCache {
@@ -301,10 +286,11 @@ impl BackgroundTextureCache {
     ) -> &BackgroundTextureInstance {
         if let Some(handle) = handle {
             let key = Arc::as_ptr(handle) as usize;
-            if !self.textures.contains_key(&key) {
+
+            if let std::collections::hash_map::Entry::Vacant(entry) = self.textures.entry(key) {
                 match load_texture_from_resource(device, queue, handle) {
                     Ok(instance) => {
-                        self.textures.insert(key, instance);
+                        entry.insert(instance);
                     }
                     Err(err) => {
                         warn!(target: "jge-core", error = %err, "failed to load background texture, fallback to default");
@@ -312,7 +298,8 @@ impl BackgroundTextureCache {
                     }
                 }
             }
-            return self.textures.get(&key).expect("inserted");
+
+            return self.textures.get(&key).expect("cached");
         }
 
         self.ensure_fallback(device, queue)
@@ -464,6 +451,126 @@ pub(in crate::game::system::render) fn render_background_if_present(
     true
 }
 
+pub(in crate::game::system::render) fn render_background_from_snapshot(
+    layer_entity: Entity,
+    snapshot: &BackgroundSnapshot,
+    context: &mut LayerRenderContext<'_, '_>,
+) -> bool {
+    let color = snapshot.color;
+    let image = snapshot.image.clone();
+    let fragment_override = snapshot.fragment_shader_override.clone();
+
+    let vertex_shader = Resource::from(ResourceHandlePath::BACKGROUND_VERTEX.into())
+        .expect("built-in background vertex shader should exist");
+    let fragment_shader = fragment_override.unwrap_or_else(|| {
+        Resource::from(ResourceHandlePath::BACKGROUND_FRAGMENT.into())
+            .expect("built-in background fragment shader should exist")
+    });
+
+    let pipeline = match context.caches.background.ensure(
+        context.device,
+        context.surface_format,
+        vertex_shader,
+        fragment_shader,
+    ) {
+        Ok(pipeline) => pipeline,
+        Err(err) => {
+            warn!(target: "jge-core", error = %err, "failed to prepare background pipeline");
+            return false;
+        }
+    };
+
+    let (texture_view, sampler) = {
+        let cache = &mut context.caches.background_textures;
+        let view = cache
+            .get_or_create(context.device, context.queue, image.as_ref())
+            .view
+            .clone();
+        let sampler = cache.sampler(context.device).clone();
+        (view, sampler)
+    };
+
+    let use_texture = if image.is_some() { 1u32 } else { 0u32 };
+    let uniform_bytes = pack_background_uniform(
+        color,
+        use_texture,
+        snapshot.camera_pos,
+        snapshot.camera_forward,
+    );
+    let uniform_buffer = context
+        .device
+        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Background Uniform Buffer"),
+            contents: &uniform_bytes,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+    let bind_group = context
+        .device
+        .create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Background Bind Group"),
+            layout: &pipeline.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: uniform_buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+    let label = format!("Layer {} Background", layer_entity.id());
+    let ops = wgpu::Operations {
+        load: if context.viewport.is_some() {
+            wgpu::LoadOp::Load
+        } else {
+            context.load_op
+        },
+        store: wgpu::StoreOp::Store,
+    };
+
+    let mut pass = context
+        .encoder
+        .begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some(&label),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: context.target_view,
+                resolve_target: None,
+                depth_slice: None,
+                ops,
+            })],
+            depth_stencil_attachment: None,
+            occlusion_query_set: None,
+            timestamp_writes: None,
+        });
+
+    if let Some(viewport) = context.viewport {
+        pass.set_viewport(
+            viewport.x as f32,
+            viewport.y as f32,
+            viewport.width as f32,
+            viewport.height as f32,
+            0.0,
+            1.0,
+        );
+        pass.set_scissor_rect(viewport.x, viewport.y, viewport.width, viewport.height);
+    }
+
+    pass.set_pipeline(&pipeline.pipeline);
+    pass.set_bind_group(0, &bind_group, &[]);
+    pass.set_vertex_buffer(0, pipeline.vertex_buffer.slice(..));
+    pass.draw(0..6, 0..1);
+
+    true
+}
+
 fn resolve_layer_camera(runtime: &Runtime, layer_entity: Entity) -> ([f32; 3], [f32; 3]) {
     let scene_guard = match runtime.block_on(layer_entity.get_component::<Scene3D>()) {
         Some(scene) => scene,
@@ -472,7 +579,8 @@ fn resolve_layer_camera(runtime: &Runtime, layer_entity: Entity) -> ([f32; 3], [
     let preferred = scene_guard.attached_camera();
     drop(scene_guard);
 
-    let camera_entity = match RenderSystem::select_scene3d_camera(runtime, layer_entity, preferred) {
+    let camera_entity = match RenderSystem::select_scene3d_camera(runtime, layer_entity, preferred)
+    {
         Ok(Some(camera)) => camera,
         Ok(None) => return ([0.0, 0.0, 0.0], [0.0, 0.0, -1.0]),
         Err(_) => return ([0.0, 0.0, 0.0], [0.0, 0.0, -1.0]),
@@ -510,7 +618,7 @@ fn find_first_background(runtime: &Runtime, root: Entity) -> Option<Entity> {
             None => continue,
         };
 
-        let children: Vec<Entity> = node_guard.children().iter().copied().collect();
+        let children: Vec<Entity> = node_guard.children().to_vec();
         drop(node_guard);
 
         for child in children.into_iter().rev() {
@@ -522,16 +630,7 @@ fn find_first_background(runtime: &Runtime, root: Entity) -> Option<Entity> {
 }
 
 fn load_shader_source(handle: &ResourceHandle) -> anyhow::Result<String> {
-    let mut resource = handle.write();
-    let bytes = if resource.data_loaded() {
-        resource
-            .try_get_data()
-            .context("shader resource missing cached data")?
-    } else {
-        resource.get_data()
-    };
-    let source = std::str::from_utf8(bytes).context("shader source is not valid UTF-8")?;
-    Ok(source.to_owned())
+    resource_io::load_utf8_string(handle, "background shader")
 }
 
 fn load_texture_from_resource(
@@ -539,16 +638,8 @@ fn load_texture_from_resource(
     queue: &wgpu::Queue,
     handle: &ResourceHandle,
 ) -> anyhow::Result<BackgroundTextureInstance> {
-    let mut resource = handle.write();
-    let bytes = if resource.data_loaded() {
-        resource
-            .try_get_data()
-            .context("texture resource missing cached data")?
-    } else {
-        resource.get_data()
-    };
-
-    let img = image::load_from_memory(bytes).context("failed to decode image")?;
+    let bytes = resource_io::load_bytes_arc(handle, "background texture")?;
+    let img = image::load_from_memory(bytes.as_ref()).context("failed to decode image")?;
     let rgba = img.to_rgba8();
     let (width, height) = img.dimensions();
 
@@ -628,12 +719,7 @@ fn pack_background_uniform(
 }
 
 fn cast_slice_f32(data: &[f32]) -> &[u8] {
-    unsafe {
-        std::slice::from_raw_parts(
-            data.as_ptr() as *const u8,
-            data.len() * std::mem::size_of::<f32>(),
-        )
-    }
+    unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, std::mem::size_of_val(data)) }
 }
 
 struct ResourceHandlePath;

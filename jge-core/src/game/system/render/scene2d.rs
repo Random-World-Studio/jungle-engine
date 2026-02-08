@@ -17,7 +17,9 @@ use crate::game::{
 };
 use crate::resource::ResourceHandle;
 
-use super::{RenderSystem, cache::LayerRenderContext, util};
+use super::{RenderSystem, cache::LayerRenderContext, resource_io, util};
+
+use super::snapshot::{Scene2DPointLightSnapshot, Scene2DSnapshot};
 
 const SCENE2D_DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
@@ -77,6 +79,268 @@ impl Scene2DDepthCache {
 }
 
 impl RenderSystem {
+    pub(in crate::game::system::render) fn render_scene2d_from_snapshot(
+        entity: Entity,
+        snapshot: &Scene2DSnapshot,
+        context: &mut LayerRenderContext<'_, '_>,
+    ) {
+        let viewport_framebuffer_size = context
+            .viewport
+            .map(|viewport| (viewport.width, viewport.height))
+            .unwrap_or(context.framebuffer_size);
+
+        let (render_pipeline, bind_group_layout, pipeline_generation) =
+            match context.caches.scene2d.ensure(
+                context.device,
+                context.surface_format,
+                snapshot.vertex_shader.clone(),
+                snapshot.fragment_shader.clone(),
+            ) {
+                Ok((pipeline, generation)) => (
+                    pipeline.pipeline.clone(),
+                    pipeline.bind_group_layout().clone(),
+                    generation,
+                ),
+                Err(error) => {
+                    warn!(
+                        target: "jge-core",
+                        layer_id = %entity.id(),
+                        error = %error,
+                        "failed to prepare Scene2D pipeline"
+                    );
+                    return;
+                }
+            };
+
+        let scene_offset = Vector2::new(snapshot.offset[0], snapshot.offset[1]);
+        let pixels_per_unit = snapshot.pixels_per_unit;
+
+        const MAX_POINT_LIGHT_BRIGHTNESS: f32 = 1.0;
+        const MAX_DIRECTIONAL_BRIGHTNESS: f32 = 4.0;
+        const MAX_TOTAL_BRIGHTNESS: f32 = 6.0;
+
+        let directional_brightness = snapshot
+            .parallel_light_brightness
+            .clamp(0.0, MAX_DIRECTIONAL_BRIGHTNESS);
+
+        fn evaluate_point_lights(
+            vertex: &Vector3<f32>,
+            lights: &[Scene2DPointLightSnapshot],
+        ) -> f32 {
+            if lights.is_empty() {
+                return 0.0;
+            }
+
+            let mut total = 0.0;
+            for light in lights {
+                let dx = vertex.x - light.center[0];
+                let dy = vertex.y - light.center[1];
+                let distance = (dx * dx + dy * dy).sqrt();
+                if distance >= light.radius {
+                    continue;
+                }
+                let normalized = 1.0 - (distance / light.radius);
+                let smooth = normalized * normalized * (3.0 - 2.0 * normalized);
+                total += light.lightness * smooth;
+            }
+            total
+        }
+
+        let renderables = &snapshot.renderables;
+        let face_groups = &snapshot.face_groups;
+
+        let mut draws = Vec::new();
+        let mut total_vertices = 0usize;
+
+        for group in face_groups {
+            let faces = group.faces();
+            if faces.is_empty() {
+                continue;
+            }
+
+            let _profile_scope = context
+                .caches
+                .profiler
+                .entity_scope(context.runtime, group.entity());
+
+            let (material_regions, bind_group) = match renderables.material(group.entity()) {
+                Some(descriptor) => {
+                    let handle = descriptor.resource().clone();
+                    match context.caches.scene2d_materials.ensure_material(
+                        context.device,
+                        context.queue,
+                        &bind_group_layout,
+                        pipeline_generation,
+                        &handle,
+                    ) {
+                        Ok(instance) => (Some(descriptor.regions()), instance.bind_group.clone()),
+                        Err(error) => {
+                            warn!(
+                                target: "jge-core",
+                                layer_id = %entity.id(),
+                                error = %error,
+                                "failed to prepare material texture, fallback to default"
+                            );
+                            let fallback = context
+                                .caches
+                                .scene2d_materials
+                                .ensure_default(
+                                    context.device,
+                                    context.queue,
+                                    &bind_group_layout,
+                                    pipeline_generation,
+                                )
+                                .expect("default material should be available")
+                                .bind_group
+                                .clone();
+                            (None, fallback)
+                        }
+                    }
+                }
+                None => {
+                    let instance = context
+                        .caches
+                        .scene2d_materials
+                        .ensure_default(
+                            context.device,
+                            context.queue,
+                            &bind_group_layout,
+                            pipeline_generation,
+                        )
+                        .expect("default material should be available");
+                    (None, instance.bind_group.clone())
+                }
+            };
+
+            let mut vertex_data = Vec::with_capacity(faces.len() * 18);
+
+            for (triangle_index, triangle) in faces.iter().enumerate() {
+                if triangle
+                    .iter()
+                    .any(|vertex| !vertex.z.is_finite() || vertex.z < 0.0 || vertex.z > 1.0)
+                {
+                    continue;
+                }
+
+                for (vertex_index, vertex) in triangle.iter().enumerate() {
+                    let point_brightness = evaluate_point_lights(vertex, &snapshot.point_lights)
+                        .clamp(0.0, MAX_POINT_LIGHT_BRIGHTNESS);
+                    let brightness = (directional_brightness + point_brightness)
+                        .clamp(0.0, MAX_TOTAL_BRIGHTNESS);
+                    let ndc = util::scene2d_vertex_to_ndc(
+                        viewport_framebuffer_size,
+                        vertex,
+                        &scene_offset,
+                        pixels_per_unit,
+                    );
+                    let uv = material_regions
+                        .and_then(|regions| regions.get(triangle_index))
+                        .map(|patch| patch[vertex_index])
+                        .unwrap_or_else(|| Vector2::new(0.0, 0.0));
+                    vertex_data.push(ndc.x);
+                    vertex_data.push(ndc.y);
+                    vertex_data.push(ndc.z);
+                    vertex_data.push(uv.x);
+                    vertex_data.push(uv.y);
+                    vertex_data.push(brightness);
+                }
+            }
+
+            if vertex_data.is_empty() {
+                continue;
+            }
+
+            let vertex_buffer =
+                context
+                    .device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("Scene2D Vertex Buffer"),
+                        contents: util::cast_slice_f32(&vertex_data),
+                        usage: wgpu::BufferUsages::VERTEX,
+                    });
+            let vertex_count = (vertex_data.len() / 6) as u32;
+            total_vertices += vertex_count as usize;
+            draws.push(Scene2DDraw {
+                vertex_buffer,
+                vertex_count,
+                bind_group,
+            });
+        }
+
+        if draws.is_empty() {
+            debug!(
+                target: "jge-core",
+                layer_id = %entity.id(),
+                "Scene2D layer has no visible draws"
+            );
+            return;
+        }
+
+        let label = format!("Layer {}", entity.id());
+        let ops = wgpu::Operations {
+            load: if context.viewport.is_some() {
+                wgpu::LoadOp::Load
+            } else {
+                context.load_op
+            },
+            store: wgpu::StoreOp::Store,
+        };
+
+        let depth_view = context
+            .caches
+            .scene2d_depth
+            .ensure(context.device, context.framebuffer_size);
+
+        let mut pass = context
+            .encoder
+            .begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some(&label),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: context.target_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops,
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(0.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                occlusion_query_set: None,
+                timestamp_writes: None,
+            });
+
+        if let Some(viewport) = context.viewport {
+            pass.set_viewport(
+                viewport.x as f32,
+                viewport.y as f32,
+                viewport.width as f32,
+                viewport.height as f32,
+                0.0,
+                1.0,
+            );
+            pass.set_scissor_rect(viewport.x, viewport.y, viewport.width, viewport.height);
+        }
+
+        pass.set_pipeline(&render_pipeline);
+        for draw in &draws {
+            pass.set_bind_group(0, &draw.bind_group, &[]);
+            pass.set_vertex_buffer(0, draw.vertex_buffer.slice(..));
+            pass.draw(0..draw.vertex_count, 0..1);
+        }
+
+        debug!(
+            target: "jge-core",
+            layer_id = %entity.id(),
+            draw_calls = draws.len(),
+            vertex_total = total_vertices,
+            "Scene2D layer rendered"
+        );
+    }
+
     pub(in crate::game::system::render) fn render_scene2d(
         entity: Entity,
         context: &mut LayerRenderContext<'_, '_>,
@@ -181,25 +445,25 @@ impl RenderSystem {
 
         let parallel_light_brightness =
             match runtime.block_on(Layer::parallel_light_entities(entity)) {
-            Ok(lights) => lights
-                .into_iter()
-                .filter_map(|light_entity| {
-                    let light = runtime.block_on(light_entity.get_component::<Light>())?;
-                    let value = light.lightness();
-                    drop(light);
-                    if value <= 0.0 { None } else { Some(value) }
-                })
-                .sum::<f32>(),
-            Err(error) => {
-                warn!(
-                    target: "jge-core",
-                    layer_id = %entity.id(),
-                    error = %error,
-                    "Scene2D directional lighting query failed"
-                );
-                0.0
-            }
-        };
+                Ok(lights) => lights
+                    .into_iter()
+                    .filter_map(|light_entity| {
+                        let light = runtime.block_on(light_entity.get_component::<Light>())?;
+                        let value = light.lightness();
+                        drop(light);
+                        if value <= 0.0 { None } else { Some(value) }
+                    })
+                    .sum::<f32>(),
+                Err(error) => {
+                    warn!(
+                        target: "jge-core",
+                        layer_id = %entity.id(),
+                        error = %error,
+                        "Scene2D directional lighting query failed"
+                    );
+                    0.0
+                }
+            };
 
         struct ScenePointLight {
             center: Vector2<f32>,
@@ -627,31 +891,14 @@ impl Scene2DPipeline {
     }
 
     fn load_shader_source(handle: &ResourceHandle) -> anyhow::Result<String> {
-        let mut resource = handle.write();
-        let bytes = if resource.data_loaded() {
-            resource
-                .try_get_data()
-                .context("shader resource missing cached data")?
-        } else {
-            resource.get_data()
-        };
-        let source = std::str::from_utf8(bytes).context("shader source is not valid UTF-8")?;
-        Ok(source.to_owned())
+        resource_io::load_utf8_string(handle, "scene2d shader")
     }
 }
 
+#[derive(Default)]
 pub(in crate::game::system::render) struct Scene2DPipelineCache {
     pipeline: Option<Scene2DPipeline>,
     generation: u64,
-}
-
-impl Default for Scene2DPipelineCache {
-    fn default() -> Self {
-        Self {
-            pipeline: None,
-            generation: 0,
-        }
-    }
 }
 
 impl Scene2DPipelineCache {
@@ -694,22 +941,12 @@ pub(in crate::game::system::render) struct Scene2DMaterialInstance {
     pub(in crate::game::system::render) bind_group: wgpu::BindGroup,
 }
 
+#[derive(Default)]
 pub(in crate::game::system::render) struct Scene2DMaterialCache {
     sampler: Option<wgpu::Sampler>,
     default: Option<Scene2DMaterialInstance>,
     materials: HashMap<usize, Scene2DMaterialInstance>,
     pipeline_generation: u64,
-}
-
-impl Default for Scene2DMaterialCache {
-    fn default() -> Self {
-        Self {
-            sampler: None,
-            default: None,
-            materials: HashMap::new(),
-            pipeline_generation: 0,
-        }
-    }
 }
 
 impl Scene2DMaterialCache {
@@ -844,19 +1081,8 @@ impl Scene2DMaterialCache {
         bind_group_layout: &wgpu::BindGroupLayout,
         handle: &ResourceHandle,
     ) -> anyhow::Result<Scene2DMaterialInstance> {
-        let data_slice: &'static [u8] = {
-            let mut resource = handle.write();
-            let bytes = if resource.data_loaded() {
-                resource
-                    .try_get_data()
-                    .context("material resource missing cached data")?
-            } else {
-                resource.get_data()
-            };
-            bytes.as_slice()
-        };
-
-        let image = image::load_from_memory(data_slice)
+        let bytes = resource_io::load_bytes_arc(handle, "scene2d material texture")?;
+        let image = image::load_from_memory(bytes.as_ref())
             .context("failed to decode material texture resource")?;
         let (width, height) = image.dimensions();
         ensure!(

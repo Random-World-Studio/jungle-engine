@@ -110,13 +110,13 @@ mod scene_dsl {
             // 从而“吞掉” DSL 的 `as ident` 绑定。
             // 这里把 `"name" as ident` 重新解释为：name = "name"，bind = ident。
             let mut bind_from_name: Option<Ident> = None;
-            if let Some(Expr::Cast(expr_cast)) = &name {
-                if let syn::Type::Path(type_path) = &*expr_cast.ty {
-                    if type_path.qself.is_none() && type_path.path.segments.len() == 1 {
-                        bind_from_name = Some(type_path.path.segments[0].ident.clone());
-                        name = Some((*expr_cast.expr).clone());
-                    }
-                }
+            if let Some(Expr::Cast(expr_cast)) = &name
+                && let syn::Type::Path(type_path) = &*expr_cast.ty
+                && type_path.qself.is_none()
+                && type_path.path.segments.len() == 1
+            {
+                bind_from_name = Some(type_path.path.segments[0].ident.clone());
+                name = Some((*expr_cast.expr).clone());
             }
 
             // 可选 (id = expr)
@@ -582,19 +582,21 @@ mod scene_dsl {
                                     };
 
                                     #core_crate::logger::__scene_log_error(
-                                        $phase,
-                                        $node,
-                                        __node_name,
-                                        $entity_id,
-                                        $parent_id,
-                                        $child_id,
-                                        $component,
-                                        $resource_expr,
-                                        $resource_path,
-                                        file!(),
-                                        line!(),
-                                        column!(),
-                                        $message,
+                                        #core_crate::logger::SceneLogErrorContext {
+                                            phase: $phase,
+                                            node: $node,
+                                            node_name: __node_name,
+                                            entity_id: $entity_id,
+                                            parent_id: $parent_id,
+                                            child_id: $child_id,
+                                            component: $component,
+                                            resource_expr: $resource_expr,
+                                            resource_path: $resource_path,
+                                            file: file!(),
+                                            line: line!(),
+                                            column: column!(),
+                                            message: $message,
+                                        },
                                         &__e,
                                     );
                                     ::core::result::Result::Err(__e)
@@ -868,8 +870,9 @@ mod scene_dsl {
                                     e.get_component_mut::<#ty>()
                                         .await
                                         .with_context(|| format!(
-                                            "scene!: with 缺少组件：{}",
-                                            stringify!(#ty)
+                                            "scene!: with 缺少组件：{} (bind `{}`)",
+                                            stringify!(#ty),
+                                            stringify!(#name),
                                         ))
                                 )?;
                                 let #name: &mut #ty = &mut *#guard;
@@ -890,8 +893,9 @@ mod scene_dsl {
                                     e.get_component::<#ty>()
                                         .await
                                         .with_context(|| format!(
-                                            "scene!: with 缺少组件：{}",
-                                            stringify!(#ty)
+                                            "scene!: with 缺少组件：{} (bind `{}`)",
+                                            stringify!(#ty),
+                                            stringify!(#name),
                                         ))
                                 )?;
                                 let #name: &#ty = &*#guard;
@@ -935,26 +939,28 @@ mod scene_dsl {
                                         ::core::option::Option::None => {
                                             let __e = ::anyhow::anyhow!(
                                                 "scene!: 资源未注册：{}",
-                                                stringify!(#path_expr)
+                                                __path.join("/")
                                             );
                                             let __node_name = #out_var
                                                 .get_component::<#node_ty>()
                                                 .await
                                                 .map(|n| n.name().to_string());
                                             #core_crate::logger::__scene_log_error(
-                                                "resource_lookup",
-                                                #node_ctx_var,
-                                                __node_name,
-                                                ::core::option::Option::Some(#out_var.id()),
-                                                ::core::option::Option::None,
-                                                ::core::option::Option::None,
-                                                ::core::option::Option::Some(stringify!(#comp_expr)),
-                                                ::core::option::Option::Some(stringify!(#path_expr)),
-                                                ::core::option::Option::Some(&__path),
-                                                file!(),
-                                                line!(),
-                                                column!(),
-                                                "scene!: 资源未注册",
+                                                #core_crate::logger::SceneLogErrorContext {
+                                                    phase: "resource_lookup",
+                                                    node: #node_ctx_var,
+                                                    node_name: __node_name,
+                                                    entity_id: ::core::option::Option::Some(#out_var.id()),
+                                                    parent_id: ::core::option::Option::None,
+                                                    child_id: ::core::option::Option::None,
+                                                    component: ::core::option::Option::Some(stringify!(#comp_expr)),
+                                                    resource_expr: ::core::option::Option::Some(stringify!(#path_expr)),
+                                                    resource_path: ::core::option::Option::Some(&__path),
+                                                    file: file!(),
+                                                    line: line!(),
+                                                    column: column!(),
+                                                    message: "scene!: 资源未注册",
+                                                },
                                                 &__e,
                                             );
                                             ::core::result::Result::Err(__e)

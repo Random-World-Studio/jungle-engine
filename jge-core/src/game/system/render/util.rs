@@ -40,8 +40,8 @@ pub(in crate::game::system::render) fn viewport_pixels_from_normalized(
     let x2_px = x2_px.clamp(0, fb_width as i64);
     let y2_px = y2_px.clamp(0, fb_height as i64);
 
-    let width_px = (x2_px - x_px) as i64;
-    let height_px = (y2_px - y_px) as i64;
+    let width_px = x2_px - x_px;
+    let height_px = y2_px - y_px;
     if width_px <= 0 || height_px <= 0 {
         return None;
     }
@@ -109,7 +109,7 @@ pub(in crate::game::system::render) fn pad_rgba_data(
     );
 
     let alignment = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT as usize;
-    let padded_bytes_per_row = ((unpadded_bytes_per_row + alignment - 1) / alignment) * alignment;
+    let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(alignment) * alignment;
 
     if padded_bytes_per_row == unpadded_bytes_per_row {
         return Ok((data, unpadded_bytes_per_row as u32));
@@ -135,12 +135,7 @@ pub(in crate::game::system::render) fn opengl_to_wgpu_matrix() -> Matrix4<f32> {
 }
 
 pub(in crate::game::system::render) fn cast_slice_f32(data: &[f32]) -> &[u8] {
-    unsafe {
-        std::slice::from_raw_parts(
-            data.as_ptr() as *const u8,
-            data.len() * std::mem::size_of::<f32>(),
-        )
-    }
+    unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, std::mem::size_of_val(data)) }
 }
 
 #[cfg(test)]

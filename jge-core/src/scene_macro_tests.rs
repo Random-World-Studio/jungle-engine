@@ -1,3 +1,5 @@
+#![allow(clippy::type_complexity)]
+
 use anyhow::Context as _;
 
 use crate::game::component::node::Node;

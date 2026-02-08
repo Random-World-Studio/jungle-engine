@@ -102,10 +102,12 @@ pub trait Component: Send + Sync + Sized + 'static {
     async fn unregister_dependencies(_entity: Entity) {}
 
     /// 组件被挂载到实体时触发（生命周期钩子）。
-    fn attach_entity(&mut self, _entity: Entity) {}
+    ///
+    /// 该钩子是 async 的：允许组件在挂载阶段访问/初始化其它组件与资源，而无需在同步上下文里做阻塞等待。
+    async fn attach_entity(&mut self, _entity: Entity) {}
 
     /// 组件从实体卸载时触发（生命周期钩子）。
-    fn detach_entity(&mut self) {}
+    async fn detach_entity(&mut self) {}
 
     /// 将组件写入存储。
     ///
@@ -115,12 +117,15 @@ pub trait Component: Send + Sync + Sized + 'static {
         component: Self,
     ) -> Result<Option<Self>, ComponentDependencyError> {
         let mut component = component;
-        component.attach_entity(entity);
+        component.attach_entity(entity).await;
         let previous = Self::storage().insert(entity.id(), component).await;
-        Ok(previous.map(|mut existing| {
-            existing.detach_entity();
-            existing
-        }))
+
+        let Some(mut existing) = previous else {
+            return Ok(None);
+        };
+
+        existing.detach_entity().await;
+        Ok(Some(existing))
     }
 
     async fn read(entity: Entity) -> Option<ComponentRead<Self>> {
@@ -132,13 +137,9 @@ pub trait Component: Send + Sync + Sized + 'static {
     }
 
     async fn remove(entity: Entity) -> Option<Self> {
-        Self::storage()
-            .remove(entity.id())
-            .await
-            .map(|mut component| {
-                component.detach_entity();
-                component
-            })
+        let mut component = Self::storage().remove(entity.id()).await?;
+        component.detach_entity().await;
+        Some(component)
     }
 }
 
@@ -664,7 +665,7 @@ mod tests {
     impl FailingDefaultComponent {
         #[default()]
         fn create() -> Result<Self, IoError> {
-            Err(IoError::new(ErrorKind::Other, "default failure"))
+            Err(IoError::other("default failure"))
         }
     }
 
@@ -865,7 +866,7 @@ mod tests {
         let entity = Entity::new().await.expect("应能创建实体");
 
         let inserted = entity
-            .register_component(NeedsTestComponent::default())
+            .register_component(NeedsTestComponent)
             .await
             .expect("依赖应能通过默认构造自动满足");
         assert!(inserted.is_none());
@@ -885,7 +886,7 @@ mod tests {
         assert_eq!(previous.value, 0);
 
         let previous_needs = entity
-            .register_component(NeedsTestComponent::default())
+            .register_component(NeedsTestComponent)
             .await
             .expect("依赖已满足时仍应允许注册组件");
         assert!(previous_needs.is_some());
@@ -899,7 +900,7 @@ mod tests {
         let entity = Entity::new().await.expect("应能创建实体");
 
         let inserted = entity
-            .register_component(NeedsAlternateDefault::default())
+            .register_component(NeedsAlternateDefault)
             .await
             .expect("依赖应能通过默认方法自动满足");
         assert!(inserted.is_none());
@@ -922,7 +923,7 @@ mod tests {
         let entity = Entity::new().await.expect("应能创建实体");
 
         let err = entity
-            .register_component(NeedsFailingDefault::default())
+            .register_component(NeedsFailingDefault)
             .await
             .expect_err("失败的默认方法应向上传播错误");
         assert_eq!(err.entity(), entity);

@@ -88,6 +88,12 @@ impl Background {
     }
 }
 
+impl Default for Background {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

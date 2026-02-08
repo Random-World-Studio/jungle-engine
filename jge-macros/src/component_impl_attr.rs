@@ -23,74 +23,71 @@ pub fn expand_component_impl(_args: TokenStream, input: TokenStream) -> TokenStr
     let mut default_info: Option<(syn::Ident, Vec<Expr>, DefaultReturnKind)> = None;
 
     for impl_item in item.items.iter_mut() {
-        if let ImplItem::Fn(method) = impl_item {
-            if let Some((attr, index)) = extract_default_attribute(&method.attrs) {
-                if default_info.is_some() {
-                    return syn::Error::new_spanned(
-                        attr,
-                        "同一 impl 中只能存在一个 #[default] 标记",
-                    )
+        if let ImplItem::Fn(method) = impl_item
+            && let Some((attr, index)) = extract_default_attribute(&method.attrs)
+        {
+            if default_info.is_some() {
+                return syn::Error::new_spanned(attr, "同一 impl 中只能存在一个 #[default] 标记")
                     .to_compile_error()
                     .into();
-                }
+            }
 
-                method.attrs.remove(index);
+            method.attrs.remove(index);
 
-                if method.sig.receiver().is_some() {
+            if method.sig.receiver().is_some() {
+                let signature = method.sig.to_token_stream().to_string();
+                return syn::Error::new_spanned(
+                    method.sig.clone(),
+                    format!("#[default] 不能用于带 self 参数的方法：{}", signature),
+                )
+                .to_compile_error()
+                .into();
+            }
+
+            let return_kind = match &method.sig.output {
+                ReturnType::Type(_, ty) => match analyze_default_return_type(ty) {
+                    Ok(kind) => kind,
+                    Err(err) => return err.to_compile_error().into(),
+                },
+                ReturnType::Default => {
                     let signature = method.sig.to_token_stream().to_string();
                     return syn::Error::new_spanned(
                         method.sig.clone(),
-                        format!("#[default] 不能用于带 self 参数的方法：{}", signature),
-                    )
-                    .to_compile_error()
-                    .into();
-                }
-
-                let return_kind = match &method.sig.output {
-                    ReturnType::Type(_, ty) => match analyze_default_return_type(ty) {
-                        Ok(kind) => kind,
-                        Err(err) => return err.to_compile_error().into(),
-                    },
-                    ReturnType::Default => {
-                        let signature = method.sig.to_token_stream().to_string();
-                        return syn::Error::new_spanned(
-                            method.sig.clone(),
-                            format!(
-                                "#[default] 所在函数必须显式返回 Self 或 Result<Self, E>：{}",
-                                signature
-                            ),
-                        )
-                        .to_compile_error()
-                        .into();
-                    }
-                };
-
-                let defaults: Punctuated<Expr, Token![,]> =
-                    match attr.parse_args_with(Punctuated::<Expr, Token![,]>::parse_terminated) {
-                        Ok(values) => values,
-                        Err(err) => return err.to_compile_error().into(),
-                    };
-
-                if method.sig.inputs.len() != defaults.len() {
-                    let expected = method.sig.inputs.len();
-                    let provided = defaults.len();
-                    return syn::Error::new_spanned(
-                        method.sig.clone(),
                         format!(
-                            "#[default] 参数数量不匹配：函数需要 {} 个参数，但属性提供了 {} 个默认值",
-                            expected, provided
+                            "#[default] 所在函数必须显式返回 Self 或 Result<Self, E>：{}",
+                            signature
                         ),
                     )
                     .to_compile_error()
                     .into();
                 }
+            };
 
-                default_info = Some((
-                    method.sig.ident.clone(),
-                    defaults.into_iter().collect(),
-                    return_kind,
-                ));
+            let defaults: Punctuated<Expr, Token![,]> =
+                match attr.parse_args_with(Punctuated::<Expr, Token![,]>::parse_terminated) {
+                    Ok(values) => values,
+                    Err(err) => return err.to_compile_error().into(),
+                };
+
+            if method.sig.inputs.len() != defaults.len() {
+                let expected = method.sig.inputs.len();
+                let provided = defaults.len();
+                return syn::Error::new_spanned(
+                    method.sig.clone(),
+                    format!(
+                        "#[default] 参数数量不匹配：函数需要 {} 个参数，但属性提供了 {} 个默认值",
+                        expected, provided
+                    ),
+                )
+                .to_compile_error()
+                .into();
             }
+
+            default_info = Some((
+                method.sig.ident.clone(),
+                defaults.into_iter().collect(),
+                return_kind,
+            ));
         }
     }
 
@@ -168,21 +165,15 @@ fn is_self_type(ty: &Type) -> bool {
 fn is_result_of_self(ty: &Type) -> bool {
     use syn::{GenericArgument, PathArguments};
 
-    match ty {
-        Type::Path(type_path) => {
-            if let Some(segment) = type_path.path.segments.last() {
-                if segment.ident == "Result" {
-                    if let PathArguments::AngleBracketed(args) = &segment.arguments {
-                        if let Some(first) = args.args.first() {
-                            if let GenericArgument::Type(first_type) = first {
-                                return is_self_type(first_type);
-                            }
-                        }
-                    }
-                }
-            }
-            false
-        }
-        _ => false,
+    if let Type::Path(type_path) = ty
+        && let Some(segment) = type_path.path.segments.last()
+        && segment.ident == "Result"
+        && let PathArguments::AngleBracketed(args) = &segment.arguments
+        && let Some(first) = args.args.first()
+        && let GenericArgument::Type(first_type) = first
+    {
+        return is_self_type(first_type);
     }
+
+    false
 }

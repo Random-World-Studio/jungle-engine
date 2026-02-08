@@ -191,6 +191,12 @@ impl Camera {
     }
 }
 
+impl Default for Camera {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// 摄像机观察空间的三个正交基向量。
 #[derive(Debug, Clone, Copy)]
 pub struct CameraBasis {
