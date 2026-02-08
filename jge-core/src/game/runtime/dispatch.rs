@@ -16,6 +16,13 @@ use super::helpers::{
 use super::{Entity, Game, GameEvent};
 
 impl Game {
+    /// 用 `JoinSet` 并发执行每个 chunk 的任务，并在最后统一收割。
+    ///
+    /// 语义约定：
+    ///
+    /// - chunk 之间并发执行
+    /// - chunk 内按顺序 `await`（同一 `GameLogicHandle` 的互斥锁保证同一时刻只会有一个逻辑在跑）
+    /// - 任意任务 panic 时只记录日志，不中断其它 chunk
     async fn run_joinset<C, MakeTask, Fut>(
         chunks: Vec<C>,
         mut make_task: MakeTask,
@@ -38,6 +45,12 @@ impl Game {
         }
     }
 
+    /// 启动固定 tick 的 update loop。
+    ///
+    /// 每个 tick：
+    ///
+    /// 1) 调度 `GameLogic::update`
+    /// 2) 基于最新 framebuffer 尺寸重建 `RenderSnapshot`
     pub(super) fn spawn_update_loop(&self) {
         let game_tick_ms = self.config.game_tick_ms;
         let stopped = Arc::clone(&self.stopped);
@@ -64,6 +77,7 @@ impl Game {
         });
     }
 
+    /// 分发一次更新 tick（同步等待本轮所有 chunk 完成）。
     async fn dispatch_update(delta: Duration) {
         let node_targets = collect_logic_handle_chunks().await;
         Self::run_joinset(
@@ -81,6 +95,9 @@ impl Game {
         .await;
     }
 
+    /// 异步广播一个事件到所有逻辑。
+    ///
+    /// 注意：该方法会 `spawn`，不会等待所有逻辑处理完成。
     pub(super) fn dispatch_event(&self, event: GameEvent) {
         trace!(target: "jge-core", "dispatch event: {:?}", event);
         self.runtime.spawn(async move {
@@ -109,6 +126,9 @@ impl Game {
         });
     }
 
+    /// 异步广播一帧渲染回调到所有逻辑。
+    ///
+    /// Renderable 的 enabled 状态会影响调度：存在且 disabled 的实体会被跳过。
     pub(super) fn dispatch_on_render(&self, delta: Duration) {
         self.runtime.spawn(async move {
             let logic_targets = collect_logic_handle_chunks().await;

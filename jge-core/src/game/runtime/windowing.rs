@@ -22,6 +22,9 @@ use super::{Game, GameEvent, WindowConfig, WindowMode};
 use crate::window::GameWindow;
 
 impl Game {
+    /// 在窗口尺寸已知的前提下，刷新 framebuffer_size 并重建渲染快照。
+    ///
+    /// 该方法会阻塞等待 snapshot 构建完成（在 winit 线程上执行）。
     fn refresh_framebuffer_and_snapshot(&mut self, width: u32, height: u32) {
         let width = width.max(1);
         let height = height.max(1);
@@ -35,6 +38,9 @@ impl Game {
         ));
     }
 
+    /// 异步更新场景树里所有 `Scene2D` 的 framebuffer_size。
+    ///
+    /// 用于 resize 后尽快修正 2D 坐标转换；不在 winit 回调中同步遍历，避免卡顿。
     fn spawn_update_scene2d_framebuffer_sizes(&self) {
         // 让 Scene2D 的坐标转换/可见范围在下一次 tick 前也能尽快感知到新尺寸。
         // 不在 winit 回调线程同步阻塞；改为异步任务遍历节点树并更新。
@@ -46,12 +52,14 @@ impl Game {
         });
     }
 
+    /// 触发引擎退出：广播 CloseRequested，并退出 winit 事件循环。
     fn request_exit(&mut self, event_loop: &ActiveEventLoop) {
         self.dispatch_event(GameEvent::CloseRequested);
         self.stopped.store(true, Ordering::Release);
         event_loop.exit();
     }
 
+    /// 处理窗口尺寸变化：更新 framebuffer_size、通知 GameWindow、并异步刷新所有 Scene2D 的 framebuffer。
     fn handle_window_resized(&mut self, physical_size: PhysicalSize<u32>) {
         if physical_size.width == 0 || physical_size.height == 0 {
             // 忽略最小化
@@ -71,6 +79,9 @@ impl Game {
         self.spawn_update_scene2d_framebuffer_sizes();
     }
 
+    /// 确保窗口与渲染后端已初始化。
+    ///
+    /// 窗口在 `resumed` 时懒创建；创建失败会记录错误并退出事件循环。
     pub(super) fn ensure_window_created(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
             return;
@@ -111,6 +122,7 @@ impl Game {
         }
     }
 
+    /// 处理 `RedrawRequested`：渲染当前快照并分发 `on_render`。
     pub(super) fn handle_redraw_requested(&mut self) {
         let delta = self.last_redraw.elapsed();
         self.last_redraw = Instant::now();

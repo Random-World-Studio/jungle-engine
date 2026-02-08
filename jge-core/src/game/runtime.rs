@@ -38,6 +38,17 @@ mod tests;
 
 type WindowInitFn = dyn FnMut(&mut Game) + Send + Sync;
 
+/// 引擎运行时入口。
+///
+/// `Game` 把两件事绑在一起：
+///
+/// - `winit` 的事件循环（在 [`Game::run`] 中启动）
+/// - 内部的 Tokio runtime（用于 ECS/逻辑/资源等异步任务）
+///
+/// # 窗口创建时机
+///
+/// 窗口是懒创建的：在 `winit` 回调（`resumed`）里才会创建。
+/// 因此在调用 [`Game::run`] 之前，或在窗口尚未创建时，窗口访问方法会返回 `None`。
 pub struct Game {
     config: GameConfig,
     window: Option<GameWindow>,
@@ -69,6 +80,12 @@ impl Drop for Game {
 }
 
 impl Game {
+    /// 创建一个新的 `Game`。
+    ///
+    /// - `root` 会被标记为“引擎根”，并把其子树的可达性设置为可达。
+    /// - 如果 `root` 上存在 `Node` 且持有 `GameLogic`，会调度一次 `on_attach`。
+    ///
+    /// 注意：窗口不会在这里创建；窗口创建发生在 `run` 之后的 winit 生命周期回调中。
     pub fn new(config: GameConfig, root: Entity) -> anyhow::Result<Self> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -115,6 +132,7 @@ impl Game {
         })
     }
 
+    /// 在引擎的 Tokio runtime 上 spawn 一个异步任务。
     pub fn spawn<F>(&self, future: F) -> JoinHandle<F::Output>
     where
         F: Future + Send + 'static,
@@ -123,6 +141,7 @@ impl Game {
         self.runtime.spawn(future)
     }
 
+    /// 在引擎 runtime 的 blocking 线程池上执行一个阻塞任务。
     pub fn spawn_blocking<F, R>(&self, func: F) -> JoinHandle<R>
     where
         F: FnOnce() -> R + Send + 'static,
@@ -131,6 +150,9 @@ impl Game {
         self.runtime.spawn_blocking(func)
     }
 
+    /// 在引擎 runtime 上阻塞等待一个 future 完成。
+    ///
+    /// 典型用法：在 `main` 里构建/挂载场景树（见教程）。
     pub fn block_on<F, R>(&self, future: F) -> R
     where
         F: Future<Output = R>,
@@ -138,20 +160,34 @@ impl Game {
         self.runtime.block_on(future)
     }
 
+    /// 异步获取 winit 的 `Window` 锁。
+    ///
+    /// 若窗口尚未创建（例如 `run` 之前），返回 `None`。
     pub async fn winit_window(&self) -> Option<tokio::sync::MutexGuard<'_, Window>> {
         Some(self.window.as_ref()?.window.lock().await)
     }
 
+    /// 获取 `Arc<Mutex<Window>>`，便于在引擎外部线程里请求重绘等操作。
+    ///
+    /// 若窗口尚未创建，返回 `None`。
     pub fn winit_window_arc(&self) -> Option<Arc<Mutex<Window>>> {
         self.window
             .as_ref()
             .map(|window| Arc::clone(&window.window))
     }
 
+    /// 尝试立即获取 `Window` 的锁（不等待）。
+    ///
+    /// - 窗口不存在：返回 `None`
+    /// - 锁已被占用：返回 `None`
     pub fn try_winit_window(&self) -> Option<tokio::sync::MutexGuard<'_, Window>> {
         self.window.as_ref()?.window.try_lock().ok()
     }
 
+    /// 设置窗口创建后的初始化回调。
+    ///
+    /// 回调会在窗口第一次创建完成后被调用一次，然后被丢弃（不会重复调用）。
+    /// 适合在此处创建渲染资源、注册 UI/场景等需要窗口句柄的初始化逻辑。
     pub fn set_window_init<F>(&mut self, init: F)
     where
         F: FnMut(&mut Game) + Send + Sync + 'static,
@@ -159,6 +195,7 @@ impl Game {
         self.window_init = Some(Box::new(init));
     }
 
+    /// builder 风格的 [`Game::set_window_init`]。
     pub fn with_window_init<F>(mut self, init: F) -> Self
     where
         F: FnMut(&mut Game) + Send + Sync + 'static,
@@ -167,6 +204,10 @@ impl Game {
         self
     }
 
+    /// 设置事件映射器。
+    ///
+    /// 映射器会在 winit 回调线程被调用：将 `WindowEvent/DeviceEvent` 转换为引擎 [`GameEvent`]。
+    /// 返回 `None` 表示忽略该事件。
     pub fn set_event_mapper<M>(&mut self, mapper: M)
     where
         M: EventMapper + 'static,
@@ -174,6 +215,7 @@ impl Game {
         self.event_mapper = Box::new(mapper);
     }
 
+    /// builder 风格的 [`Game::set_event_mapper`]。
     pub fn with_event_mapper<M>(mut self, mapper: M) -> Self
     where
         M: EventMapper + 'static,
@@ -182,6 +224,12 @@ impl Game {
         self
     }
 
+    /// 启动主循环。
+    ///
+    /// 该方法会：
+    ///
+    /// - 启动固定 tick 的 update loop
+    /// - 启动 winit 事件循环
     pub fn run(mut self) -> anyhow::Result<()> {
         self.spawn_update_loop();
 

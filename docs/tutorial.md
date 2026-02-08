@@ -311,7 +311,7 @@ async fn attach_logic_example() -> anyhow::Result<Entity> {
 
 做法是：
 
-1) 在 `Game::new(...).with_*_event_mapper(...)` 中把系统事件转换成 `Event::custom(...)`
+1) 在 `Game::new(...).with_event_mapper(...)`（或 `with_event_mapper(split_event_mapper(...))`）中把系统事件转换成 `Event::custom(...)`
 2) 在 `GameLogic::on_event` 里对 `Event` 做 `downcast_ref::<YourEvent>()`
 
 最小示例（只演示按键与关闭请求）：
@@ -341,13 +341,22 @@ fn wire_event_mapping(game: jge_core::Game) -> jge_core::Game {
 }
 
 // 在 GameLogic 里接收：
-fn on_event(event: &Event) {
-    if let Some(input) = event.downcast_ref::<InputEvent>() {
-        match input {
-            InputEvent::JumpPressed => {
-                // ...
+use async_trait::async_trait;
+use jge_core::game::system::logic::GameLogic;
+
+struct MyLogic;
+
+#[async_trait]
+impl GameLogic for MyLogic {
+    async fn on_event(&mut self, _e: jge_core::game::entity::Entity, event: &Event) -> anyhow::Result<()> {
+        if let Some(input) = event.downcast_ref::<InputEvent>() {
+            match input {
+                InputEvent::JumpPressed => {
+                    // ...
+                }
             }
         }
+        Ok(())
     }
 }
 ```

@@ -334,6 +334,15 @@ impl Layer {
         Ok(bundles)
     }
 
+    /// 遍历一个 Layer 的节点子树，返回“属于该 Layer”的所有实体（包含 root）。
+    ///
+    /// 遍历规则：
+    ///
+    /// - 如果 `root` 本身不含 `Layer`/`Node`，返回对应错误。
+    /// - 如果 `root` 处于另一个 Layer 的子树内（存在 Layer 祖先），返回空列表：
+    ///   该 root 会被祖先 Layer 的渲染流程整体跳过。
+    /// - 在遍历过程中遇到嵌套 Layer（`current != root && current has Layer`）时：
+    ///   不把该实体加入结果，也不会继续深入它的子树。
     async fn traverse_layer_entities(root: Entity) -> Result<Vec<Entity>, LayerTraversalError> {
         if root.get_component::<Layer>().await.is_none() {
             return Err(LayerTraversalError::MissingLayer(root));
@@ -375,6 +384,11 @@ impl Layer {
         Ok(ordered)
     }
 
+    /// 判断某个实体是否存在 Layer 祖先。
+    ///
+    /// 该检查用于保证“嵌套 Layer 不会被重复渲染”：
+    /// 当一个 Layer 根本身位于另一个 Layer 的子树内时，它应当由自己的 Layer 渲染流程接管，
+    /// 而不是被父 Layer 的遍历收集到。
     async fn has_layer_ancestor(entity: Entity) -> Result<bool, LayerTraversalError> {
         let mut current_parent = {
             let node_guard = entity

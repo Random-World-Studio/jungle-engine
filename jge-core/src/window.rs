@@ -1,3 +1,14 @@
+//! 窗口与渲染。
+//!
+//! 本模块负责把 [`RenderSnapshot`](crate::game::system::render::RenderSnapshot) 提交给 wgpu 进行绘制。
+//!
+//! 重要语义：
+//!
+//! - 渲染时以 `RenderSnapshot::layers()` 的顺序逐层绘制。
+//! - `RenderSnapshot` 的 layer 列表来自场景树遍历：遇到挂载 `Layer` 的实体时，会把其作为一层的根，
+//!   并 **停止继续深入该实体子树寻找嵌套 Layer**，以避免嵌套层被重复渲染。
+//!   （该语义在 [`crate::game::component::layer`] 中也有详细说明。）
+
 use std::{sync::Arc, time::Duration};
 
 use wgpu::Backends;
@@ -162,6 +173,14 @@ impl GameWindow {
         }
     }
 
+    /// 渲染一帧快照。
+    ///
+    /// - 当快照没有任何 layer 时，会清屏为黑色。
+    /// - 当存在多个 layer 时：
+    ///   - 第 0 层会 `Clear(BLACK)`
+    ///   - 后续层会 `Load`（叠加绘制在同一个 framebuffer 上）
+    ///
+    /// `snapshot.layers()` 的顺序即渲染顺序。
     pub fn render_snapshot(
         &mut self,
         runtime: &Runtime,
