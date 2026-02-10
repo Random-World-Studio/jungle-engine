@@ -28,7 +28,7 @@ pub(in crate::game::system::render) struct RenderProfiler {
     // 节点名缓存：避免在生成报告时访问 ECS（异步），同时 Drop 时也能安全输出。
     node_names: HashMap<EntityId, String>,
 
-    // 当前帧累计：一个实体在一帧内可能被渲染多次（例如跨 chunk），这里按实体聚合。
+    // 当前帧累计：一个实体在一帧内可能被渲染多次（例如多次 draw / 多个渲染阶段），这里按实体聚合。
     frame_accumulated_ns: HashMap<EntityId, u64>,
 
     // 历史样本：每帧一个值（ns）。

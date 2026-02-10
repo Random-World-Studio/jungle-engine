@@ -9,7 +9,7 @@ use std::{
 
 use crate::sync::{Mutex, MutexGuard};
 use tokio::{runtime::Runtime, task::JoinHandle};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use winit::{event_loop::EventLoop, window::Window};
 
 use super::{
@@ -50,6 +50,12 @@ type WindowInitFn = dyn FnMut(&mut Game) + Send + Sync;
 ///
 /// 窗口是懒创建的：在 `winit` 回调（`resumed`）里才会创建。
 /// 因此在调用 [`Game::run`] 之前，或在窗口尚未创建时，窗口访问方法会返回 `None`。
+///
+/// # Drop 注意事项
+///
+/// `Game` 在 `Drop` 中会执行一部分需要 `Runtime::block_on(...)` 的清理逻辑（例如更新可达性、触发 on_detach）。
+/// 由于 tokio 不允许在一个 runtime 上下文里再调用另一个 runtime 的 `block_on`，
+/// 若你在**外部 tokio runtime 上下文**里 drop 了 `Game`，引擎会跳过这些清理逻辑并输出警告日志，以避免 panic。
 pub struct Game {
     config: GameConfig,
     window: Option<GameWindow>,
@@ -74,6 +80,17 @@ impl Drop for Game {
         // 停止调度循环，避免退出阶段仍然并发执行 update/on_event。
         self.stopped.store(true, Ordering::Release);
         unregister_engine_root(self.root);
+
+        // `tokio::runtime::Runtime::block_on` 不能在另一个 tokio runtime 上下文中被调用。
+        // 若用户在 tokio runtime 内 drop 了 `Game`，这里直接跳过需要 block_on 的清理逻辑，避免 panic。
+        if tokio::runtime::Handle::try_current().is_ok() {
+            warn!(
+                target = "jge-core",
+                "Game 被在 tokio runtime 内 drop：跳过可达性更新与节点树 on_detach 清理以避免 panic"
+            );
+            return;
+        }
+
         self.runtime
             .block_on(set_subtree_reachable(self.root, false));
         self.detach_node_tree(self.root);

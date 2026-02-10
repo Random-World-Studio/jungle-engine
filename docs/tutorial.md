@@ -195,6 +195,41 @@ cargo run
 - 依赖关系：`Entity::unregister_component` 会调用组件的 `unregister_dependencies` 钩子。
 - 幂等：重复调用 `destroy().await` 不会报错。
 
+### （可选）复用/组合子场景：`<expr> node;`
+
+当你希望把一段可复用的“子节点树”拆成函数/模块时，可以先在外部构造子场景（拿到 `SceneBindings`），再在父场景里用 `<expr> node;` 把它挂进来。
+
+> 语法：在 `node { ... }` 内写 `child_expr node;`。
+>
+> - `child_expr` 可以是另一个 `scene!` 的返回值（匿名 bindings），也可以是 `Entity`。
+> - 如果传的是 bindings：父场景的 `destroy().await` 会级联调用该 bindings 的 `destroy().await`。
+> - 如果传的是 `Entity`：不会尝试嵌套 destroy（实体本身不支持 destroy）。
+
+示例：外部构造子场景，然后传入并挂载（不需要把 `scene!` 写成嵌套宏）
+
+```rust
+use jge_core::{scene, game::component::transform::Transform};
+
+async fn build_composed() -> anyhow::Result<()> {
+    let child = scene! {
+        node "child_root" {
+            + Transform::new();
+        }
+    }
+    .await?;
+
+    let parent = scene! {
+        node "parent_root" {
+            child node;
+        }
+    }
+    .await?;
+
+    parent.destroy().await;
+    Ok(())
+}
+```
+
 ### （可选）构造进度上报：`progress tx;`
 
 当场景比较大时，你可能希望在构造期间汇报进度（例如加载关卡、生成复杂几何、批量注册组件）。

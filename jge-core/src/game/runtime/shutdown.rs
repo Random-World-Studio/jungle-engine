@@ -48,12 +48,13 @@ impl Game {
             return;
         }
 
-        // 由于拆树会触发 async 锁（GameLogicHandle::lock().await），这里要求在非 tokio runtime 上下文执行。
+        // 这里会调用内部 runtime 的 `block_on(...)` 来执行 async 的拆树与回调逻辑；
+        // 因此必须在“非 tokio runtime 上下文”执行，否则会触发 tokio 的 "cannot block_on within a runtime" 类 panic。
         // 常规用法（game.run() 返回后 drop Game）满足该条件。
         if tokio::runtime::Handle::try_current().is_ok() {
             warn!(
                 target = "jge-core",
-                "Game 被在 tokio runtime 内 drop：跳过节点树 on_detach 回调以避免死锁/崩溃"
+                "Game 被在 tokio runtime 内 drop：跳过节点树 on_detach 回调以避免 panic"
             );
             return;
         }

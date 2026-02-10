@@ -11,7 +11,10 @@ use super::helpers::{collect_logic_handle_chunks, rebuild_render_snapshot};
 use super::{Entity, Game, GameEvent};
 
 impl Game {
-    /// 用 `JoinSet` 并发执行每个 chunk 的任务，并在最后统一收割。
+    /// 用 `JoinSet` 并发执行每个“批处理分组（batch chunks）”的任务，并在最后统一收割。
+    ///
+    /// 注意这里的“chunk”仅指调度层的批处理分组（来自 `collect_logic_handle_chunks` / registry），
+    /// 与旧的组件存储 chunk、LOD/分块等概念无关。
     ///
     /// 语义约定：
     ///
@@ -71,7 +74,7 @@ impl Game {
         });
     }
 
-    /// 分发一次更新 tick（同步等待本轮所有 chunk 完成）。
+    /// 分发一次更新 tick（同步等待本轮所有批处理分组完成）。
     async fn dispatch_update(delta: Duration) {
         let node_targets = collect_logic_handle_chunks();
         Self::run_joinset(

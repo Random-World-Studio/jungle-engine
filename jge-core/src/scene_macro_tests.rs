@@ -5,6 +5,7 @@ use anyhow::Context as _;
 use crate::game::component::node::Node;
 use crate::game::component::renderable::Renderable;
 use crate::game::component::transform::Transform;
+use crate::game::entity::Entity;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn scene_macro_allows_forward_reference_to_as_binding_and_preserves_child_order()
@@ -151,5 +152,63 @@ async fn scene_macro_bindings_destroy_is_send_and_spawnable() -> anyhow::Result<
     });
 
     handle.await.expect("destroy task should complete");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn scene_macro_external_scene_bindings_node_can_attach_and_destroy_cascades()
+-> anyhow::Result<()> {
+    let bindings = crate::scene! {
+        node "root" {
+            crate::scene! {
+                node "child_root" {
+                    + Transform::new();
+                }
+            }
+            .await? node;
+        }
+    }
+    .await?;
+
+    let root_node = bindings
+        .root
+        .get_component::<Node>()
+        .await
+        .expect("root should have Node");
+    assert_eq!(root_node.children().len(), 1);
+
+    let child_root = root_node.children()[0];
+    assert!(
+        child_root.get_component::<Transform>().await.is_some(),
+        "nested scene should have registered Transform"
+    );
+
+    bindings.destroy().await;
+
+    assert!(
+        child_root.get_component::<Transform>().await.is_none(),
+        "outer destroy() should cascade into nested scene bindings destroy()"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn scene_macro_external_entity_node_does_not_force_nested_destroy() -> anyhow::Result<()> {
+    let external = Entity::new().await?;
+    external.register_component(Transform::new()).await?;
+
+    let bindings = crate::scene! {
+        node "root" {
+            external node;
+        }
+    }
+    .await?;
+
+    bindings.destroy().await;
+
+    assert!(
+        external.get_component::<Transform>().await.is_some(),
+        "Entity passed to `<expr> node;` should not be force-destroyed"
+    );
     Ok(())
 }

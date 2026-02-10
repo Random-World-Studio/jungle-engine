@@ -51,9 +51,12 @@ pub(super) async fn update_scene2d_framebuffer_sizes(root: Entity, framebuffer_s
     }
 }
 
-/// 收集当前所有 `Node` 上绑定的 `GameLogic`，并按 chunk 分组。
+/// 收集当前所有 `Node` 上绑定的 `GameLogic`，并按“批处理分组（batch chunks）”返回。
 ///
-/// 当前实现使用一个全局 registry（由 `Node::set_logic_*` 维护），避免每 tick 遍历 Node 存储。
+/// 注意这里的“chunk”仅指为了降低每 tick 的调度开销而做的批处理分组，
+/// 与旧的组件存储 chunk、LOD/八叉树分块等概念无关。
+///
+/// 当前实现使用一个全局 registry（由 `Node::set_logic_*` 维护），避免每 tick 遍历 Node 子树。
 pub(super) fn collect_logic_handle_chunks() -> Vec<Vec<(super::EntityId, GameLogicHandle)>> {
     logic_registry::collect_chunks(32)
 }

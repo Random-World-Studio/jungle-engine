@@ -64,6 +64,10 @@ pub use game::Game;
 ///   - `resource(name = path, ...) |e, c| { ... }`：在配置闭包前注入资源句柄
 ///   - `with(...) { ... }`：在块内自动执行 `get_component/get_component_mut`（内部会 `.await`）并提供引用
 ///   - `* LogicExpr;`：为当前节点挂载 `GameLogic`（宏会在内部把逻辑设置与 `attach` 阶段的生命周期回调衔接起来）
+///   - `<expr> node;`：挂载外部已构造好的子节点树。
+///     - `<expr>` 可以是另一个 `scene!` 的返回值（匿名 `SceneBindings`），也可以是 [`game::entity::Entity`]。
+///     - 若 `<expr>` 为 `SceneBindings`：`destroy().await` 会自动级联调用该嵌套场景的 `destroy().await`。
+///     - 若 `<expr>` 为 `Entity`：不会尝试嵌套 destroy（因为 `Entity` 本身不支持 destroy）。
 ///
 /// `scene!` 会展开成一段普通 Rust 语句块，但为了支持 `as ident` 的前向引用，展开是“分阶段”的：
 /// - 先创建所有节点实体并填充 `as ident` 绑定；
@@ -105,6 +109,36 @@ pub use game::Game;
 /// - `destroy().await` 会对场景中每个实体，卸载 DSL 中显式声明的 `+ CompExpr;` 组件。
 /// - 依赖关系：[`game::entity::Entity::unregister_component`] 会调用组件的 `unregister_dependencies` 钩子。
 /// - 幂等：重复调用 `destroy().await` 不会报错。
+///
+/// ## 组合子场景：外部构造 + `<expr> node;`
+///
+/// 你可以先在外部构造一个子场景（拿到它的 `SceneBindings`），再把该 bindings 作为表达式传入并挂载到父场景：
+///
+/// ```no_run
+/// use jge_core::scene;
+///
+/// # async fn demo() -> anyhow::Result<()> {
+/// let child = scene! {
+///     node "child_root" {
+///         + jge_core::game::component::transform::Transform::new();
+///     }
+/// }
+/// .await?;
+///
+/// let parent = scene! {
+///     node "parent_root" {
+///         child node;
+///     }
+/// }
+/// .await?;
+///
+/// // destroy 会级联 child.destroy()
+/// parent.destroy().await;
+/// Ok(())
+/// # }
+/// ```
+///
+/// 如果你只想“挂载某个外部实体”，也可以传入 `Entity`；此时 destroy 不会触碰该实体上的组件。
 ///
 /// # 示例
 ///

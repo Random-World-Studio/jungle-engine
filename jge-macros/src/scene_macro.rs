@@ -181,6 +181,7 @@ mod scene_dsl {
 
     pub enum NodeItem {
         Child(NodeDecl),
+        ExternalChild(ExternalChildItem),
         With(WithItem),
         Component(ComponentItem),
         Logic(LogicItem),
@@ -201,10 +202,29 @@ mod scene_dsl {
                 return Ok(Self::Logic(input.parse()?));
             }
 
-            Err(input.error(
-                "node 体内只允许：node ...、with(...) {...}、+ Component ...;、* LogicExpr;",
+            // `<expr> node;`：挂载外部已构造好的子节点树。
+            // expr 允许是另一个 scene! 的返回值（SceneBindings），或 Entity。
+            // 语法上通过关键字 `node` 作为哨兵，避免与普通表达式语句混淆。
+            let expr: Expr = input.parse()?;
+            if input.peek(node) {
+                let kw: node = input.parse()?;
+                input.parse::<Token![;]>()?;
+                return Ok(Self::ExternalChild(ExternalChildItem {
+                    expr,
+                    span: kw.span(),
+                }));
+            }
+
+            Err(syn::Error::new_spanned(
+                expr,
+                "node 体内只允许：node ...、<expr> node;、with(...) {...}、+ Component ...;、* LogicExpr;",
             ))
         }
+    }
+
+    pub struct ExternalChildItem {
+        pub expr: Expr,
+        pub span: proc_macro2::Span,
     }
 
     pub struct LogicItem {
@@ -416,6 +436,8 @@ mod scene_dsl {
         // destroy ops are recorded only for *explicitly registered* components in the DSL.
         let mut destroy_pairs: Vec<(Ident, Ident)> = Vec::new();
 
+        let nested_destroy_var = format_ident!("__jge_scene_nested_destroy");
+
         collect_binds(&scene.root, &mut binds);
 
         let root_var = format_ident!("__jge_scene_root");
@@ -426,6 +448,7 @@ mod scene_dsl {
             &mut create_stmts,
             &mut init_stmts,
             &mut destroy_pairs,
+            &nested_destroy_var,
             &core_crate,
             &entity_ty,
             &node_ty,
@@ -466,6 +489,10 @@ mod scene_dsl {
                     pub root: #entity_ty,
                     #(#fields,)*
                     #[doc(hidden)]
+                    pub __jge_scene_nested_destroy: ::std::vec::Vec<
+                        ::std::boxed::Box<dyn #core_crate::scenes::SceneDestroy>,
+                    >,
+                    #[doc(hidden)]
                     pub __jge_scene_destroy: ::std::vec::Vec<(
                         #entity_ty,
                         ::std::vec::Vec<
@@ -498,11 +525,32 @@ mod scene_dsl {
                 ///   是否会卸载依赖组件取决于组件实现策略；
                 /// - 幂等：可重复调用，多次调用不会报错。
                 pub async fn destroy(&self) {
+                    for nested in &self.__jge_scene_nested_destroy {
+                        nested.destroy_boxed().await;
+                    }
                     for (e, ops) in &self.__jge_scene_destroy {
                         for op in ops {
                             op(*e).await;
                         }
                     }
+                }
+            }
+
+            impl #core_crate::scenes::SceneRoot for SceneBindings {
+                fn scene_root(&self) -> #entity_ty {
+                    self.root
+                }
+            }
+
+            impl #core_crate::scenes::SceneDestroy for SceneBindings {
+                fn destroy_boxed<'a>(
+                    &'a self,
+                ) -> ::core::pin::Pin<
+                    ::std::boxed::Box<dyn ::core::future::Future<Output = ()> + ::core::marker::Send + 'a>,
+                > {
+                    ::std::boxed::Box::pin(async move {
+                        self.destroy().await;
+                    })
                 }
             }
         };
@@ -613,11 +661,17 @@ mod scene_dsl {
                 #(#bind_decls)*
                 #(#create_stmts)*
                 #(#init_stmts)*
+
+                let mut #nested_destroy_var: ::std::vec::Vec<
+                    ::std::boxed::Box<dyn #core_crate::scenes::SceneDestroy>,
+                > = ::std::vec::Vec::new();
+
                 #attach_stmts
 
                 ::core::result::Result::<SceneBindings, ::anyhow::Error>::Ok(SceneBindings {
                     root: #root_var,
                     #(#bindings_ctor_fields,)*
+                    __jge_scene_nested_destroy: #nested_destroy_var,
                     __jge_scene_destroy: ::std::vec![#(#destroy_ctor_items),*],
                 })
             }
@@ -639,7 +693,7 @@ mod scene_dsl {
         let direct_children = node
             .items
             .iter()
-            .filter(|item| matches!(item, NodeItem::Child(_)))
+            .filter(|item| matches!(item, NodeItem::Child(_) | NodeItem::ExternalChild(_)))
             .count();
         direct_children
             + node
@@ -661,6 +715,9 @@ mod scene_dsl {
             match item {
                 NodeItem::Child(child) => count += count_init_steps(child),
                 NodeItem::With(_) | NodeItem::Component(_) | NodeItem::Logic(_) => count += 1,
+                NodeItem::ExternalChild(_) => {
+                    // 外部子树不参与 init；仅在最终 attach 阶段处理。
+                }
             }
         }
         count
@@ -685,6 +742,7 @@ mod scene_dsl {
         create_stmts: &mut Vec<proc_macro2::TokenStream>,
         init_stmts: &mut Vec<proc_macro2::TokenStream>,
         destroy_pairs: &mut Vec<(Ident, Ident)>,
+        nested_destroy_var: &Ident,
         core_crate: &proc_macro2::TokenStream,
         entity_ty: &proc_macro2::TokenStream,
         node_ty: &proc_macro2::TokenStream,
@@ -819,8 +877,13 @@ mod scene_dsl {
             });
         }
 
-        // 子节点实体变量（用于最终集中建树，顺序必须与 DSL 声明一致）
-        let mut child_vars_in_order: Vec<(Ident, proc_macro2::Span)> = Vec::new();
+        enum ChildRef {
+            Internal(Ident, proc_macro2::Span),
+            External(Expr, proc_macro2::Span),
+        }
+
+        // 子节点引用（用于最终集中建树，顺序必须与 DSL 声明一致）
+        let mut children_in_order: Vec<ChildRef> = Vec::new();
         let mut child_attach_tokens: Vec<proc_macro2::TokenStream> = Vec::new();
 
         // body items
@@ -836,13 +899,18 @@ mod scene_dsl {
                         create_stmts,
                         init_stmts,
                         destroy_pairs,
+                        nested_destroy_var,
                         core_crate,
                         entity_ty,
                         node_ty,
                         progress,
                     )?;
-                    child_vars_in_order.push((child_var, child.span));
+                    children_in_order.push(ChildRef::Internal(child_var, child.span));
                     child_attach_tokens.push(attach_subtree);
+                }
+                NodeItem::ExternalChild(external) => {
+                    children_in_order
+                        .push(ChildRef::External(external.expr.clone(), external.span));
                 }
                 NodeItem::With(with_item) => {
                     let with_span = with_item.span;
@@ -1199,44 +1267,104 @@ mod scene_dsl {
 
         // 最终集中建树：只保证“子节点添加顺序”与 DSL 声明一致。
         // 这里按“父 -> 直接子 -> 子树”的顺序 attach，确保树在 attach 完成后稳定可遍历。
-        let direct_attach = child_vars_in_order.iter().map(|(child_var, child_span)| {
-            let child_span = *child_span;
-            let tick = progress.map(|ctx| progress_tick(ctx, child_span));
-            quote_spanned! {child_span=>
-                {
-                    let __attach_future = {
-                        let mut __parent_node = __jge_scene_log_err!(
-                            "attach_get_parent_node",
-                            #node_ctx_var,
-                            ::core::option::Option::Some(#out_var),
-                            ::core::option::Option::Some(#out_var.id()),
-                            ::core::option::Option::Some(#out_var.id()),
-                            ::core::option::Option::Some(#child_var.id()),
-                            ::core::option::Option::None,
-                            ::core::option::Option::None,
-                            ::core::option::Option::None::<&#core_crate::resource::ResourcePath>,
-                            "scene!: 父节点缺少 Node 组件（无法挂载子节点）",
-                            #out_var
-                                .get_component_mut::<#node_ty>()
-                                .await
-                                .with_context(|| "scene!: 父节点缺少 Node 组件（无法挂载子节点）")
-                        )?;
-                        __parent_node.attach(#child_var)
-                    };
-                    __jge_scene_log_err!(
-                        "attach_child",
-                        #node_ctx_var,
-                        ::core::option::Option::Some(#out_var),
-                        ::core::option::Option::Some(#out_var.id()),
-                        ::core::option::Option::Some(#out_var.id()),
-                        ::core::option::Option::Some(#child_var.id()),
-                        ::core::option::Option::None,
-                        ::core::option::Option::None,
-                        ::core::option::Option::None::<&#core_crate::resource::ResourcePath>,
-                        "scene!: 挂载子节点失败",
-                        __attach_future.await.with_context(|| "scene!: 挂载子节点失败")
-                    )?;
-                    #tick
+        let direct_attach = children_in_order.iter().map(|child_ref| {
+            match child_ref {
+                ChildRef::Internal(child_var, child_span) => {
+                    let child_span = *child_span;
+                    let tick = progress.map(|ctx| progress_tick(ctx, child_span));
+                    quote_spanned! {child_span=>
+                        {
+                            let __attach_future = {
+                                let mut __parent_node = __jge_scene_log_err!(
+                                    "attach_get_parent_node",
+                                    #node_ctx_var,
+                                    ::core::option::Option::Some(#out_var),
+                                    ::core::option::Option::Some(#out_var.id()),
+                                    ::core::option::Option::Some(#out_var.id()),
+                                    ::core::option::Option::Some(#child_var.id()),
+                                    ::core::option::Option::None,
+                                    ::core::option::Option::None,
+                                    ::core::option::Option::None::<&#core_crate::resource::ResourcePath>,
+                                    "scene!: 父节点缺少 Node 组件（无法挂载子节点）",
+                                    #out_var
+                                        .get_component_mut::<#node_ty>()
+                                        .await
+                                        .with_context(|| "scene!: 父节点缺少 Node 组件（无法挂载子节点）")
+                                )?;
+                                __parent_node.attach(#child_var)
+                            };
+                            __jge_scene_log_err!(
+                                "attach_child",
+                                #node_ctx_var,
+                                ::core::option::Option::Some(#out_var),
+                                ::core::option::Option::Some(#out_var.id()),
+                                ::core::option::Option::Some(#out_var.id()),
+                                ::core::option::Option::Some(#child_var.id()),
+                                ::core::option::Option::None,
+                                ::core::option::Option::None,
+                                ::core::option::Option::None::<&#core_crate::resource::ResourcePath>,
+                                "scene!: 挂载子节点失败",
+                                __attach_future.await.with_context(|| "scene!: 挂载子节点失败")
+                            )?;
+                            #tick
+                        }
+                    }
+                }
+                ChildRef::External(expr, child_span) => {
+                    let child_span = *child_span;
+                    let tick = progress.map(|ctx| progress_tick(ctx, child_span));
+                    *counter += 1;
+                    let external_tmp = format_ident!("__jge_scene_external_child{}", *counter);
+                    *counter += 1;
+                    let child_entity_tmp = format_ident!("__jge_scene_external_entity{}", *counter);
+                    quote_spanned! {child_span=>
+                        {
+                            let #external_tmp = #expr;
+                            let #child_entity_tmp: #entity_ty = #core_crate::scenes::SceneRoot::scene_root(&#external_tmp);
+
+                            let __attach_future = {
+                                let mut __parent_node = __jge_scene_log_err!(
+                                    "attach_get_parent_node",
+                                    #node_ctx_var,
+                                    ::core::option::Option::Some(#out_var),
+                                    ::core::option::Option::Some(#out_var.id()),
+                                    ::core::option::Option::Some(#out_var.id()),
+                                    ::core::option::Option::Some(#child_entity_tmp.id()),
+                                    ::core::option::Option::None,
+                                    ::core::option::Option::None,
+                                    ::core::option::Option::None::<&#core_crate::resource::ResourcePath>,
+                                    "scene!: 父节点缺少 Node 组件（无法挂载子节点）",
+                                    #out_var
+                                        .get_component_mut::<#node_ty>()
+                                        .await
+                                        .with_context(|| "scene!: 父节点缺少 Node 组件（无法挂载子节点）")
+                                )?;
+                                __parent_node.attach(#child_entity_tmp)
+                            };
+                            __jge_scene_log_err!(
+                                "attach_external_child",
+                                #node_ctx_var,
+                                ::core::option::Option::Some(#out_var),
+                                ::core::option::Option::Some(#out_var.id()),
+                                ::core::option::Option::Some(#out_var.id()),
+                                ::core::option::Option::Some(#child_entity_tmp.id()),
+                                ::core::option::Option::Some(stringify!(#expr)),
+                                ::core::option::Option::None,
+                                ::core::option::Option::None::<&#core_crate::resource::ResourcePath>,
+                                "scene!: 挂载外部子节点失败",
+                                __attach_future.await.with_context(|| "scene!: 挂载外部子节点失败")
+                            )?;
+
+                            // 记录嵌套 destroy（若外部值是另一个 scene! 的返回 bindings）。
+                            if let ::core::option::Option::Some(__nested) =
+                                #core_crate::scenes::SceneMaybeDestroy::into_optional_destroy(#external_tmp)
+                            {
+                                #nested_destroy_var.push(__nested);
+                            }
+
+                            #tick
+                        }
+                    }
                 }
             }
         });
@@ -1275,6 +1403,10 @@ pub fn expand_scene(input: TokenStream) -> TokenStream {
                         struct SceneBindings {
                             pub root: ::jge_core::game::entity::Entity,
                             #[doc(hidden)]
+                            pub __jge_scene_nested_destroy: ::std::vec::Vec<
+                                ::std::boxed::Box<dyn ::jge_core::scenes::SceneDestroy>,
+                            >,
+                            #[doc(hidden)]
                             pub __jge_scene_destroy: ::std::vec::Vec<(
                                 ::jge_core::game::entity::Entity,
                                 ::std::vec::Vec<
@@ -1294,10 +1426,31 @@ pub fn expand_scene(input: TokenStream) -> TokenStream {
                                 // rust-analyzer placeholder: no-op
                             }
                         }
+                        impl ::jge_core::scenes::SceneRoot for SceneBindings {
+                            fn scene_root(&self) -> ::jge_core::game::entity::Entity {
+                                self.root
+                            }
+                        }
+                        impl ::jge_core::scenes::SceneDestroy for SceneBindings {
+                            fn destroy_boxed<'a>(
+                                &'a self,
+                            ) -> ::core::pin::Pin<
+                                ::std::boxed::Box<
+                                    dyn ::core::future::Future<Output = ()>
+                                        + ::core::marker::Send
+                                        + 'a,
+                                >,
+                            > {
+                                ::std::boxed::Box::pin(async move {
+                                    self.destroy().await;
+                                })
+                            }
+                        }
                         SceneBindings {
                             root: ::jge_core::game::entity::Entity::new()
                                 .await
                                 .expect("rust-analyzer placeholder should create entity"),
+                            __jge_scene_nested_destroy: ::std::vec::Vec::new(),
                             __jge_scene_destroy: ::std::vec::Vec::new(),
                         }
                     })

@@ -5,7 +5,7 @@ use tracing::error;
 use super::{Entity, GameLogicHandle};
 
 pub(super) fn schedule_root_on_attach(runtime: &Runtime, root: Entity, handle: GameLogicHandle) {
-    // 注意：tokio::sync::Mutex::blocking_lock 在 runtime 内会 panic。
+    // 注意：不要在 Tokio runtime 上下文里调用 `Runtime::block_on`（会 panic）。
     // 这里优先在“非 runtime 上下文”同步等待；若当前已在某个 runtime 内，则退化为异步 task。
     if tokio::runtime::Handle::try_current().is_ok() {
         runtime.spawn(async move {
