@@ -1,4 +1,8 @@
-use std::collections::HashSet;
+use std::any::TypeId;
+use std::collections::{HashMap, HashSet};
+use std::sync::OnceLock;
+
+use parking_lot::RwLock as ParkingRwLock;
 
 use tracing::warn;
 
@@ -42,7 +46,7 @@ impl RenderSnapshot {
     }
 
     pub(crate) async fn build(root: Entity, framebuffer_size: (u32, u32)) -> Self {
-        let layer_roots = collect_layer_roots(root).await;
+        let layer_roots = collect_layer_roots_cached(root).await;
         let mut layers = Vec::with_capacity(layer_roots.len());
         for layer_entity in layer_roots {
             if let Some(snapshot) = build_layer_snapshot(layer_entity, framebuffer_size).await {
@@ -52,6 +56,36 @@ impl RenderSnapshot {
 
         Self { layers }
     }
+}
+
+static LAYER_ROOTS_CACHE: OnceLock<
+    ParkingRwLock<HashMap<crate::game::entity::EntityId, Vec<Entity>>>,
+> = OnceLock::new();
+static LAYER_ENTITIES_CACHE: OnceLock<
+    ParkingRwLock<HashMap<crate::game::entity::EntityId, Vec<Entity>>>,
+> = OnceLock::new();
+
+fn layer_roots_cache() -> &'static ParkingRwLock<HashMap<crate::game::entity::EntityId, Vec<Entity>>>
+{
+    LAYER_ROOTS_CACHE.get_or_init(|| ParkingRwLock::new(HashMap::new()))
+}
+
+fn layer_entities_cache()
+-> &'static ParkingRwLock<HashMap<crate::game::entity::EntityId, Vec<Entity>>> {
+    LAYER_ENTITIES_CACHE.get_or_init(|| ParkingRwLock::new(HashMap::new()))
+}
+
+pub(crate) fn invalidate_traversal_caches() {
+    layer_roots_cache().write().clear();
+    layer_entities_cache().write().clear();
+}
+
+pub(crate) fn component_requires_traversal_cache_invalidation(type_id: TypeId) -> bool {
+    // Node/Layer 的变化会影响 layer roots / layer_entities 的遍历结果。
+    // Renderable 的挂载/卸载也会影响 layer_entities 的后续筛选语义（例如 collect_renderables）。
+    type_id == TypeId::of::<crate::game::component::node::Node>()
+        || type_id == TypeId::of::<crate::game::component::layer::Layer>()
+        || type_id == TypeId::of::<crate::game::component::renderable::Renderable>()
 }
 
 #[derive(Debug, Clone)]
@@ -186,6 +220,32 @@ async fn collect_layer_roots(root: Entity) -> Vec<Entity> {
     result
 }
 
+async fn collect_layer_roots_cached(root: Entity) -> Vec<Entity> {
+    if let Some(hit) = layer_roots_cache().read().get(&root.id()).cloned() {
+        return hit;
+    }
+
+    let computed = collect_layer_roots(root).await;
+    layer_roots_cache()
+        .write()
+        .insert(root.id(), computed.clone());
+    computed
+}
+
+async fn layer_entities_cached(
+    layer_root: Entity,
+) -> Result<Vec<Entity>, crate::game::component::layer::LayerTraversalError> {
+    if let Some(hit) = layer_entities_cache().read().get(&layer_root.id()).cloned() {
+        return Ok(hit);
+    }
+
+    let computed = crate::game::component::layer::Layer::layer_entities(layer_root).await?;
+    layer_entities_cache()
+        .write()
+        .insert(layer_root.id(), computed.clone());
+    Ok(computed)
+}
+
 async fn build_layer_snapshot(
     entity: Entity,
     framebuffer_size: (u32, u32),
@@ -196,7 +256,7 @@ async fn build_layer_snapshot(
         .and_then(|v| util::viewport_pixels_from_normalized(framebuffer_size, v));
     drop(layer_guard);
 
-    let ordered = match Layer::layer_entities(entity).await {
+    let ordered = match layer_entities_cached(entity).await {
         Ok(entities) => entities,
         Err(error) => {
             warn!(

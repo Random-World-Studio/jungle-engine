@@ -18,8 +18,11 @@ pub(super) async fn rebuild_render_snapshot(
     render_snapshot: &RwLock<Arc<super::RenderSnapshot>>,
 ) {
     let framebuffer_size = (framebuffer_size.0.max(1), framebuffer_size.1.max(1));
+    let start = std::time::Instant::now();
     let snapshot = super::RenderSnapshot::build(root, framebuffer_size).await;
     *render_snapshot.write() = Arc::new(snapshot);
+
+    crate::game::system::render::record_snapshot_rebuild(start.elapsed());
 }
 
 /// 遍历 `root` 子树，更新所有 `Scene2D` 的 framebuffer size。

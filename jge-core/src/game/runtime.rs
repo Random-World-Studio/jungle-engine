@@ -72,6 +72,8 @@ pub struct Game {
     last_redraw: Instant,
     stopped: Arc<AtomicBool>,
 
+    on_render_in_flight: Arc<AtomicBool>,
+
     runtime: Runtime,
 }
 
@@ -146,6 +148,7 @@ impl Game {
             root,
             last_redraw: Instant::now(),
             stopped: Arc::new(AtomicBool::new(false)),
+            on_render_in_flight: Arc::new(AtomicBool::new(false)),
             runtime,
         })
     }

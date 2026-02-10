@@ -1,5 +1,6 @@
 mod background;
 mod cache;
+mod dirty;
 mod profile;
 mod resource_io;
 mod scene2d;
@@ -8,6 +9,11 @@ mod snapshot;
 mod util;
 
 pub(crate) use snapshot::RenderSnapshot;
+
+pub(crate) use dirty::{
+    mark_render_snapshot_dirty_for_component, record_snapshot_rebuild, snapshot_rebuild_stats,
+    take_render_snapshot_dirty,
+};
 
 use tracing::{debug, warn};
 use wgpu;
@@ -131,6 +137,22 @@ impl RenderSystem {
     /// 标记一帧渲染开始。
     pub fn begin_frame(&mut self) {
         self.caches.profiler.begin_frame();
+    }
+
+    pub(crate) fn record_frame_total_cpu(&mut self, duration: std::time::Duration) {
+        self.caches.profiler.record_frame_total(duration);
+    }
+
+    pub(crate) fn record_frame_phases_cpu(
+        &mut self,
+        acquire: std::time::Duration,
+        encode: std::time::Duration,
+        submit: std::time::Duration,
+        present: std::time::Duration,
+    ) {
+        self.caches
+            .profiler
+            .record_frame_phases(acquire, encode, submit, present);
     }
 
     /// 标记一帧渲染结束。

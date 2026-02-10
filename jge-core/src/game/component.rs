@@ -72,6 +72,8 @@ use std::{any::type_name, collections::HashMap, fmt, sync::Arc};
 use async_trait::async_trait;
 use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 
+use std::any::TypeId;
+
 use crate::game::entity::{Entity, EntityId};
 
 /// 组件 trait（所有组件的统一接口）。
@@ -333,6 +335,7 @@ pub struct ComponentRead<C: 'static> {
 pub struct ComponentWrite<C: 'static> {
     _slot: Arc<RwLock<Option<SlotValue<C>>>>,
     guard: OwnedRwLockWriteGuard<Option<SlotValue<C>>>,
+    mark_render_dirty_on_drop: bool,
 }
 
 impl<C: 'static> ComponentRead<C> {
@@ -355,7 +358,11 @@ impl<C: 'static> ComponentRead<C> {
 impl<C: 'static> ComponentWrite<C> {
     async fn new(slot: Arc<RwLock<Option<SlotValue<C>>>>) -> Self {
         let guard = Arc::clone(&slot).write_owned().await;
-        Self { _slot: slot, guard }
+        Self {
+            _slot: slot,
+            guard,
+            mark_render_dirty_on_drop: affects_render_snapshot::<C>(),
+        }
     }
 
     /// 返回拥有该组件的实体。
@@ -367,6 +374,33 @@ impl<C: 'static> ComponentWrite<C> {
                 .entity_id,
         )
     }
+}
+
+impl<C: 'static> Drop for ComponentWrite<C> {
+    fn drop(&mut self) {
+        if self.mark_render_dirty_on_drop {
+            crate::game::system::render::mark_render_snapshot_dirty_for_component::<C>();
+        }
+    }
+}
+
+fn affects_render_snapshot<C: 'static>() -> bool {
+    let type_id = TypeId::of::<C>();
+    // 这是一个“白名单”集合：只有会影响 RenderSnapshot 构建的组件写入才触发 dirty。
+    // 目标是减少无意义的快照重建，同时保持语义正确。
+    type_id == TypeId::of::<crate::game::component::background::Background>()
+        || type_id == TypeId::of::<crate::game::component::camera::Camera>()
+        || type_id == TypeId::of::<crate::game::component::layer::Layer>()
+        || type_id == TypeId::of::<crate::game::component::light::Light>()
+        || type_id == TypeId::of::<crate::game::component::light::PointLight>()
+        || type_id == TypeId::of::<crate::game::component::light::ParallelLight>()
+        || type_id == TypeId::of::<crate::game::component::material::Material>()
+        || type_id == TypeId::of::<crate::game::component::node::Node>()
+        || type_id == TypeId::of::<crate::game::component::renderable::Renderable>()
+        || type_id == TypeId::of::<crate::game::component::scene2d::Scene2D>()
+        || type_id == TypeId::of::<crate::game::component::scene3d::Scene3D>()
+        || type_id == TypeId::of::<crate::game::component::shape::Shape>()
+        || type_id == TypeId::of::<crate::game::component::transform::Transform>()
 }
 
 impl<C: 'static> std::ops::Deref for ComponentRead<C> {

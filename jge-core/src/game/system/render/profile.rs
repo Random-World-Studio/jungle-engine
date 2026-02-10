@@ -33,6 +33,15 @@ pub(in crate::game::system::render) struct RenderProfiler {
 
     // 历史样本：每帧一个值（ns）。
     samples_ns: HashMap<EntityId, Vec<u64>>,
+
+    // 每帧总耗时（CPU 侧），包含 encoder / submit / present 等非实体范围工作。
+    frame_total_ns: Vec<u64>,
+
+    // 每帧阶段耗时（CPU 侧），用于区分等待交换链与实际编码/提交开销。
+    frame_acquire_ns: Vec<u64>,
+    frame_encode_ns: Vec<u64>,
+    frame_submit_ns: Vec<u64>,
+    frame_present_ns: Vec<u64>,
 }
 
 impl RenderProfiler {
@@ -52,6 +61,11 @@ impl RenderProfiler {
             node_names: HashMap::new(),
             frame_accumulated_ns: HashMap::new(),
             samples_ns: HashMap::new(),
+            frame_total_ns: Vec::new(),
+            frame_acquire_ns: Vec::new(),
+            frame_encode_ns: Vec::new(),
+            frame_submit_ns: Vec::new(),
+            frame_present_ns: Vec::new(),
         }
     }
 
@@ -83,6 +97,37 @@ impl RenderProfiler {
         }
     }
 
+    pub(in crate::game::system::render) fn record_frame_total(&mut self, duration: Duration) {
+        if !self.enabled {
+            return;
+        }
+
+        let ns = duration.as_nanos().min(u128::from(u64::MAX)) as u64;
+        push_sample_bounded(&mut self.frame_total_ns, ns);
+    }
+
+    pub(in crate::game::system::render) fn record_frame_phases(
+        &mut self,
+        acquire: Duration,
+        encode: Duration,
+        submit: Duration,
+        present: Duration,
+    ) {
+        if !self.enabled {
+            return;
+        }
+
+        let acquire_ns = acquire.as_nanos().min(u128::from(u64::MAX)) as u64;
+        let encode_ns = encode.as_nanos().min(u128::from(u64::MAX)) as u64;
+        let submit_ns = submit.as_nanos().min(u128::from(u64::MAX)) as u64;
+        let present_ns = present.as_nanos().min(u128::from(u64::MAX)) as u64;
+
+        push_sample_bounded(&mut self.frame_acquire_ns, acquire_ns);
+        push_sample_bounded(&mut self.frame_encode_ns, encode_ns);
+        push_sample_bounded(&mut self.frame_submit_ns, submit_ns);
+        push_sample_bounded(&mut self.frame_present_ns, present_ns);
+    }
+
     fn record_entity_duration(&mut self, entity: Entity, duration: Duration) {
         if !self.enabled {
             return;
@@ -110,6 +155,13 @@ impl RenderProfiler {
     }
 
     fn build_report(&self) -> Report {
+        let frame = FrameSummary::from_samples(&self.frame_total_ns);
+        let phases = FramePhasesSummary {
+            acquire: FrameSummary::from_samples(&self.frame_acquire_ns),
+            encode: FrameSummary::from_samples(&self.frame_encode_ns),
+            submit: FrameSummary::from_samples(&self.frame_submit_ns),
+            present: FrameSummary::from_samples(&self.frame_present_ns),
+        };
         let mut rows: Vec<ReportRow> = Vec::new();
 
         for (entity_id, samples) in &self.samples_ns {
@@ -147,7 +199,11 @@ impl RenderProfiler {
 
         rows.sort_by_key(|r| std::cmp::Reverse(r.avg_ns));
 
-        Report { rows }
+        Report {
+            frame,
+            phases,
+            rows,
+        }
     }
 
     fn write_markdown_report(&self) {
@@ -238,7 +294,55 @@ impl Drop for EntityRenderScope {
 
 #[derive(Debug)]
 struct Report {
+    frame: FrameSummary,
+    phases: FramePhasesSummary,
     rows: Vec<ReportRow>,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct FramePhasesSummary {
+    acquire: FrameSummary,
+    encode: FrameSummary,
+    submit: FrameSummary,
+    present: FrameSummary,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct FrameSummary {
+    samples: usize,
+    avg_ns: u64,
+    min_ns: u64,
+    max_ns: u64,
+    p50_ns: u64,
+    p99_ns: u64,
+    p999_ns: u64,
+}
+
+impl FrameSummary {
+    fn from_samples(samples: &[u64]) -> Self {
+        if samples.is_empty() {
+            return Self::default();
+        }
+
+        let mut sorted = samples.to_vec();
+        sorted.sort_unstable();
+
+        let count = sorted.len();
+        let sum_ns: u128 = sorted.iter().map(|v| *v as u128).sum();
+        let avg_ns = (sum_ns / (count as u128)) as u64;
+        let min_ns = *sorted.first().unwrap();
+        let max_ns = *sorted.last().unwrap();
+
+        Self {
+            samples: count,
+            avg_ns,
+            min_ns,
+            max_ns,
+            p50_ns: percentile_nearest_rank(&sorted, 0.50),
+            p99_ns: percentile_nearest_rank(&sorted, 0.99),
+            p999_ns: percentile_nearest_rank(&sorted, 0.999),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -259,6 +363,47 @@ impl Report {
         let mut out = String::new();
         out.push_str("# JGE Render Profile\n\n");
         out.push_str("启用方式（仅 debug）：`JGE_PROFILE=1`。统计为 CPU 侧每实体每帧渲染耗时（ns 聚合）。\n\n");
+
+        if self.frame.samples > 0 {
+            out.push_str("## Frame Total (CPU)\n\n");
+            out.push_str(&format!(
+                "- samples: {}\n- avg_ms: {:.3}\n- min_ms: {:.3}\n- p50_ms: {:.3}\n- p99_ms: {:.3}\n- p999_ms: {:.3}\n- max_ms: {:.3}\n\n",
+                self.frame.samples,
+                ns_to_ms(self.frame.avg_ns),
+                ns_to_ms(self.frame.min_ns),
+                ns_to_ms(self.frame.p50_ns),
+                ns_to_ms(self.frame.p99_ns),
+                ns_to_ms(self.frame.p999_ns),
+                ns_to_ms(self.frame.max_ns),
+            ));
+        }
+
+        if self.phases.acquire.samples > 0 {
+            out.push_str("## Frame Phases (CPU)\n\n");
+            out.push_str("说明：在 FIFO(vsync) + 低帧延迟时，`acquire` 可能主要是等待交换链/同步信号（不代表 CPU 在做大量工作）。\n\n");
+
+            write_phase_summary(&mut out, "acquire", self.phases.acquire);
+            write_phase_summary(&mut out, "encode", self.phases.encode);
+            write_phase_summary(&mut out, "submit", self.phases.submit);
+            write_phase_summary(&mut out, "present", self.phases.present);
+            out.push('\n');
+        }
+
+        let snapshot = crate::game::system::render::snapshot_rebuild_stats();
+        if snapshot.count > 0 {
+            let avg_ns = snapshot.total_ns / snapshot.count;
+            out.push_str("## RenderSnapshot Rebuild\n\n");
+            out.push_str(&format!(
+                "- count: {}\n- total_ms: {:.3}\n- avg_ms: {:.3}\n- p99_ms: {:.3}\n- max_ms: {:.3}\n- last_ms: {:.3}\n\n",
+                snapshot.count,
+                ns_to_ms(snapshot.total_ns),
+                ns_to_ms(avg_ns),
+                ns_to_ms(snapshot.p99_ns),
+                ns_to_ms(snapshot.max_ns),
+                ns_to_ms(snapshot.last_ns)
+            ));
+        }
+
         out.push_str("| Rank | EntityId | Node | Samples | Avg (ms) | Min (ms) | Max (ms) | p50 (ms) | p99 (ms) | p999 (ms) |\n");
         out.push_str("|---:|---|---|---:|---:|---:|---:|---:|---:|---:|\n");
 
@@ -290,6 +435,25 @@ impl Report {
 
 fn ns_to_ms(ns: u64) -> f64 {
     (ns as f64) / 1_000_000.0
+}
+
+fn push_sample_bounded(samples: &mut Vec<u64>, ns: u64) {
+    samples.push(ns);
+    if samples.len() > MAX_SAMPLES_PER_ENTITY {
+        let drain_count = samples.len() - MAX_SAMPLES_PER_ENTITY;
+        samples.drain(0..drain_count);
+    }
+}
+
+fn write_phase_summary(out: &mut String, label: &str, summary: FrameSummary) {
+    out.push_str(&format!(
+        "- {label}: avg_ms={:.3}, p50_ms={:.3}, p99_ms={:.3}, p999_ms={:.3}, max_ms={:.3}\n",
+        ns_to_ms(summary.avg_ns),
+        ns_to_ms(summary.p50_ns),
+        ns_to_ms(summary.p99_ns),
+        ns_to_ms(summary.p999_ns),
+        ns_to_ms(summary.max_ns),
+    ));
 }
 
 fn percentile_nearest_rank(sorted_ns: &[u64], p: f64) -> u64 {

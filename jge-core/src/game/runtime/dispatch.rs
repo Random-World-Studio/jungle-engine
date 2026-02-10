@@ -7,7 +7,7 @@ use std::{
 use tokio::{task::JoinSet, time::interval};
 use tracing::{trace, warn};
 
-use super::helpers::{collect_logic_handle_chunks, rebuild_render_snapshot};
+use super::helpers::collect_logic_handle_chunks;
 use super::{Entity, Game, GameEvent};
 
 impl Game {
@@ -48,12 +48,13 @@ impl Game {
     /// 每个 tick：
     ///
     /// 1) 调度 `GameLogic::update`
-    /// 2) 基于最新 framebuffer 尺寸重建 `RenderSnapshot`
+    ///
+    /// 注意：`RenderSnapshot` 的重建不应绑定在 tick 上，否则会把渲染相关的可见更新
+    /// 限制到 `game_tick_ms` 的频率（例如默认 50ms 会导致明显“跳帧/卡顿”）。
+    /// 当前策略：在 `RedrawRequested` 渲染前按需（dirty）重建快照。
     pub(super) fn spawn_update_loop(&self) {
         let game_tick_ms = self.config.game_tick_ms;
         let stopped = Arc::clone(&self.stopped);
-        let root = self.root;
-        let render_snapshot = Arc::clone(&self.render_snapshot);
         let framebuffer_size = Arc::clone(&self.framebuffer_size);
 
         self.runtime.spawn(async move {
@@ -68,8 +69,9 @@ impl Game {
 
                 Self::dispatch_update(delta).await;
 
-                let (width, height) = *framebuffer_size.read();
-                rebuild_render_snapshot(root, (width, height), render_snapshot.as_ref()).await;
+                // 保留 framebuffer_size 读取，避免该值在没有窗口事件时长期为 (1,1)。
+                // 实际 snapshot 重建在渲染线程（RedrawRequested）按需触发。
+                let _ = *framebuffer_size.read();
             }
         });
     }
@@ -127,7 +129,31 @@ impl Game {
     ///
     /// Renderable 的 enabled 状态会影响调度：存在且 disabled 的实体会被跳过。
     pub(super) fn dispatch_on_render(&self, delta: Duration) {
+        // RedrawRequested 可能以非常高的频率触发（例如关闭 vsync、窗口空闲时持续 request_redraw）。
+        // 若 on_render 本身比较重，持续 spawn 会导致任务堆积、CPU 争用，从而表现为“渲染卡顿”。
+        // 这里保证同一时刻最多只有一个 on_render 广播在执行：
+        // - 追帧没有意义（过期的 on_render 只会挤占 CPU）
+        // - 允许在负载高时自动降频，优先保证渲染线程能拿到时间片
+        if self
+            .on_render_in_flight
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+
+        let in_flight = Arc::clone(&self.on_render_in_flight);
+
         self.runtime.spawn(async move {
+            struct ResetOnDrop(Arc<std::sync::atomic::AtomicBool>);
+            impl Drop for ResetOnDrop {
+                fn drop(&mut self) {
+                    self.0.store(false, Ordering::Release);
+                }
+            }
+
+            let _reset = ResetOnDrop(in_flight);
+
             let logic_targets = collect_logic_handle_chunks();
             Self::run_joinset(
                 logic_targets,

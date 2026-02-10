@@ -124,6 +124,7 @@ impl Entity {
         &self,
         component: C,
     ) -> Result<Option<C>, ComponentDependencyError> {
+        crate::game::system::render::mark_render_snapshot_dirty_for_component::<C>();
         C::register_dependencies(*self).await?;
         C::insert(*self, component).await
     }
@@ -134,6 +135,7 @@ impl Entity {
     pub async fn unregister_component<C: Component>(&self) -> Option<C> {
         let removed = C::remove(*self).await;
         if removed.is_some() {
+            crate::game::system::render::mark_render_snapshot_dirty_for_component::<C>();
             C::unregister_dependencies(*self).await;
         }
         removed

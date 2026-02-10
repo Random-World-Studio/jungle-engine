@@ -187,6 +187,8 @@ impl GameWindow {
         snapshot: &RenderSnapshot,
         delta: Duration,
     ) -> Result<(), wgpu::SurfaceError> {
+        let frame_start = std::time::Instant::now();
+
         trace!(
             target: "jge-core",
             frame_time_ms = delta.as_secs_f64() * 1000.0,
@@ -195,7 +197,11 @@ impl GameWindow {
 
         self.renderer.begin_frame();
 
+        let acquire_start = std::time::Instant::now();
         let output = self.surface.get_current_texture()?;
+        let acquire_elapsed = acquire_start.elapsed();
+
+        let encode_start = std::time::Instant::now();
         let view = output
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -246,8 +252,23 @@ impl GameWindow {
             }
         }
 
+        let encode_elapsed = encode_start.elapsed();
+
+        let submit_start = std::time::Instant::now();
         self.queue.submit(Some(encoder.finish()));
+        let submit_elapsed = submit_start.elapsed();
+
+        let present_start = std::time::Instant::now();
         output.present();
+        let present_elapsed = present_start.elapsed();
+
+        self.renderer.record_frame_phases_cpu(
+            acquire_elapsed,
+            encode_elapsed,
+            submit_elapsed,
+            present_elapsed,
+        );
+        self.renderer.record_frame_total_cpu(frame_start.elapsed());
 
         self.renderer.end_frame();
 

@@ -16,6 +16,7 @@ use winit::{
 
 use super::helpers::{rebuild_render_snapshot, update_scene2d_framebuffer_sizes};
 use super::{Game, GameEvent, WindowConfig, WindowMode};
+use crate::game::system::render::take_render_snapshot_dirty;
 use crate::window::GameWindow;
 
 impl Game {
@@ -119,6 +120,16 @@ impl Game {
     pub(super) fn handle_redraw_requested(&mut self) {
         let delta = self.last_redraw.elapsed();
         self.last_redraw = Instant::now();
+
+        // 渲染前按需重建快照：保证渲染可见状态的更新频率与帧率一致，而不是被 game_tick_ms 限制。
+        if take_render_snapshot_dirty() {
+            let (width, height) = *self.framebuffer_size.read();
+            self.runtime.block_on(rebuild_render_snapshot(
+                self.root,
+                (width, height),
+                self.render_snapshot.as_ref(),
+            ));
+        }
 
         {
             let Some(gwin) = self.window.as_mut() else {
