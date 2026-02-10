@@ -2,17 +2,18 @@ use std::{
     future::Future,
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, Ordering},
     },
     time::Instant,
 };
 
-use tokio::{runtime::Runtime, sync::Mutex, task::JoinHandle};
+use crate::sync::{Mutex, MutexGuard};
+use tokio::{runtime::Runtime, task::JoinHandle};
 use tracing::{error, info};
 use winit::{event_loop::EventLoop, window::Window};
 
 use super::{
-    component::{Component, node::Node, scene2d::Scene2D},
+    component::{node::Node, scene2d::Scene2D},
     entity::{Entity, EntityId},
     reachability::{register_engine_root, set_subtree_reachable, unregister_engine_root},
     system::logic::GameLogicHandle,
@@ -54,7 +55,7 @@ pub struct Game {
     window: Option<GameWindow>,
 
     render_snapshot: Arc<RwLock<Arc<RenderSnapshot>>>,
-    framebuffer_size: Arc<AtomicU64>,
+    framebuffer_size: Arc<RwLock<(u32, u32)>>,
 
     window_init: Option<Box<WindowInitFn>>,
 
@@ -113,7 +114,7 @@ impl Game {
         register_engine_root(root);
         runtime.block_on(set_subtree_reachable(root, true));
 
-        let framebuffer_size = Arc::new(AtomicU64::new(helpers::pack_framebuffer_size(1, 1)));
+        let framebuffer_size = Arc::new(RwLock::new((1, 1)));
         let render_snapshot = Arc::new(RwLock::new(Arc::new(RenderSnapshot::empty((1, 1)))));
 
         Ok(Self {
@@ -160,11 +161,11 @@ impl Game {
         self.runtime.block_on(future)
     }
 
-    /// 异步获取 winit 的 `Window` 锁。
+    /// 同步获取 winit 的 `Window` 锁。
     ///
     /// 若窗口尚未创建（例如 `run` 之前），返回 `None`。
-    pub async fn winit_window(&self) -> Option<tokio::sync::MutexGuard<'_, Window>> {
-        Some(self.window.as_ref()?.window.lock().await)
+    pub fn winit_window(&self) -> Option<MutexGuard<'_, Window>> {
+        Some(self.window.as_ref()?.window.lock())
     }
 
     /// 获取 `Arc<Mutex<Window>>`，便于在引擎外部线程里请求重绘等操作。
@@ -180,8 +181,8 @@ impl Game {
     ///
     /// - 窗口不存在：返回 `None`
     /// - 锁已被占用：返回 `None`
-    pub fn try_winit_window(&self) -> Option<tokio::sync::MutexGuard<'_, Window>> {
-        self.window.as_ref()?.window.try_lock().ok()
+    pub fn try_winit_window(&self) -> Option<MutexGuard<'_, Window>> {
+        self.window.as_ref()?.window.try_lock()
     }
 
     /// 设置窗口创建后的初始化回调。

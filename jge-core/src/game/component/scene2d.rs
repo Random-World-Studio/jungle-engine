@@ -6,23 +6,17 @@
 //! - 在该 Layer 子树下放置 `Renderable + Shape + Transform (+ Material)` 的实体参与渲染。
 //! - 使用 [`Scene2D::visible_faces`] 获取可见三角面（用于 2D 渲染/拾取/遮挡分析等）。
 
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    fmt,
-    sync::OnceLock,
-};
+use std::{fmt, sync::OnceLock};
 
 use nalgebra::{Vector2, Vector3};
-
-use lodtree::{LodVec, coords::OctVec};
 
 use async_trait::async_trait;
 
 use super::{
     component_impl,
     layer::{
-        Layer, LayerLodUpdate, LayerRenderableBundle, LayerTraversalError, LayerViewport,
-        RenderPipelineStage, ShaderLanguage,
+        Layer, LayerRenderableBundle, LayerTraversalError, LayerViewport, RenderPipelineStage,
+        ShaderLanguage,
     },
 };
 use crate::Aabb2;
@@ -259,32 +253,6 @@ impl Scene2D {
         ))
     }
 
-    /// 预热场景的 LOD，使 Layer 至少构建出一批八叉树节点。
-    ///
-    /// 返回值表示是否成功生成了至少一个激活节点。
-    pub fn warmup_lod(&self, layer: &mut Layer) -> bool {
-        // 最小可用策略：先激活 root chunk（depth=0）。
-        // 这样可见性查询至少能命中一个 chunk，避免出现“没有可见 draw”的空结果。
-        let _ = self.step_lod(layer, &[OctVec::root()], 0);
-        if !self.chunk_positions(layer).is_empty() {
-            return true;
-        }
-
-        const DETAIL_LEVEL: u64 = 3;
-        const MAX_ITERATIONS: usize = 32;
-        let target = OctVec::new(128, 128, 128, 5);
-
-        for _ in 0..MAX_ITERATIONS {
-            let update = self.step_lod(layer, &[target], DETAIL_LEVEL);
-            if update.is_empty() {
-                break;
-            }
-        }
-
-        let chunks = self.chunk_positions(layer);
-        !chunks.is_empty()
-    }
-
     async fn ensure_default_layer_shaders(entity: Entity) {
         if let Some(mut layer) = entity.get_component_mut::<Layer>().await {
             if layer.shader(RenderPipelineStage::Vertex).is_none() {
@@ -302,30 +270,6 @@ impl Scene2D {
                 );
             }
         }
-    }
-
-    /// 基于 Layer 的八叉树推进 LOD。
-    pub fn step_lod(&self, layer: &mut Layer, targets: &[OctVec], detail: u64) -> LayerLodUpdate {
-        let _ = self;
-        layer.step_lod(targets, detail)
-    }
-
-    /// 当前激活节点数量。
-    pub fn chunk_count(&self, layer: &Layer) -> usize {
-        let _ = self;
-        layer.chunk_count()
-    }
-
-    /// 返回激活节点的位置集合。
-    pub fn chunk_positions(&self, layer: &Layer) -> Vec<OctVec> {
-        let _ = self;
-        layer.chunk_positions()
-    }
-
-    /// 查找指定节点在半径范围内的邻居。
-    pub fn chunk_neighbors(&self, layer: &Layer, center: OctVec, radius: u64) -> Vec<OctVec> {
-        let _ = self;
-        layer.chunk_neighbors(center, radius)
     }
 
     /// 收集当前 Layer 树下所有启用 Shape 的未被完全遮挡的三角面集合。
@@ -368,23 +312,7 @@ impl Scene2D {
         layer: &Layer,
         renderables: &[LayerRenderableBundle],
     ) -> Result<Vec<Scene2DFaceGroup>, Scene2DVisibilityError> {
-        // Scene2D 过去依赖 Layer 的 LOD（chunk_positions）来进行分组/加速。
-        // 但如果调用方忘记 warmup/step_lod，就会出现“没有可见 draw”的空结果。
-        //
-        // 与 Scene3D 的行为保持一致：默认不要求调用方先准备 LOD。
-        // 当 Layer 没有任何激活 chunk 时，我们退化为“单 chunk（root）”模式，
-        // 让 Scene2D 仍能产出可见面集合（只是少了 chunk 级别的分组优化）。
-        let mut chunks = self.chunk_positions(layer);
-        if chunks.is_empty() {
-            chunks.push(OctVec::root());
-        }
-
-        let mut chunk_index = BTreeMap::new();
-        let mut depths = BTreeSet::new();
-        for (index, chunk) in chunks.iter().copied().enumerate() {
-            chunk_index.insert(chunk, index);
-            depths.insert(chunk.depth);
-        }
+        let _ = layer;
 
         #[derive(Clone)]
         struct FaceRecord {
@@ -403,31 +331,11 @@ impl Scene2D {
                 .contains_aabb(&target.xy_bounds)
         }
 
-        let mut faces_per_chunk: Vec<Vec<FaceRecord>> = vec![Vec::new(); chunks.len()];
+        let mut records: Vec<FaceRecord> = Vec::new();
 
         for bundle in renderables {
             for world_vertices in bundle.triangles() {
                 let vertices = *world_vertices;
-
-                let mut chunk_indices = BTreeSet::new();
-                for depth in &depths {
-                    for vertex in &vertices {
-                        let normalized = Self::normalize_world_point(vertex);
-                        let oct = OctVec::from_float_coords(
-                            normalized[0],
-                            normalized[1],
-                            normalized[2],
-                            *depth,
-                        );
-                        if let Some(index) = chunk_index.get(&oct) {
-                            chunk_indices.insert(*index);
-                        }
-                    }
-                }
-
-                if chunk_indices.is_empty() {
-                    continue;
-                }
 
                 let min_z = vertices
                     .iter()
@@ -453,86 +361,66 @@ impl Scene2D {
                     xy_bounds: Aabb2::new(min_xy, max_xy),
                 };
 
-                for index in chunk_indices {
-                    faces_per_chunk[index].push(record.clone());
-                }
+                records.push(record);
             }
         }
 
         const DEPTH_EPSILON: f32 = 1e-4;
         let mut result: Vec<Scene2DFaceGroup> = Vec::new();
 
-        for records in faces_per_chunk.into_iter() {
-            if records.is_empty() {
-                continue;
-            }
+        if records.is_empty() {
+            return Ok(result);
+        }
 
-            let mut filtered: Vec<FaceRecord> = Vec::new();
-            for (index, face) in records.iter().enumerate() {
-                let mut occluded = false;
-                for (other_index, other) in records.iter().enumerate() {
-                    if index == other_index {
-                        continue;
-                    }
-                    if other.min_z - DEPTH_EPSILON > face.max_z
-                        && bounding_box_contains(other, face)
-                    {
-                        occluded = true;
-                        break;
-                    }
+        let mut filtered: Vec<FaceRecord> = Vec::new();
+        for (index, face) in records.iter().enumerate() {
+            let mut occluded = false;
+            for (other_index, other) in records.iter().enumerate() {
+                if index == other_index {
+                    continue;
                 }
-                if !occluded {
-                    filtered.push(face.clone());
+                if other.min_z - DEPTH_EPSILON > face.max_z && bounding_box_contains(other, face) {
+                    occluded = true;
+                    break;
                 }
             }
-
-            if filtered.is_empty() {
-                continue;
-            }
-
-            let mut current_entity = None;
-            let mut current_faces: Vec<[Vector3<f32>; 3]> = Vec::new();
-
-            for face in filtered {
-                if current_entity != Some(face.entity) {
-                    if let Some(entity_id) = current_entity {
-                        result.push(Scene2DFaceGroup {
-                            entity: entity_id,
-                            faces: current_faces,
-                        });
-                        current_faces = Vec::new();
-                    }
-                    current_entity = Some(face.entity);
-                }
-
-                current_faces.push(face.vertices);
-            }
-
-            if let Some(entity_id) = current_entity
-                && !current_faces.is_empty()
-            {
-                result.push(Scene2DFaceGroup {
-                    entity: entity_id,
-                    faces: current_faces,
-                });
+            if !occluded {
+                filtered.push(face.clone());
             }
         }
 
-        Ok(result)
-    }
-    fn normalize_world_point(point: &Vector3<f32>) -> [f64; 3] {
-        [
-            Self::normalize_coordinate(point.x),
-            Self::normalize_coordinate(point.y),
-            Self::normalize_coordinate(point.z),
-        ]
-    }
+        if filtered.is_empty() {
+            return Ok(result);
+        }
 
-    fn normalize_coordinate(value: f32) -> f64 {
-        const NORMALIZED_MAX: f64 = 1.0 - 1e-9;
-        let clamped = value.clamp(-1.0, 1.0);
-        let normalized = ((clamped + 1.0) * 0.5) as f64;
-        normalized.clamp(0.0, NORMALIZED_MAX)
+        let mut current_entity = None;
+        let mut current_faces: Vec<[Vector3<f32>; 3]> = Vec::new();
+
+        for face in filtered {
+            if current_entity != Some(face.entity) {
+                if let Some(entity_id) = current_entity {
+                    result.push(Scene2DFaceGroup {
+                        entity: entity_id,
+                        faces: current_faces,
+                    });
+                    current_faces = Vec::new();
+                }
+                current_entity = Some(face.entity);
+            }
+
+            current_faces.push(face.vertices);
+        }
+
+        if let Some(entity_id) = current_entity
+            && !current_faces.is_empty()
+        {
+            result.push(Scene2DFaceGroup {
+                entity: entity_id,
+                faces: current_faces,
+            });
+        }
+
+        Ok(result)
     }
 }
 
@@ -628,7 +516,6 @@ mod tests {
         transform::Transform,
     };
     use crate::game::entity::Entity;
-    use lodtree::{coords::OctVec, traits::LodVec};
     use nalgebra::{Vector2, Vector3};
 
     async fn detach_node(entity: Entity) {
@@ -944,23 +831,6 @@ mod tests {
         assert!(inserted.is_none());
     }
 
-    async fn activate_root_chunk(entity: Entity) {
-        let scene = entity
-            .get_component::<Scene2D>()
-            .await
-            .expect("Scene2D 组件应已注册");
-        let mut layer = entity
-            .get_component_mut::<Layer>()
-            .await
-            .expect("Scene2D 应持有 Layer");
-        let update = scene.step_lod(&mut layer, &[OctVec::root()], 0);
-        assert!(
-            !update.added.is_empty() || !update.activated.is_empty(),
-            "推进 LOD 后应至少激活根节点"
-        );
-        drop(layer);
-    }
-
     #[tokio::test(flavor = "multi_thread")]
     async fn visible_faces_no_longer_requires_lod_warmup() {
         let root = Entity::new().await.expect("应能创建根实体");
@@ -1029,7 +899,6 @@ mod tests {
     async fn visible_faces_excludes_fully_occluded_triangles() {
         let root = Entity::new().await.expect("应能创建根实体");
         register_layer_scene(root).await;
-        activate_root_chunk(root).await;
 
         let back = Entity::new().await.expect("应能创建后景实体");
         let front = Entity::new().await.expect("应能创建前景实体");
@@ -1080,7 +949,6 @@ mod tests {
     async fn visible_faces_keep_partially_occluded_triangles() {
         let root = Entity::new().await.expect("应能创建根实体");
         register_layer_scene(root).await;
-        activate_root_chunk(root).await;
 
         let partial = Entity::new().await.expect("应能创建部分遮挡实体");
         let ground = Entity::new().await.expect("应能创建背景实体");
@@ -1133,7 +1001,6 @@ mod tests {
     async fn visible_faces_ignores_disabled_renderables() {
         let root = Entity::new().await.expect("应能创建根实体");
         register_layer_scene(root).await;
-        activate_root_chunk(root).await;
 
         let visible_entity = Entity::new().await.expect("应能创建可见实体");
         let hidden_entity = Entity::new().await.expect("应能创建隐藏实体");

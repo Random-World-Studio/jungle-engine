@@ -70,11 +70,9 @@ pub use jge_macros::{component, component_impl};
 use std::{any::type_name, collections::HashMap, fmt, sync::Arc};
 
 use async_trait::async_trait;
-use tokio::sync::{Mutex, OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
+use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 
 use crate::game::entity::{Entity, EntityId};
-
-const CHUNK_SIZE: usize = 16;
 
 /// 组件 trait（所有组件的统一接口）。
 ///
@@ -216,114 +214,16 @@ impl std::error::Error for ComponentDependencyError {
     }
 }
 
-struct ComponentStorageInner<C> {
-    chunks: Vec<Arc<ComponentChunk<C>>>,
-    entity_to_location: HashMap<EntityId, ComponentLocation>,
-    chunks_with_free_slots: Vec<usize>,
-}
-
-impl<C> Default for ComponentStorageInner<C> {
-    fn default() -> Self {
-        Self {
-            chunks: Vec::new(),
-            entity_to_location: HashMap::new(),
-            chunks_with_free_slots: Vec::new(),
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-struct ComponentLocation {
-    chunk: usize,
-    slot: usize,
-}
-
 #[derive(Debug)]
 struct SlotValue<C> {
     entity_id: EntityId,
     value: C,
 }
 
-struct ComponentSlot<C> {
-    value: Arc<RwLock<Option<SlotValue<C>>>>,
-}
-
-impl<C> ComponentSlot<C> {
-    fn new() -> Self {
-        Self {
-            value: Arc::new(RwLock::new(None)),
-        }
-    }
-
-    async fn replace(&self, entity_id: EntityId, value: C) -> Option<C> {
-        let mut guard = self.value.write().await;
-        let previous = guard.replace(SlotValue { entity_id, value });
-        previous.map(|p| p.value)
-    }
-
-    async fn take(&self) -> Option<C> {
-        let mut guard = self.value.write().await;
-        guard.take().map(|p| p.value)
-    }
-
-    async fn read_owned(&self) -> Option<OwnedRwLockReadGuard<Option<SlotValue<C>>>> {
-        let guard = Arc::clone(&self.value).read_owned().await;
-        if guard.is_some() { Some(guard) } else { None }
-    }
-
-    async fn write_owned(&self) -> Option<OwnedRwLockWriteGuard<Option<SlotValue<C>>>> {
-        let guard = Arc::clone(&self.value).write_owned().await;
-        if guard.is_some() { Some(guard) } else { None }
-    }
-}
-
-struct ComponentChunk<C> {
-    slots: Vec<Arc<ComponentSlot<C>>>,
-    freelist: Mutex<Vec<usize>>,
-}
-
-impl<C> ComponentChunk<C> {
-    fn new() -> Self {
-        let slots = (0..CHUNK_SIZE)
-            .map(|_| Arc::new(ComponentSlot::new()))
-            .collect();
-        let freelist = Mutex::new((0..CHUNK_SIZE).rev().collect());
-        Self { slots, freelist }
-    }
-
-    async fn allocate(&self, entity_id: EntityId, value: C) -> (usize, Option<C>, bool) {
-        let mut freelist = self.freelist.lock().await;
-        let slot = freelist.pop().expect("尝试在已满的块中分配槽位");
-        let has_more_free = !freelist.is_empty();
-        drop(freelist);
-        let previous = self.slot(slot).replace(entity_id, value).await;
-        debug_assert!(previous.is_none(), "从空闲槽位分配时不应存在旧值");
-        (slot, previous, has_more_free)
-    }
-
-    async fn replace(&self, slot: usize, entity_id: EntityId, value: C) -> Option<C> {
-        self.slot(slot).replace(entity_id, value).await
-    }
-
-    async fn release(&self, slot: usize) -> (Option<C>, bool) {
-        let removed = self.slot(slot).take().await;
-        if removed.is_some() {
-            let mut freelist = self.freelist.lock().await;
-            let was_full = freelist.is_empty();
-            freelist.push(slot);
-            (removed, was_full)
-        } else {
-            (None, false)
-        }
-    }
-
-    fn slot(&self, index: usize) -> Arc<ComponentSlot<C>> {
-        self.slots.get(index).expect("槽位索引越界").clone()
-    }
-}
-
+type ComponentSlot<C> = Arc<RwLock<Option<SlotValue<C>>>>;
+type ComponentEntryMap<C> = HashMap<EntityId, ComponentSlot<C>>;
 pub struct ComponentStorage<C> {
-    inner: RwLock<ComponentStorageInner<C>>,
+    entries: RwLock<ComponentEntryMap<C>>,
 }
 
 impl<C: 'static> Default for ComponentStorage<C> {
@@ -338,7 +238,7 @@ impl<C: 'static> ComponentStorage<C> {
     /// 通常只在组件实现中作为 `static OnceLock<ComponentStorage<T>>` 的默认值使用。
     pub fn new() -> Self {
         Self {
-            inner: RwLock::new(ComponentStorageInner::default()),
+            entries: RwLock::new(HashMap::new()),
         }
     }
 
@@ -349,20 +249,13 @@ impl<C: 'static> ComponentStorage<C> {
     where
         F: FnMut(EntityId, &C) -> Option<T>,
     {
-        let slots: Vec<Arc<ComponentSlot<C>>> = {
-            let guard = self.inner.read().await;
-            guard
-                .chunks
-                .iter()
-                .flat_map(|chunk| chunk.slots.iter().cloned())
-                .collect()
+        let slots: Vec<ComponentSlot<C>> = {
+            let guard = self.entries.read().await;
+            guard.values().cloned().collect()
         };
-
         let mut results = Vec::new();
         for slot in slots {
-            let Some(value_guard) = slot.read_owned().await else {
-                continue;
-            };
+            let value_guard = slot.read_owned().await;
             let Some(slot_value) = value_guard.as_ref() else {
                 continue;
             };
@@ -374,139 +267,53 @@ impl<C: 'static> ComponentStorage<C> {
         results
     }
 
-    /// 按 chunk 分组遍历并收集结果。
-    ///
-    /// 当你希望利用“分块”天然分组做并行/局部性优化时可用。
-    pub async fn collect_chunks_with<T, F>(&self, mut f: F) -> Vec<Vec<T>>
-    where
-        F: FnMut(EntityId, &C) -> Option<T>,
-    {
-        let chunks: Vec<Arc<ComponentChunk<C>>> = {
-            let guard = self.inner.read().await;
-            guard.chunks.clone()
-        };
-
-        let mut results: Vec<Vec<T>> = Vec::new();
-        for chunk in &chunks {
-            let mut chunk_results = Vec::new();
-            for slot in &chunk.slots {
-                let Some(value_guard) = slot.read_owned().await else {
-                    continue;
-                };
-                let Some(slot_value) = value_guard.as_ref() else {
-                    continue;
-                };
-                if let Some(mapped) = f(slot_value.entity_id, &slot_value.value) {
-                    chunk_results.push(mapped);
-                }
-            }
-            if !chunk_results.is_empty() {
-                results.push(chunk_results);
-            }
-        }
-
-        results
-    }
-
     /// 插入或替换一个组件值。
     ///
     /// 建议通过 `Entity::register_component` 间接调用。
     pub async fn insert(&self, entity_id: EntityId, component: C) -> Option<C> {
-        // fast path: existing component
-        if let Some(location) = {
-            let guard = self.inner.read().await;
-            guard.entity_to_location.get(&entity_id).copied()
-        } {
-            let chunk = {
-                let guard = self.inner.read().await;
-                guard.chunks[location.chunk].clone()
-            };
-            return chunk.replace(location.slot, entity_id, component).await;
-        }
-
-        // slow path: allocate a new slot
-        let (chunk_index, _chunk, slot, previous, has_more_free) = {
-            let mut guard = self.inner.write().await;
-
-            // re-check under write lock (in case another task inserted)
-            if let Some(location) = guard.entity_to_location.get(&entity_id).copied() {
-                let chunk = guard.chunks[location.chunk].clone();
-                drop(guard);
-                let previous = chunk.replace(location.slot, entity_id, component).await;
-                return previous;
-            }
-
-            let (chunk_index, chunk) = match guard.chunks_with_free_slots.pop() {
-                Some(index) => {
-                    let chunk = guard.chunks[index].clone();
-                    (index, chunk)
-                }
-                None => {
-                    let index = guard.chunks.len();
-                    let chunk = Arc::new(ComponentChunk::new());
-                    guard.chunks.push(chunk.clone());
-                    (index, chunk)
-                }
-            };
-
-            // allocate outside of the inner lock to reduce contention
-            drop(guard);
-
-            let (slot, previous, has_more_free) = chunk.allocate(entity_id, component).await;
-            (chunk_index, chunk, slot, previous, has_more_free)
+        let slot = {
+            let mut guard = self.entries.write().await;
+            guard
+                .entry(entity_id)
+                .or_insert_with(|| Arc::new(RwLock::new(None)))
+                .clone()
         };
 
-        debug_assert!(previous.is_none(), "从空闲槽位分配时不应存在旧值");
-
-        let mut guard = self.inner.write().await;
-        guard.entity_to_location.insert(
+        let mut value_guard = slot.write_owned().await;
+        let previous = value_guard.replace(SlotValue {
             entity_id,
-            ComponentLocation {
-                chunk: chunk_index,
-                slot,
-            },
-        );
-        if has_more_free {
-            guard.chunks_with_free_slots.push(chunk_index);
-        }
-        None
+            value: component,
+        });
+        previous.map(|p| p.value)
     }
 
     /// 获取组件的只读 guard。
     pub async fn get(&self, entity_id: EntityId) -> Option<ComponentRead<C>> {
-        let (chunk, slot) = {
-            let guard = self.inner.read().await;
-            let location = guard.entity_to_location.get(&entity_id)?;
-            (guard.chunks[location.chunk].clone(), location.slot)
+        let slot = {
+            let guard = self.entries.read().await;
+            guard.get(&entity_id).cloned()?
         };
-        ComponentRead::new(chunk, slot).await
+        Some(ComponentRead::new(slot).await)
     }
 
     /// 获取组件的可写 guard。
     pub async fn get_mut(&self, entity_id: EntityId) -> Option<ComponentWrite<C>> {
-        let (chunk, slot) = {
-            let guard = self.inner.read().await;
-            let location = guard.entity_to_location.get(&entity_id)?;
-            (guard.chunks[location.chunk].clone(), location.slot)
+        let slot = {
+            let guard = self.entries.read().await;
+            guard.get(&entity_id).cloned()?
         };
-        ComponentWrite::new(chunk, slot).await
+        Some(ComponentWrite::new(slot).await)
     }
 
     /// 移除组件并返回旧值。
     pub async fn remove(&self, entity_id: EntityId) -> Option<C> {
-        let (chunk, location) = {
-            let mut guard = self.inner.write().await;
-            let location = guard.entity_to_location.remove(&entity_id)?;
-            let chunk = guard.chunks[location.chunk].clone();
-            (chunk, location)
+        let slot = {
+            let mut guard = self.entries.write().await;
+            guard.remove(&entity_id)?
         };
 
-        let (removed, became_available) = chunk.release(location.slot).await;
-        if became_available {
-            let mut guard = self.inner.write().await;
-            guard.chunks_with_free_slots.push(location.chunk);
-        }
-        removed
+        let mut value_guard = slot.write_owned().await;
+        value_guard.take().map(|p| p.value)
     }
 }
 
@@ -515,8 +322,7 @@ impl<C: 'static> ComponentStorage<C> {
 /// 通过 `Entity::get_component::<T>().await` 获得。
 /// 该类型实现了 `Deref<Target = T>`，因此可以像 `&T` 一样使用。
 pub struct ComponentRead<C: 'static> {
-    _chunk: Arc<ComponentChunk<C>>,
-    _slot: Arc<ComponentSlot<C>>,
+    _slot: Arc<RwLock<Option<SlotValue<C>>>>,
     guard: OwnedRwLockReadGuard<Option<SlotValue<C>>>,
 }
 
@@ -525,20 +331,14 @@ pub struct ComponentRead<C: 'static> {
 /// 通过 `Entity::get_component_mut::<T>().await` 获得。
 /// 该类型实现了 `DerefMut`，因此可以直接修改组件字段/调用 setter。
 pub struct ComponentWrite<C: 'static> {
-    _chunk: Arc<ComponentChunk<C>>,
-    _slot: Arc<ComponentSlot<C>>,
+    _slot: Arc<RwLock<Option<SlotValue<C>>>>,
     guard: OwnedRwLockWriteGuard<Option<SlotValue<C>>>,
 }
 
 impl<C: 'static> ComponentRead<C> {
-    async fn new(chunk: Arc<ComponentChunk<C>>, index: usize) -> Option<Self> {
-        let slot = chunk.slot(index);
-        let guard = slot.read_owned().await?;
-        Some(Self {
-            _chunk: chunk,
-            _slot: slot,
-            guard,
-        })
+    async fn new(slot: Arc<RwLock<Option<SlotValue<C>>>>) -> Self {
+        let guard = Arc::clone(&slot).read_owned().await;
+        Self { _slot: slot, guard }
     }
 
     /// 返回拥有该组件的实体。
@@ -553,14 +353,9 @@ impl<C: 'static> ComponentRead<C> {
 }
 
 impl<C: 'static> ComponentWrite<C> {
-    async fn new(chunk: Arc<ComponentChunk<C>>, index: usize) -> Option<Self> {
-        let slot = chunk.slot(index);
-        let guard = slot.write_owned().await?;
-        Some(Self {
-            _chunk: chunk,
-            _slot: slot,
-            guard,
-        })
+    async fn new(slot: Arc<RwLock<Option<SlotValue<C>>>>) -> Self {
+        let guard = Arc::clone(&slot).write_owned().await;
+        Self { _slot: slot, guard }
     }
 
     /// 返回拥有该组件的实体。
@@ -669,26 +464,6 @@ mod tests {
         }
     }
 
-    #[component]
-    #[derive(Debug, PartialEq, Eq)]
-    struct ChunkProbeGroupComponent {
-        index: usize,
-    }
-
-    #[component_impl(ChunkProbeGroupComponent)]
-    impl ChunkProbeGroupComponent {
-        #[default(0)]
-        fn new(index: usize) -> Self {
-            Self { index }
-        }
-    }
-
-    #[component]
-    #[derive(Debug, PartialEq, Eq)]
-    struct ChunkProbeSkipComponent {
-        index: usize,
-    }
-
     #[test]
     fn component_guards_are_send_and_sync_when_component_is_threadsafe() {
         assert_send::<TestComponent>();
@@ -726,14 +501,6 @@ mod tests {
             .await
             .expect("应能获取读 guard");
         assert_eq!(guard.value, 1);
-    }
-
-    #[component_impl(ChunkProbeSkipComponent)]
-    impl ChunkProbeSkipComponent {
-        #[default(0)]
-        fn new(index: usize) -> Self {
-            Self { index }
-        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -948,79 +715,5 @@ mod tests {
                 .await
                 .is_none()
         );
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn collect_chunks_with_groups_values_by_chunk() {
-        let total = CHUNK_SIZE + 2;
-        let mut entities = Vec::with_capacity(total);
-        for _ in 0..total {
-            entities.push(Entity::new().await.expect("应能创建实体"));
-        }
-
-        for (index, entity) in entities.iter().enumerate() {
-            entity
-                .register_component(ChunkProbeGroupComponent::new(index))
-                .await
-                .expect("插入组件不应触发依赖错误");
-        }
-
-        let chunks = ChunkProbeGroupComponent::storage()
-            .collect_chunks_with(|_entity_id, component| Some(component.index))
-            .await;
-
-        assert_eq!(chunks.len(), 2, "应跨越 CHUNK_SIZE 形成两个 chunk");
-        assert_eq!(
-            chunks[0].len(),
-            CHUNK_SIZE,
-            "第一个 chunk 应填满 CHUNK_SIZE 个槽位"
-        );
-        assert_eq!(chunks[1].len(), 2, "第二个 chunk 应只包含剩余 2 个组件");
-
-        // 清理，避免影响后续测试。
-        for entity in entities.drain(..) {
-            let _ = entity
-                .unregister_component::<ChunkProbeGroupComponent>()
-                .await;
-        }
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn collect_chunks_with_skips_empty_chunks() {
-        let total = CHUNK_SIZE + 1;
-        let mut entities = Vec::with_capacity(total);
-        for _ in 0..total {
-            entities.push(Entity::new().await.expect("应能创建实体"));
-        }
-
-        for (index, entity) in entities.iter().enumerate() {
-            entity
-                .register_component(ChunkProbeSkipComponent::new(index))
-                .await
-                .expect("插入组件不应触发依赖错误");
-        }
-
-        // 移除第一个 chunk 的所有组件，使其成为空 chunk。
-        for entity in &entities[..CHUNK_SIZE] {
-            let _ = entity
-                .unregister_component::<ChunkProbeSkipComponent>()
-                .await;
-        }
-
-        let chunks = ChunkProbeSkipComponent::storage()
-            .collect_chunks_with(|_entity_id, component| Some(component.index))
-            .await;
-
-        assert_eq!(chunks.len(), 1, "空 chunk 应被跳过");
-        assert_eq!(
-            chunks[0],
-            vec![CHUNK_SIZE],
-            "应只剩下第二个 chunk 的最后一个组件"
-        );
-
-        // 清理。
-        let _ = entities[CHUNK_SIZE]
-            .unregister_component::<ChunkProbeSkipComponent>()
-            .await;
     }
 }

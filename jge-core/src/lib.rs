@@ -21,6 +21,13 @@ pub mod scenes;
 pub mod text;
 mod window;
 
+/// 同步锁封装（对外暴露），用于跨线程共享 winit Window 等同步 API。
+///
+/// 约定：引擎对外的窗口共享句柄使用这里的 `Mutex`，避免把具体依赖（parking_lot）散落到各个 crate。
+pub mod sync {
+    pub use parking_lot::{Mutex, MutexGuard};
+}
+
 pub use aabb::{Aabb2, Aabb3};
 pub use game::Game;
 

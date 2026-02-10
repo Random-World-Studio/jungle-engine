@@ -42,8 +42,6 @@
 
 use std::{collections::HashMap, fmt, sync::Arc};
 
-use lodtree::{coords::OctVec, tree::Tree};
-
 use super::light::{Light, ParallelLight, PointLight};
 use super::material::{Material, MaterialPatch};
 use super::node::Node;
@@ -94,7 +92,6 @@ impl LayerViewport {
 pub struct Layer {
     entity_id: Option<Entity>,
     shaders: HashMap<RenderPipelineStage, LayerShader>,
-    spatial: LayerSpatialIndex,
     viewport: Option<LayerViewport>,
 }
 
@@ -106,13 +103,34 @@ impl Default for Layer {
 
 #[component_impl]
 impl Layer {
+    /// 遍历一个 Layer 的节点子树，返回“属于该 Layer”的所有实体（包含 root）。
+    ///
+    /// 该函数会遵守 Layer 的边界规则：遇到嵌套 Layer 子树会整体跳过。
+    ///
+    /// 备注：这是一个“只做遍历”的底层能力；渲染侧应尽量基于这次遍历结果
+    /// 做后续筛选，避免重复遍历同一棵子树。
+    pub async fn layer_entities(root: Entity) -> Result<Vec<Entity>, LayerTraversalError> {
+        Self::traverse_layer_entities(root).await
+    }
+
+    /// 在已完成的 `layer_entities` 结果上收集可渲染集合。
+    ///
+    /// - 保持输入顺序（先序遍历顺序）。
+    /// - 仅收集启用的 [`Renderable`]。
+    /// - 若缺少 `Shape`/`Transform` 等必要组件，会跳过该实体（与 `collect_renderables` 一致）。
+    pub async fn collect_renderables_from_layer_entities(
+        entities: &[Entity],
+    ) -> LayerRenderableCollection {
+        let bundles = Self::gather_renderables_from_entities(entities).await;
+        LayerRenderableCollection::from_bundles(bundles)
+    }
+
     /// 创建一个 Layer。
     #[default()]
     pub fn new() -> Self {
         Self {
             entity_id: None,
             shaders: HashMap::new(),
-            spatial: LayerSpatialIndex::new(),
             viewport: None,
         }
     }
@@ -164,33 +182,6 @@ impl Layer {
     /// 移除指定阶段的着色器。
     pub fn detach_shader(&mut self, stage: RenderPipelineStage) -> Option<LayerShader> {
         self.shaders.remove(&stage)
-    }
-
-    /// 基于给定目标更新八叉树 LOD，并返回本次迭代的变化。
-    ///
-    /// `targets` 通常来自玩家/摄像机在世界中的位置映射到 `OctVec` 的结果。
-    pub fn step_lod(&mut self, targets: &[OctVec], detail: u64) -> LayerLodUpdate {
-        self.spatial.step_lod(targets, detail)
-    }
-
-    /// 当前处于激活状态的节点数量。
-    pub fn chunk_count(&self) -> usize {
-        self.spatial.chunk_count()
-    }
-
-    /// 返回所有激活节点的位置。
-    pub fn chunk_positions(&self) -> Vec<OctVec> {
-        self.spatial.chunk_positions()
-    }
-
-    /// 查询指定节点在给定半径内的激活邻居。
-    pub fn chunk_neighbors(&self, center: OctVec, radius: u64) -> Vec<OctVec> {
-        self.spatial.chunk_neighbors(center, radius)
-    }
-
-    /// 重置空间索引，清空树结构。
-    pub fn clear_spatial_index(&mut self) {
-        self.spatial.clear();
     }
 
     /// 以该 Layer 为根，收集同一 Layer 树下的所有可渲染实体。
@@ -285,10 +276,22 @@ impl Layer {
     async fn gather_renderables(
         root: Entity,
     ) -> Result<Vec<LayerRenderableBundle>, LayerTraversalError> {
-        let renderables = Self::renderable_entities(root).await?;
+        let ordered = Self::traverse_layer_entities(root).await?;
+        Ok(Self::gather_renderables_from_entities(&ordered).await)
+    }
+
+    async fn gather_renderables_from_entities(entities: &[Entity]) -> Vec<LayerRenderableBundle> {
         let mut bundles = Vec::new();
 
-        for entity in renderables {
+        for &entity in entities {
+            let enabled = match entity.get_component::<Renderable>().await {
+                Some(renderable) => renderable.is_enabled(),
+                None => false,
+            };
+            if !enabled {
+                continue;
+            }
+
             let shape_guard = match entity.get_component::<Shape>().await {
                 Some(shape) => shape,
                 None => continue,
@@ -331,7 +334,7 @@ impl Layer {
             ));
         }
 
-        Ok(bundles)
+        bundles
     }
 
     /// 遍历一个 Layer 的节点子树，返回“属于该 Layer”的所有实体（包含 root）。
@@ -681,177 +684,11 @@ impl fmt::Display for LayerShaderAttachError {
 
 impl std::error::Error for LayerShaderAttachError {}
 
-/// 层（Layer）空间索引操作过程中可能出现的错误。
-#[derive(Debug, PartialEq, Eq)]
-pub enum LayerSpatialError {
-    MissingLayer(Entity),
-}
-
-impl fmt::Display for LayerSpatialError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            LayerSpatialError::MissingLayer(entity) => {
-                write!(f, "实体 {} 未注册 Layer 组件", entity.id())
-            }
-        }
-    }
-}
-
-impl std::error::Error for LayerSpatialError {}
-
-/// 细节层次（LOD）更新过程中的节点变更集合。
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct LayerLodUpdate {
-    /// 新增的节点（创建）。
-    pub added: Vec<OctVec>,
-    /// 移除的节点（销毁）。
-    pub removed: Vec<OctVec>,
-    /// 从非激活变为激活的节点。
-    pub activated: Vec<OctVec>,
-    /// 从激活变为非激活的节点。
-    pub deactivated: Vec<OctVec>,
-}
-
-impl LayerLodUpdate {
-    /// 是否没有任何变更。
-    pub fn is_empty(&self) -> bool {
-        self.added.is_empty()
-            && self.removed.is_empty()
-            && self.activated.is_empty()
-            && self.deactivated.is_empty()
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct LayerChunk {
-    position: OctVec,
-    active: bool,
-}
-
-impl LayerChunk {
-    fn new(position: OctVec) -> Self {
-        Self {
-            position,
-            active: true,
-        }
-    }
-
-    fn position(&self) -> OctVec {
-        self.position
-    }
-
-    fn is_active(&self) -> bool {
-        self.active
-    }
-
-    fn set_active(&mut self, value: bool) {
-        self.active = value;
-    }
-
-    fn reset(&mut self, position: OctVec) {
-        self.position = position;
-        self.active = true;
-    }
-}
-
-#[derive(Debug)]
-struct LayerSpatialIndex {
-    tree: Tree<LayerChunk, OctVec>,
-}
-
-impl LayerSpatialIndex {
-    fn new() -> Self {
-        Self { tree: Tree::new() }
-    }
-
-    fn clear(&mut self) {
-        self.tree.clear();
-    }
-
-    fn chunk_count(&self) -> usize {
-        (0..self.tree.get_num_chunks())
-            .filter(|&idx| self.tree.get_chunk(idx).is_active())
-            .count()
-    }
-
-    fn chunk_positions(&self) -> Vec<OctVec> {
-        (0..self.tree.get_num_chunks())
-            .filter_map(|idx| {
-                let chunk = self.tree.get_chunk(idx);
-                if chunk.is_active() {
-                    Some(chunk.position())
-                } else {
-                    None
-                }
-            })
-            .collect()
-    }
-
-    fn chunk_neighbors(&self, center: OctVec, radius: u64) -> Vec<OctVec> {
-        let radius = radius as i64;
-        self.chunk_positions()
-            .into_iter()
-            .filter(|pos| pos.depth == center.depth)
-            .filter(|pos| {
-                let dx = pos.x as i64 - center.x as i64;
-                let dy = pos.y as i64 - center.y as i64;
-                let dz = pos.z as i64 - center.z as i64;
-                dx.abs() <= radius && dy.abs() <= radius && dz.abs() <= radius
-            })
-            .collect()
-    }
-
-    fn step_lod(&mut self, targets: &[OctVec], detail: u64) -> LayerLodUpdate {
-        let mut update = LayerLodUpdate::default();
-
-        if targets.is_empty() {
-            return update;
-        }
-
-        let needs_update = self.tree.prepare_update(targets, detail, LayerChunk::new);
-
-        if !needs_update {
-            return update;
-        }
-
-        {
-            let pending = self.tree.get_chunks_to_add_slice_mut();
-            update.added.reserve(pending.len());
-            for (position, chunk) in pending.iter_mut() {
-                chunk.reset(*position);
-                update.added.push(*position);
-            }
-        }
-
-        for i in 0..self.tree.get_num_chunks_to_activate() {
-            let chunk = self.tree.get_chunk_to_activate_mut(i);
-            chunk.set_active(true);
-            update.activated.push(chunk.position());
-        }
-
-        for i in 0..self.tree.get_num_chunks_to_deactivate() {
-            let chunk = self.tree.get_chunk_to_deactivate_mut(i);
-            chunk.set_active(false);
-            update.deactivated.push(chunk.position());
-        }
-
-        for i in 0..self.tree.get_num_chunks_to_remove() {
-            let chunk = self.tree.get_chunk_to_remove(i);
-            update.removed.push(chunk.position());
-        }
-
-        self.tree.do_update();
-
-        update
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::game::entity::Entity;
     use crate::resource::{Resource, ResourceHandle};
-    use lodtree::{coords::OctVec, traits::LodVec};
     use nalgebra::Vector2;
 
     async fn detach_node(entity: Entity) {
@@ -1250,58 +1087,6 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn layer_spatial_index_supports_octree_updates() {
-        let entity = Entity::new().await.expect("应能创建实体");
-        prepare_node(&entity, "layer_spatial_root").await;
-        let _ = entity
-            .register_component(Renderable::new())
-            .await
-            .expect("应能插入 Renderable");
-        let _ = entity
-            .register_component(Layer::new())
-            .await
-            .expect("应能插入 Layer");
-
-        let mut layer = entity
-            .get_component_mut::<Layer>()
-            .await
-            .expect("应能写入 Layer");
-        assert_eq!(layer.chunk_count(), 0);
-
-        let target = OctVec::new(128, 128, 128, 5);
-        let detail = 3;
-        let mut iterations = 0usize;
-
-        loop {
-            let update = layer.step_lod(&[target], detail);
-            if iterations == 0 {
-                assert!(update.added.contains(&OctVec::root()));
-            }
-            if update.is_empty() {
-                break;
-            }
-            iterations += 1;
-            assert!(iterations < 32, "LOD 更新未在合理步数内收敛");
-        }
-
-        let positions = layer.chunk_positions();
-        assert!(!positions.is_empty(), "八叉树应生成至少一个节点");
-
-        let center = positions
-            .iter()
-            .copied()
-            .max_by_key(|coord| coord.depth)
-            .expect("至少应存在一个活跃节点");
-
-        let neighbors = layer.chunk_neighbors(center, 1);
-        assert!(!neighbors.is_empty(), "应能找到邻居节点");
-        assert!(neighbors.contains(&center), "邻居结果应包含自身");
-
-        drop(layer);
-        cleanup(&entity).await;
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
     async fn world_renderables_collects_triangles_and_materials() {
         let root = Entity::new().await.expect("应能创建渲染根实体");
         let child = Entity::new().await.expect("应能创建渲染子实体");
@@ -1309,6 +1094,11 @@ mod tests {
         prepare_node(&root, "renderables_root").await;
         prepare_node(&child, "renderables_child").await;
         attach_node(child, root, "应能挂载子实体到根").await;
+
+        // Renderable 的实际可见性由“从引擎根可达”驱动。
+        // 测试套件可能并行运行且其它测试会创建 Game（ENGINE_ROOTS 非空），
+        // 因此这里显式注册根，避免依赖“ENGINE_ROOTS 为空 => 全部可达”的隐式前提。
+        crate::game::reachability::register_engine_root(root);
 
         let _ = root
             .register_component(Renderable::new())
@@ -1395,6 +1185,7 @@ mod tests {
         let _ = child.unregister_component::<Shape>().await;
         let _ = child.unregister_component::<Transform>().await;
         let _ = child.unregister_component::<Renderable>().await;
+        crate::game::reachability::unregister_engine_root(root);
         cleanup(&child).await;
         cleanup(&root).await;
     }

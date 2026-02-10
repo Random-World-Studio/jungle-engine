@@ -2,7 +2,9 @@ use std::{collections::HashSet, sync::Arc};
 
 use parking_lot::RwLock;
 
-use super::{Component, Entity, GameLogicHandle, Node, Scene2D};
+use super::{Entity, Node, Scene2D};
+use crate::game::system::logic::GameLogicHandle;
+use crate::game::system::logic_registry;
 
 /// 重新构建并提交一帧 [`RenderSnapshot`](super::RenderSnapshot)。
 ///
@@ -18,16 +20,6 @@ pub(super) async fn rebuild_render_snapshot(
     let framebuffer_size = (framebuffer_size.0.max(1), framebuffer_size.1.max(1));
     let snapshot = super::RenderSnapshot::build(root, framebuffer_size).await;
     *render_snapshot.write() = Arc::new(snapshot);
-}
-
-/// 把 framebuffer 的 `(width,height)` 打包进一个 `u64`，用于原子存储。
-pub(super) fn pack_framebuffer_size(width: u32, height: u32) -> u64 {
-    ((width as u64) << 32) | (height as u64)
-}
-
-/// 从 `pack_framebuffer_size` 的 `u64` 还原出 `(width,height)`。
-pub(super) fn unpack_framebuffer_size(value: u64) -> (u32, u32) {
-    ((value >> 32) as u32, value as u32)
 }
 
 /// 遍历 `root` 子树，更新所有 `Scene2D` 的 framebuffer size。
@@ -61,11 +53,7 @@ pub(super) async fn update_scene2d_framebuffer_sizes(root: Entity, framebuffer_s
 
 /// 收集当前所有 `Node` 上绑定的 `GameLogic`，并按 chunk 分组。
 ///
-/// chunk 的分组策略来自 `Node::storage().collect_chunks_with(...)`，用于降低每 tick spawn 的任务数量。
-pub(super) async fn collect_logic_handle_chunks() -> Vec<Vec<(super::EntityId, GameLogicHandle)>> {
-    Node::storage()
-        .collect_chunks_with(|entity_id, node| {
-            node.logic().cloned().map(|logic| (entity_id, logic))
-        })
-        .await
+/// 当前实现使用一个全局 registry（由 `Node::set_logic_*` 维护），避免每 tick 遍历 Node 存储。
+pub(super) fn collect_logic_handle_chunks() -> Vec<Vec<(super::EntityId, GameLogicHandle)>> {
+    logic_registry::collect_chunks(32)
 }

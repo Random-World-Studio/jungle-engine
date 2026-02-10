@@ -4,6 +4,7 @@ use super::layer::Layer;
 use super::{Component, ComponentWrite, component, component_impl};
 use crate::game::reachability::{is_reachable_from_engine_root, set_subtree_reachable};
 use crate::game::system::logic::GameLogic;
+use crate::game::system::logic_registry;
 use crate::game::{entity::Entity, system::logic::GameLogicHandle};
 use tracing::warn;
 
@@ -326,6 +327,7 @@ impl Node {
         let previous_logic = self.logic.replace(logic.clone());
 
         async move {
+            logic_registry::set(entity.id(), logic.clone());
             if is_attached {
                 if let Some(old_logic) = previous_logic {
                     Self::notify_logic(entity, Some(old_logic), NodeLogicEvent::Detach).await;
@@ -345,6 +347,9 @@ impl Node {
         async move {
             if is_attached {
                 Self::notify_logic(entity, logic.clone(), NodeLogicEvent::Detach).await;
+            }
+            if logic.is_some() {
+                logic_registry::remove(entity.id());
             }
             logic
         }

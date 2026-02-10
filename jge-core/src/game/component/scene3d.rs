@@ -10,13 +10,12 @@ use super::{
     camera::{Camera, CameraBasis, CameraViewportError},
     component_impl,
     layer::{
-        Layer, LayerLodUpdate, LayerRenderableBundle, LayerRenderableCollection,
-        LayerTraversalError, RenderPipelineStage, ShaderLanguage,
+        Layer, LayerRenderableBundle, LayerRenderableCollection, LayerTraversalError,
+        RenderPipelineStage, ShaderLanguage,
     },
 };
 use crate::resource::ResourcePath;
 use async_trait::async_trait;
-use lodtree::coords::OctVec;
 use nalgebra::Vector3;
 use std::{f32::consts::PI, sync::OnceLock};
 
@@ -452,27 +451,6 @@ impl Scene3D {
         Ok(LayerRenderableCollection::from_bundles(visible))
     }
 
-    /// 推进该 Layer 的 LOD（通常用于体素/分块场景）。
-    pub fn step_lod(&self, layer: &mut Layer, targets: &[OctVec], detail: u64) -> LayerLodUpdate {
-        let _ = self;
-        layer.step_lod(targets, detail)
-    }
-
-    pub fn chunk_count(&self, layer: &Layer) -> usize {
-        let _ = self;
-        layer.chunk_count()
-    }
-
-    pub fn chunk_positions(&self, layer: &Layer) -> Vec<OctVec> {
-        let _ = self;
-        layer.chunk_positions()
-    }
-
-    pub fn chunk_neighbors(&self, layer: &Layer, center: OctVec, radius: u64) -> Vec<OctVec> {
-        let _ = self;
-        layer.chunk_neighbors(center, radius)
-    }
-
     /// 将摄像机绑定到该 3D 场景。
     ///
     /// 绑定后：
@@ -790,7 +768,6 @@ mod tests {
         transform::Transform,
     };
     use crate::game::entity::Entity;
-    use lodtree::{coords::OctVec, traits::LodVec};
 
     async fn detach_node(entity: Entity) {
         if entity.get_component::<Node>().await.is_some() {
@@ -1115,63 +1092,6 @@ mod tests {
         let _ = scene.unregister_component::<Transform>().await;
         detach_node(scene).await;
         let _ = scene.unregister_component::<Node>().await;
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn scene3d_accesses_layer_spatial_index() {
-        let entity = Entity::new().await.expect("应能创建实体");
-        prepare_scene_entity(&entity, "scene3d_spatial").await;
-        entity
-            .register_component(Scene3D::new())
-            .await
-            .expect("依赖满足后应能插入 Scene3D");
-        let scene = entity
-            .get_component::<Scene3D>()
-            .await
-            .expect("Scene3D 组件应已注册");
-
-        {
-            let layer = entity
-                .get_component::<Layer>()
-                .await
-                .expect("Layer 组件应已注册");
-            assert_eq!(scene.chunk_count(&layer), 0);
-        }
-
-        let target = OctVec::root();
-        let detail = 1;
-        {
-            let mut layer = entity
-                .get_component_mut::<Layer>()
-                .await
-                .expect("Layer 组件应已注册");
-            let update = scene.step_lod(&mut layer, &[target], detail);
-            assert_eq!(update.added.len(), 1);
-            assert_eq!(update.removed.len(), 0);
-        }
-
-        {
-            let layer = entity
-                .get_component::<Layer>()
-                .await
-                .expect("Layer 组件应已注册");
-            let positions = scene.chunk_positions(&layer);
-            assert_eq!(positions.len(), 1);
-            assert!(positions.contains(&target));
-
-            let center = target;
-            let neighbors = scene.chunk_neighbors(&layer, center, 1);
-            assert!(neighbors.contains(&center));
-        }
-
-        drop(scene);
-
-        let _ = entity.unregister_component::<Scene3D>().await;
-        let _ = entity.unregister_component::<Layer>().await;
-        let _ = entity.unregister_component::<Renderable>().await;
-        let _ = entity.unregister_component::<Transform>().await;
-        detach_node(entity).await;
-        let _ = entity.unregister_component::<Node>().await;
     }
 
     #[tokio::test(flavor = "multi_thread")]

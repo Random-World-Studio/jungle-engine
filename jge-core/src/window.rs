@@ -15,7 +15,7 @@ use wgpu::Backends;
 use wgpu::SurfaceTargetUnsafe;
 use winit::{dpi::PhysicalSize, window::Window};
 
-use tokio::sync::Mutex;
+use crate::sync::Mutex;
 use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
 use crate::{
@@ -64,12 +64,12 @@ impl GameWindow {
             ..Default::default()
         });
 
-        // 注意：我们把 `winit::Window` 放进了 `Arc<tokio::sync::Mutex<_>>`，因此无法直接作为
+        // 注意：我们把 `winit::Window` 放进了 `Arc<crate::sync::Mutex<_>>`，因此无法直接作为
         // `SurfaceTarget` 传入（它需要实现 HasWindowHandle/HasDisplayHandle）。
         // 这里改用 unsafe API：从 Window 取出 raw handle 创建 surface，并保证 Window 的生命周期
         // 由 `GameWindow.window` 持有，从而满足“handle 在 Surface 生命周期内保持有效”的安全约束。
         let (raw_display_handle, raw_window_handle, size) = {
-            let guard = window.lock().await;
+            let guard = window.lock();
             let raw_display_handle = guard
                 .display_handle()
                 .map(|h| h.as_raw())

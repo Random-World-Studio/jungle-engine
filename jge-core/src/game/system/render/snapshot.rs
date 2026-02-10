@@ -6,7 +6,7 @@ use crate::game::{
     component::{
         background::Background,
         camera::Camera,
-        layer::{Layer, LayerShader, LayerTraversalError, RenderPipelineStage},
+        layer::{Layer, LayerShader, RenderPipelineStage},
         node::Node,
         scene2d::Scene2D,
         scene2d::Scene2DFaceGroup,
@@ -196,21 +196,74 @@ async fn build_layer_snapshot(
         .and_then(|v| util::viewport_pixels_from_normalized(framebuffer_size, v));
     drop(layer_guard);
 
+    let ordered = match Layer::layer_entities(entity).await {
+        Ok(entities) => entities,
+        Err(error) => {
+            warn!(
+                target: "jge-core",
+                layer_id = %entity.id(),
+                error = %error,
+                "Layer entity traversal failed"
+            );
+            return None;
+        }
+    };
+
     let viewport_framebuffer_size = viewport
         .map(|v| (v.width, v.height))
         .unwrap_or(framebuffer_size);
 
-    let background = build_background_snapshot(entity, viewport_framebuffer_size).await;
-
+    let mut camera_pose: Option<([f32; 3], [f32; 3])> = None;
     let (scene_kind, scene2d, scene3d) = if entity.get_component::<Scene2D>().await.is_some() {
-        let scene2d = build_scene2d_snapshot(entity, framebuffer_size).await;
+        let scene2d = build_scene2d_snapshot(entity, &ordered, framebuffer_size).await;
         (Some(LayerSceneKind::Scene2D), scene2d, None)
     } else if entity.get_component::<Scene3D>().await.is_some() {
-        let scene3d = build_scene3d_snapshot(entity, viewport_framebuffer_size).await;
-        (Some(LayerSceneKind::Scene3D), None, scene3d)
+        let mut scene3d_snapshot = None;
+        if let Some((scene3d, pose)) =
+            build_scene3d_snapshot(entity, &ordered, viewport_framebuffer_size).await
+        {
+            camera_pose = Some(pose);
+            scene3d_snapshot = Some(scene3d);
+        }
+
+        (Some(LayerSceneKind::Scene3D), None, scene3d_snapshot)
     } else {
         (None, None, None)
     };
+
+    if camera_pose.is_none() && entity.get_component::<Scene3D>().await.is_some() {
+        let preferred_camera = entity
+            .get_component::<Scene3D>()
+            .await
+            .and_then(|scene| scene.attached_camera());
+
+        if let Some(camera_entity) =
+            select_scene3d_camera_from_layer_entities(preferred_camera, &ordered).await
+        {
+            let fov_ok =
+                camera_entity
+                    .get_component::<Camera>()
+                    .await
+                    .is_some_and(|camera_guard| {
+                        camera_guard
+                            .vertical_fov_for_height(viewport_framebuffer_size.1)
+                            .is_ok()
+                    });
+
+            if fov_ok
+                && let Some(transform_guard) = camera_entity.get_component::<Transform>().await
+            {
+                let pos = transform_guard.position();
+                let basis = Camera::orientation_basis(&transform_guard).normalize();
+                camera_pose = Some((
+                    [pos.x, pos.y, pos.z],
+                    [basis.forward.x, basis.forward.y, basis.forward.z],
+                ));
+            }
+        }
+    }
+
+    let background = build_background_snapshot(&ordered, camera_pose).await;
 
     Some(LayerSnapshot {
         entity,
@@ -224,6 +277,7 @@ async fn build_layer_snapshot(
 
 async fn build_scene2d_snapshot(
     layer_entity: Entity,
+    ordered: &[Entity],
     framebuffer_size: (u32, u32),
 ) -> Option<Scene2DSnapshot> {
     let mut scene_guard = layer_entity.get_component_mut::<Scene2D>().await?;
@@ -240,18 +294,7 @@ async fn build_scene2d_snapshot(
         .shader(RenderPipelineStage::Fragment)
         .map(|shader| shader.resource_handle())?;
 
-    let renderables = match Layer::collect_renderables(layer_entity).await {
-        Ok(collection) => collection,
-        Err(error) => {
-            warn!(
-                target: "jge-core",
-                layer_id = %layer_entity.id(),
-                error = %error,
-                "Scene2D renderable collection failed"
-            );
-            return None;
-        }
-    };
+    let renderables = Layer::collect_renderables_from_layer_entities(ordered).await;
 
     let face_groups =
         match scene_guard.visible_faces_with_renderables(&layer_guard, renderables.bundles()) {
@@ -267,63 +310,34 @@ async fn build_scene2d_snapshot(
             }
         };
 
-    let point_light_entities = match Layer::point_light_entities(layer_entity).await {
-        Ok(lights) => lights,
-        Err(error) => {
-            warn!(
-                target: "jge-core",
-                layer_id = %layer_entity.id(),
-                error = %error,
-                "Scene2D lighting query failed"
-            );
-            Vec::new()
-        }
-    };
-
-    let parallel_light_brightness = match Layer::parallel_light_entities(layer_entity).await {
-        Ok(lights) => {
-            let mut total = 0.0f32;
-            for light_entity in lights {
-                let light = light_entity.get_component::<Light>().await;
-                let Some(light) = light else {
-                    continue;
-                };
-                let value = light.lightness();
-                if value > 0.0 {
-                    total += value;
-                }
-            }
-            total
-        }
-        Err(error) => {
-            warn!(
-                target: "jge-core",
-                layer_id = %layer_entity.id(),
-                error = %error,
-                "Scene2D directional lighting query failed"
-            );
-            0.0
-        }
-    };
-
+    let mut parallel_light_brightness = 0.0f32;
     let mut point_lights: Vec<Scene2DPointLightSnapshot> = Vec::new();
-    for light_entity in point_light_entities {
-        let light = light_entity.get_component::<Light>().await;
-        let point = light_entity.get_component::<PointLight>().await;
-        let transform = light_entity.get_component::<Transform>().await;
+    for entity in ordered {
+        let light = entity.get_component::<Light>().await;
+        let Some(light) = light else {
+            continue;
+        };
+        let lightness = light.lightness();
+        if lightness <= 0.0 {
+            continue;
+        }
 
-        let (Some(light), Some(point), Some(transform)) = (light, point, transform) else {
+        if entity.get_component::<ParallelLight>().await.is_some() {
+            parallel_light_brightness += lightness;
+        }
+
+        let point = entity.get_component::<PointLight>().await;
+        let transform = entity.get_component::<Transform>().await;
+        let (Some(point), Some(transform)) = (point, transform) else {
             continue;
         };
 
         let radius = point.distance();
-        let lightness = light.lightness();
-        let position = transform.position();
-
-        if radius <= f32::EPSILON || lightness <= 0.0 {
+        if radius <= f32::EPSILON {
             continue;
         }
 
+        let position = transform.position();
         point_lights.push(Scene2DPointLightSnapshot {
             center: [position.x, position.y],
             radius,
@@ -345,8 +359,9 @@ async fn build_scene2d_snapshot(
 
 async fn build_scene3d_snapshot(
     layer_entity: Entity,
+    ordered: &[Entity],
     viewport_framebuffer_size: (u32, u32),
-) -> Option<Scene3DSnapshot> {
+) -> Option<(Scene3DSnapshot, ([f32; 3], [f32; 3]))> {
     let scene_guard = layer_entity.get_component::<Scene3D>().await?;
     let scene_vertical = scene_guard
         .vertical_fov_for_height(viewport_framebuffer_size.1)
@@ -360,9 +375,8 @@ async fn build_scene3d_snapshot(
     let fragment_shader = layer_guard.shader(RenderPipelineStage::Fragment)?.clone();
     drop(layer_guard);
 
-    let camera_entity = select_scene3d_camera_async(layer_entity, preferred_camera)
-        .await
-        .ok()??;
+    let camera_entity =
+        select_scene3d_camera_from_layer_entities(preferred_camera, ordered).await?;
 
     let camera_guard = camera_entity.get_component::<Camera>().await?;
     let camera_vertical = camera_guard
@@ -398,6 +412,11 @@ async fn build_scene3d_snapshot(
     let basis = Camera::orientation_basis(&transform_guard).normalize();
     drop(transform_guard);
 
+    let camera_pose = (
+        [camera_position.x, camera_position.y, camera_position.z],
+        [basis.forward.x, basis.forward.y, basis.forward.z],
+    );
+
     let view = Matrix4::look_at_rh(
         &Point3::new(camera_position.x, camera_position.y, camera_position.z),
         &Point3::new(
@@ -415,48 +434,50 @@ async fn build_scene3d_snapshot(
         out
     };
 
-    let point_light_entities = Layer::point_light_entities(layer_entity).await.ok()?;
-    let parallel_light_entities = Layer::parallel_light_entities(layer_entity).await.ok()?;
-
     let mut point_lights: Vec<Scene3DPointLightSnapshot> = Vec::new();
-    for light_entity in point_light_entities {
-        let light = light_entity.get_component::<Light>().await;
-        let point = light_entity.get_component::<PointLight>().await;
-        let transform = light_entity.get_component::<Transform>().await;
-        let (Some(light), Some(point), Some(transform)) = (light, point, transform) else {
-            continue;
-        };
-
-        let radius = point.distance();
-        let intensity = light.lightness();
-        let position = transform.position();
-
-        if radius <= f32::EPSILON || intensity <= 0.0 {
-            continue;
-        }
-
-        point_lights.push(Scene3DPointLightSnapshot {
-            position: [position.x, position.y, position.z],
-            radius,
-            intensity,
-        });
-    }
-
     let mut parallel_lights: Vec<Scene3DParallelLightSnapshot> = Vec::new();
-    for light_entity in parallel_light_entities {
-        let light = light_entity.get_component::<Light>().await;
-        let parallel = light_entity.get_component::<ParallelLight>().await;
-        let transform = light_entity.get_component::<Transform>().await;
-        let (Some(light), Some(_parallel), Some(transform)) = (light, parallel, transform) else {
+    for entity in ordered {
+        let light = entity.get_component::<Light>().await;
+        let Some(light) = light else {
             continue;
         };
-
-        let rotation = transform.rotation();
         let intensity = light.lightness();
         if intensity <= 0.0 {
             continue;
         }
 
+        if entity.get_component::<PointLight>().await.is_some() {
+            let point = entity.get_component::<PointLight>().await;
+            let transform = entity.get_component::<Transform>().await;
+            let (Some(point), Some(transform)) = (point, transform) else {
+                continue;
+            };
+
+            let radius = point.distance();
+            if radius <= f32::EPSILON {
+                continue;
+            }
+
+            let position = transform.position();
+            point_lights.push(Scene3DPointLightSnapshot {
+                position: [position.x, position.y, position.z],
+                radius,
+                intensity,
+            });
+
+            continue;
+        }
+
+        if entity.get_component::<ParallelLight>().await.is_none() {
+            continue;
+        }
+
+        let transform = entity.get_component::<Transform>().await;
+        let Some(transform) = transform else {
+            continue;
+        };
+
+        let rotation = transform.rotation();
         let rotation_matrix = Rotation3::from_euler_angles(rotation.x, rotation.y, rotation.z);
         let forward = rotation_matrix * Vector3::new(0.0, -1.0, 0.0);
         let incoming = -forward;
@@ -470,22 +491,33 @@ async fn build_scene3d_snapshot(
         });
     }
 
-    Some(Scene3DSnapshot {
-        camera_entity,
-        vertex_shader,
-        fragment_shader,
-        view_proj,
-        visible,
-        point_lights,
-        parallel_lights,
-    })
+    Some((
+        Scene3DSnapshot {
+            camera_entity,
+            vertex_shader,
+            fragment_shader,
+            view_proj,
+            visible,
+            point_lights,
+            parallel_lights,
+        },
+        camera_pose,
+    ))
 }
 
 async fn build_background_snapshot(
-    layer_entity: Entity,
-    viewport_framebuffer_size: (u32, u32),
+    ordered: &[Entity],
+    camera_pose: Option<([f32; 3], [f32; 3])>,
 ) -> Option<BackgroundSnapshot> {
-    let bg_entity = find_first_background(layer_entity).await?;
+    let mut bg_entity: Option<Entity> = None;
+    for entity in ordered {
+        if entity.get_component::<Background>().await.is_some() {
+            bg_entity = Some(*entity);
+            break;
+        }
+    }
+    let bg_entity = bg_entity?;
+
     let bg_guard = bg_entity.get_component::<Background>().await?;
 
     let color = bg_guard.color();
@@ -495,10 +527,7 @@ async fn build_background_snapshot(
         .map(|shader| shader.resource_handle());
     drop(bg_guard);
 
-    let (camera_pos, camera_forward) =
-        resolve_layer_camera_pose(layer_entity, viewport_framebuffer_size)
-            .await
-            .unwrap_or(([0.0, 0.0, 0.0], [0.0, 0.0, -1.0]));
+    let (camera_pos, camera_forward) = camera_pose.unwrap_or(([0.0, 0.0, 0.0], [0.0, 0.0, -1.0]));
 
     Some(BackgroundSnapshot {
         color,
@@ -509,76 +538,22 @@ async fn build_background_snapshot(
     })
 }
 
-async fn resolve_layer_camera_pose(
-    layer_entity: Entity,
-    viewport_framebuffer_size: (u32, u32),
-) -> Option<([f32; 3], [f32; 3])> {
-    let scene_guard = layer_entity.get_component::<Scene3D>().await?;
-    let preferred = scene_guard.attached_camera();
-    drop(scene_guard);
-
-    let camera_entity = select_scene3d_camera_async(layer_entity, preferred)
-        .await
-        .ok()??;
-    let camera_guard = camera_entity.get_component::<Camera>().await?;
-    let _ = camera_guard
-        .vertical_fov_for_height(viewport_framebuffer_size.1)
-        .ok()?;
-    drop(camera_guard);
-
-    let transform_guard = camera_entity.get_component::<Transform>().await?;
-    let pos = transform_guard.position();
-    let basis = Camera::orientation_basis(&transform_guard).normalize();
-
-    Some((
-        [pos.x, pos.y, pos.z],
-        [basis.forward.x, basis.forward.y, basis.forward.z],
-    ))
-}
-
-async fn select_scene3d_camera_async(
-    root: Entity,
+async fn select_scene3d_camera_from_layer_entities(
     preferred: Option<Entity>,
-) -> Result<Option<Entity>, LayerTraversalError> {
-    if let Some(candidate) = preferred {
-        if candidate.get_component::<Camera>().await.is_some()
-            && candidate.get_component::<Transform>().await.is_some()
-        {
-            return Ok(Some(candidate));
-        }
+    ordered: &[Entity],
+) -> Option<Entity> {
+    if let Some(candidate) = preferred
+        && candidate.get_component::<Camera>().await.is_some()
+        && candidate.get_component::<Transform>().await.is_some()
+    {
+        return Some(candidate);
     }
 
-    let ordered = Layer::renderable_entities(root).await?;
     for entity in ordered {
         if entity.get_component::<Camera>().await.is_some()
             && entity.get_component::<Transform>().await.is_some()
         {
-            return Ok(Some(entity));
-        }
-    }
-
-    Ok(None)
-}
-
-async fn find_first_background(root: Entity) -> Option<Entity> {
-    let mut stack = vec![root];
-    let mut visited = HashSet::new();
-
-    while let Some(entity) = stack.pop() {
-        if !visited.insert(entity) {
-            continue;
-        }
-
-        if entity.get_component::<Background>().await.is_some() {
-            return Some(entity);
-        }
-
-        let node_guard = entity.get_component::<Node>().await?;
-        let children: Vec<Entity> = node_guard.children().to_vec();
-        drop(node_guard);
-
-        for child in children.into_iter().rev() {
-            stack.push(child);
+            return Some(*entity);
         }
     }
 

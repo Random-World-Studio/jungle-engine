@@ -11,6 +11,7 @@ use anyhow::{Context, anyhow};
 use async_trait::async_trait;
 use nalgebra::{Vector2, Vector3};
 
+use jge_core::sync::Mutex;
 use jge_core::{
     Game,
     config::GameConfig,
@@ -51,7 +52,7 @@ enum MouseInputMode {
 
 #[derive(Debug)]
 struct MouseState {
-    window: Option<Arc<tokio::sync::Mutex<winit::window::Window>>>,
+    window: Option<Arc<Mutex<winit::window::Window>>>,
     mode: MouseInputMode,
     ignore_next_cursor_moved: bool,
 }
@@ -93,8 +94,8 @@ fn main() -> anyhow::Result<()> {
             // Wayland 下 set_cursor_position 仅在 Locked 时可用；同时“允许移动+回中法”也经常受限。
             // 优先采用：抓取光标 + 隐藏光标 + 使用 DeviceEvent::MouseMotion 获取相对 delta。
             // 如果 Locked 失败，则退化为“CursorMoved + 每次移动后回中”方案，避免光标到边缘后没法继续转向。
-            let (mode, ignore_next_cursor_moved) = game.block_on(async {
-                let window = window.lock().await;
+            let (mode, ignore_next_cursor_moved) = {
+                let window = window.lock();
                 match window.set_cursor_grab(CursorGrabMode::Locked) {
                     Ok(()) => (MouseInputMode::LockedRelative, false),
                     Err(err) => {
@@ -118,7 +119,7 @@ fn main() -> anyhow::Result<()> {
                         (MouseInputMode::Recenter, ignore)
                     }
                 }
-            });
+            };
 
             {
                 let mut state = mouse_state_for_init
@@ -128,10 +129,10 @@ fn main() -> anyhow::Result<()> {
                 state.ignore_next_cursor_moved = ignore_next_cursor_moved;
             }
 
-            game.block_on(async {
-                let window = window.lock().await;
+            {
+                let window = window.lock();
                 window.set_cursor_visible(false);
-            });
+            }
         })
         .with_event_mapper(split_event_mapper(
             move |event: &WindowEvent| match event {
@@ -163,9 +164,7 @@ fn main() -> anyhow::Result<()> {
                     };
 
                     // 同步事件回调里无法 await；这里用 try_lock，若当前持锁则直接丢弃本次事件。
-                    let Ok(window) = window.try_lock() else {
-                        return None;
-                    };
+                    let window = window.try_lock()?;
 
                     let size = window.inner_size();
                     if size.width == 0 || size.height == 0 {

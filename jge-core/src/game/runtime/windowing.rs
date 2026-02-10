@@ -3,7 +3,7 @@ use std::{
     time::Instant,
 };
 
-use tokio::sync::Mutex;
+use crate::sync::Mutex;
 use tracing::{error, warn};
 use winit::{
     application::ApplicationHandler,
@@ -14,10 +14,7 @@ use winit::{
     window::{Fullscreen, Window, WindowAttributes, WindowId},
 };
 
-use super::helpers::{
-    pack_framebuffer_size, rebuild_render_snapshot, unpack_framebuffer_size,
-    update_scene2d_framebuffer_sizes,
-};
+use super::helpers::{rebuild_render_snapshot, update_scene2d_framebuffer_sizes};
 use super::{Game, GameEvent, WindowConfig, WindowMode};
 use crate::window::GameWindow;
 
@@ -29,8 +26,7 @@ impl Game {
         let width = width.max(1);
         let height = height.max(1);
 
-        self.framebuffer_size
-            .store(pack_framebuffer_size(width, height), Ordering::Release);
+        *self.framebuffer_size.write() = (width, height);
         self.runtime.block_on(rebuild_render_snapshot(
             self.root,
             (width, height),
@@ -47,7 +43,7 @@ impl Game {
         let root = self.root;
         let framebuffer_size = Arc::clone(&self.framebuffer_size);
         self.runtime.spawn(async move {
-            let (width, height) = unpack_framebuffer_size(framebuffer_size.load(Ordering::Acquire));
+            let (width, height) = *framebuffer_size.read();
             update_scene2d_framebuffer_sizes(root, (width, height)).await;
         });
     }
@@ -66,10 +62,7 @@ impl Game {
             return;
         }
 
-        self.framebuffer_size.store(
-            pack_framebuffer_size(physical_size.width.max(1), physical_size.height.max(1)),
-            Ordering::Release,
-        );
+        *self.framebuffer_size.write() = (physical_size.width.max(1), physical_size.height.max(1));
 
         let Some(window) = self.window.as_mut() else {
             return;
@@ -172,7 +165,7 @@ impl ApplicationHandler for Game {
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
         // 在事件循环即将等待时请求重绘，确保高刷新率下能及时准备下一帧
         if let Some(window) = &self.window
-            && let Ok(guard) = window.window.try_lock()
+            && let Some(guard) = window.window.try_lock()
         {
             guard.request_redraw();
         }
@@ -221,5 +214,50 @@ impl ApplicationHandler for Game {
         if let Some(mapped) = self.event_mapper.map_device_event(&event) {
             self.dispatch_event(mapped);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::config::GameConfig;
+    use crate::game::component::node::Node;
+    use crate::game::entity::Entity;
+
+    #[test]
+    fn handle_window_resized_updates_framebuffer_size_without_window() {
+        let setup_rt = tokio::runtime::Runtime::new().expect("should create setup runtime");
+        let root = setup_rt.block_on(async {
+            let root = Entity::new().await.expect("should create root entity");
+            root.register_component(Node::new("root").unwrap())
+                .await
+                .expect("should register root Node");
+            root
+        });
+        drop(setup_rt);
+
+        let mut game = Game::new(GameConfig::default(), root).expect("should create game");
+        assert_eq!(*game.framebuffer_size.read(), (1, 1));
+
+        game.handle_window_resized(PhysicalSize::new(800, 600));
+        assert_eq!(*game.framebuffer_size.read(), (800, 600));
+    }
+
+    #[test]
+    fn refresh_framebuffer_and_snapshot_clamps_size_to_at_least_1() {
+        let setup_rt = tokio::runtime::Runtime::new().expect("should create setup runtime");
+        let root = setup_rt.block_on(async {
+            let root = Entity::new().await.expect("should create root entity");
+            root.register_component(Node::new("root").unwrap())
+                .await
+                .expect("should register root Node");
+            root
+        });
+        drop(setup_rt);
+
+        let mut game = Game::new(GameConfig::default(), root).expect("should create game");
+        game.refresh_framebuffer_and_snapshot(0, 10);
+        assert_eq!(*game.framebuffer_size.read(), (1, 10));
     }
 }

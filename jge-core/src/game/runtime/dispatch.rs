@@ -1,18 +1,13 @@
 use std::{
     future::Future,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::{Arc, atomic::Ordering},
     time::{Duration, Instant},
 };
 
 use tokio::{task::JoinSet, time::interval};
 use tracing::{trace, warn};
 
-use super::helpers::{
-    collect_logic_handle_chunks, rebuild_render_snapshot, unpack_framebuffer_size,
-};
+use super::helpers::{collect_logic_handle_chunks, rebuild_render_snapshot};
 use super::{Entity, Game, GameEvent};
 
 impl Game {
@@ -56,7 +51,7 @@ impl Game {
         let stopped = Arc::clone(&self.stopped);
         let root = self.root;
         let render_snapshot = Arc::clone(&self.render_snapshot);
-        let framebuffer_size: Arc<AtomicU64> = Arc::clone(&self.framebuffer_size);
+        let framebuffer_size = Arc::clone(&self.framebuffer_size);
 
         self.runtime.spawn(async move {
             let mut itv = interval(Duration::from_millis(game_tick_ms));
@@ -70,8 +65,7 @@ impl Game {
 
                 Self::dispatch_update(delta).await;
 
-                let (width, height) =
-                    unpack_framebuffer_size(framebuffer_size.load(Ordering::Acquire));
+                let (width, height) = *framebuffer_size.read();
                 rebuild_render_snapshot(root, (width, height), render_snapshot.as_ref()).await;
             }
         });
@@ -79,7 +73,7 @@ impl Game {
 
     /// 分发一次更新 tick（同步等待本轮所有 chunk 完成）。
     async fn dispatch_update(delta: Duration) {
-        let node_targets = collect_logic_handle_chunks().await;
+        let node_targets = collect_logic_handle_chunks();
         Self::run_joinset(
             node_targets,
             move |chunk| async move {
@@ -101,7 +95,7 @@ impl Game {
     pub(super) fn dispatch_event(&self, event: GameEvent) {
         trace!(target: "jge-core", "dispatch event: {:?}", event);
         self.runtime.spawn(async move {
-            let logic_targets = collect_logic_handle_chunks().await;
+            let logic_targets = collect_logic_handle_chunks();
             Self::run_joinset(
                 logic_targets,
                 move |chunk| {
@@ -131,7 +125,7 @@ impl Game {
     /// Renderable 的 enabled 状态会影响调度：存在且 disabled 的实体会被跳过。
     pub(super) fn dispatch_on_render(&self, delta: Duration) {
         self.runtime.spawn(async move {
-            let logic_targets = collect_logic_handle_chunks().await;
+            let logic_targets = collect_logic_handle_chunks();
             Self::run_joinset(
                 logic_targets,
                 move |chunk| async move {

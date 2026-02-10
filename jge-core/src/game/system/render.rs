@@ -173,10 +173,10 @@ impl RenderSystem {
     ) {
         let entity = layer_snapshot.entity();
 
-        if let Some(background_snapshot) = layer_snapshot.background() {
-            if background::render_background_from_snapshot(entity, background_snapshot, context) {
-                context.load_op = wgpu::LoadOp::Load;
-            }
+        if let Some(background_snapshot) = layer_snapshot.background()
+            && background::render_background_from_snapshot(entity, background_snapshot, context)
+        {
+            context.load_op = wgpu::LoadOp::Load;
         }
 
         match layer_snapshot.scene_kind() {

@@ -917,7 +917,6 @@ dependencies = [
  "image",
  "inventory",
  "jge-macros",
- "lodtree",
  "nalgebra",
  "parking_lot",
  "tempfile",
@@ -1083,12 +1082,6 @@ checksum = "224399e74b87b5f3557511d98dff8b14089b3dadafcab6bb93eab67d3aace965"
 dependencies = [
  "scopeguard",
 ]
-
-[[package]]
-name = "lodtree"
-version = "0.1.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6bac472b23f3cfd6129bf76f003ec7c7c4f72a99b7ce3cf491e17b73651d6d4e"
 
 [[package]]
 name = "log"

@@ -16,7 +16,6 @@ jge-macros = { path = "../jge-macros" }
 async-trait = "0.1"
 tempfile = "3.10"
 nalgebra = "0.34.1"
-lodtree = "0.1.4"
 image = { version = "0.25", default-features = false, features = [
     "png",
     "jpeg",

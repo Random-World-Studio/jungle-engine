@@ -5,4 +5,5 @@
 //! - [`render`]：渲染系统（按 Layer/场景类型渲染）
 
 pub mod logic;
+pub(crate) mod logic_registry;
 pub mod render;
