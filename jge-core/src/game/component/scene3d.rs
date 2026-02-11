@@ -424,7 +424,21 @@ impl Scene3D {
         let vertical_tan = (vertical_limit + FRUSTUM_MARGIN).tan();
         let mut visible = Vec::new();
 
-        for bundle in collection.iter() {
+        let frustum = crate::game::spatial::Frustum::new(
+            camera_position,
+            basis.right,
+            basis.up,
+            basis.forward,
+            horizontal_tan,
+            vertical_tan,
+            near_plane,
+            far_plane,
+        );
+
+        let candidate_indices = collection.query_frustum_indices(&frustum);
+        let candidates = collection.filtered_by_indices(&candidate_indices);
+
+        for bundle in candidates.iter() {
             let mut triangles = Vec::new();
             for triangle in bundle.triangles() {
                 if triangle_visible(

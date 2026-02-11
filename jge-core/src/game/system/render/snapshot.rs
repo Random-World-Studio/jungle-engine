@@ -24,6 +24,7 @@ use crate::resource::ResourceHandle;
 use super::{cache::LayerViewportPixels, util};
 
 use nalgebra::{Matrix4, Perspective3, Point3, Rotation3, Vector3};
+use crate::{Aabb3};
 
 use crate::game::component::{
     layer::LayerRenderableCollection,
@@ -355,9 +356,26 @@ async fn build_scene2d_snapshot(
         .map(|shader| shader.resource_handle())?;
 
     let renderables = Layer::collect_renderables_from_layer_entities(ordered).await;
+    let view_bounds = scene_guard.visible_world_bounds();
 
-    let face_groups =
-        match scene_guard.visible_faces_with_renderables(&layer_guard, renderables.bundles()) {
+    let culled_for_visibility: Vec<crate::game::component::layer::LayerRenderableBundle> =
+        if let Some(bounds2) = view_bounds {
+            let query = Aabb3::new(
+                Vector3::new(bounds2.min.x, bounds2.min.y, 0.0),
+                Vector3::new(bounds2.max.x, bounds2.max.y, 1.0),
+            );
+            let indices = renderables.query_aabb3_indices(&query);
+            indices
+                .into_iter()
+                .filter_map(|i| renderables.bundles().get(i).cloned())
+                .collect()
+        } else {
+            renderables.bundles().to_vec()
+        };
+
+    let face_groups = match scene_guard
+        .visible_faces_with_renderables(&layer_guard, &culled_for_visibility)
+    {
             Ok(faces) => faces,
             Err(error) => {
                 warn!(
@@ -369,6 +387,18 @@ async fn build_scene2d_snapshot(
                 Vec::new()
             }
         };
+
+    // 渲染本身也做同样的视域裁剪（2D 视域为轴对齐立方体/盒）。
+    let renderables = if let Some(bounds2) = view_bounds {
+        let query = Aabb3::new(
+            Vector3::new(bounds2.min.x, bounds2.min.y, 0.0),
+            Vector3::new(bounds2.max.x, bounds2.max.y, 1.0),
+        );
+        let indices = renderables.query_aabb3_indices(&query);
+        renderables.filtered_by_indices(&indices)
+    } else {
+        renderables
+    };
 
     let mut parallel_light_brightness = 0.0f32;
     let mut point_lights: Vec<Scene2DPointLightSnapshot> = Vec::new();

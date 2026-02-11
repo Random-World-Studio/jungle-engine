@@ -33,21 +33,6 @@
   - `Renderable::is_enabled()` 的实际语义依赖“从某个引擎根可达”。
   - **测试约定**：不要假定 `ENGINE_ROOTS` 为空；涉及可见性/收集（例如 Layer renderables、on_render 调度）的测试要显式 `register_engine_root(root)` 并在结束时 `unregister_engine_root(root)`，避免并行测试导致的 flake。
 
-## 近期瘦身约定（重要：避免把删掉的复杂度加回来）
-
-- ECS 组件存储（`jge-core/src/game/component.rs`）：已改为“直观优先”的实现（基于 `HashMap<EntityId, Arc<RwLock<Option<_>>>>`），不再维护 chunk/freelist/slot 分组；因此也不再提供基于 chunk 的遍历 API。
-- 逻辑调度：`GameLogicHandle` 的收集不再通过遍历 `Node` 存储完成，而是通过全局注册表 `logic_registry`（`jge-core/src/game/system/logic_registry.rs`）。
-  - 维护点在 `Node::set_logic_handle` / `Node::take_logic`：挂载时写入 registry，取走时移除。
-  - 额外约束：registry 的 API 保持同步；不要为了“统一 async”而把它改回 `tokio::RwLock`。
-- `Layer` 不再内置“空间索引/LOD 八叉树”。
-  - 相关接口（`step_lod/chunk_*`）与 `lodtree` 依赖已移除；不要在 `Layer` 上重新引入“体素/分块/LOD”职责。
-  - `Scene2D::visible_faces*` 不再依赖 LOD 预热，默认退化为单组（无 chunk 分组）的可见性/遮挡计算。
-  - 若未来需要 chunk/LOD：优先做成 **独立组件/独立系统**（例如 `ChunkIndex`/`VoxelWorld`），由场景或渲染系统可选使用，而不是塞回 `Layer`。
-- 渲染收集（RenderSnapshot 构建）：每个 Layer 子树的遍历应 **只做一次**。
-  - 基于 `Layer::layer_entities` 得到“同一 Layer 之内”的先序实体序列（会跳过嵌套 Layer 子树）。
-  - renderables / lights / background / camera 的选择都应从这份序列派生，避免在 snapshot 构建中重复遍历或做“跨 Layer 子树”的全局搜索。
-  - 关键语义：嵌套 Layer 不会被父 Layer 重复影响（例如父 Layer 的 background/camera/light 查询不应落到嵌套 Layer 里）。
-
 ## 宏与组件系统（修改宏/组件时必读）
 
 - `scene!`（`jge-macros/src/scene_macro.rs`）：

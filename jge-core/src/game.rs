@@ -12,6 +12,7 @@
 
 pub mod component;
 pub mod entity;
+pub(crate) mod spatial;
 pub mod system;
 
 pub(crate) mod reachability;

@@ -49,6 +49,7 @@ use super::renderable::Renderable;
 use super::shape::Shape;
 use super::transform::Transform;
 use super::{component, component_impl};
+use crate::Aabb3;
 use crate::game::{component::ComponentRead, entity::Entity};
 use crate::resource::{Resource, ResourceHandle, ResourcePath};
 use nalgebra::{Matrix4, Vector3, Vector4};
@@ -499,6 +500,8 @@ impl LayerRenderableBundle {
 pub struct LayerRenderableCollection {
     bundles: Vec<LayerRenderableBundle>,
     lookup: HashMap<Entity, usize>,
+    octree: Option<crate::game::spatial::OctreeIndex>,
+    bundle_bounds: Vec<Option<Aabb3>>,
 }
 
 impl LayerRenderableCollection {
@@ -508,7 +511,19 @@ impl LayerRenderableCollection {
             .enumerate()
             .map(|(index, bundle)| (bundle.entity(), index))
             .collect();
-        Self { bundles, lookup }
+
+        let bundle_bounds: Vec<Option<Aabb3>> = bundles
+            .iter()
+            .map(|bundle| bounds_from_triangles(bundle.triangles()))
+            .collect();
+        let octree = crate::game::spatial::OctreeIndex::build(&bundle_bounds);
+
+        Self {
+            bundles,
+            lookup,
+            octree,
+            bundle_bounds,
+        }
     }
 
     pub fn bundles(&self) -> &[LayerRenderableBundle] {
@@ -532,6 +547,71 @@ impl LayerRenderableCollection {
     pub fn into_bundles(self) -> Vec<LayerRenderableBundle> {
         self.bundles
     }
+
+    pub(crate) fn query_aabb3_indices(&self, query: &Aabb3) -> Vec<usize> {
+        if let Some(octree) = &self.octree {
+            return octree.query_aabb(query);
+        }
+
+        // 无索引时退化为线性扫描；保证返回索引按遍历顺序。
+        let mut out = Vec::new();
+        for (index, bounds) in self.bundle_bounds.iter().enumerate() {
+            if bounds.is_some_and(|b| b.intersects(query)) {
+                out.push(index);
+            }
+        }
+        out
+    }
+
+    pub(crate) fn query_frustum_indices(
+        &self,
+        frustum: &crate::game::spatial::Frustum,
+    ) -> Vec<usize> {
+        if let Some(octree) = &self.octree {
+            return octree.query_frustum(frustum);
+        }
+
+        let mut out = Vec::new();
+        for (index, bounds) in self.bundle_bounds.iter().enumerate() {
+            if bounds.is_some_and(|b| frustum.intersects_aabb(&b)) {
+                out.push(index);
+            }
+        }
+        out
+    }
+
+    pub(crate) fn filtered_by_indices(&self, indices: &[usize]) -> Self {
+        let mut bundles = Vec::with_capacity(indices.len());
+        for &i in indices {
+            if let Some(bundle) = self.bundles.get(i) {
+                bundles.push(bundle.clone());
+            }
+        }
+        Self::from_bundles(bundles)
+    }
+}
+
+fn bounds_from_triangles(triangles: &[[Vector3<f32>; 3]]) -> Option<Aabb3> {
+    let mut min = Vector3::new(f32::INFINITY, f32::INFINITY, f32::INFINITY);
+    let mut max = Vector3::new(f32::NEG_INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
+
+    let mut any = false;
+    for tri in triangles {
+        for v in tri {
+            if !v.x.is_finite() || !v.y.is_finite() || !v.z.is_finite() {
+                return None;
+            }
+            any = true;
+            min.x = min.x.min(v.x);
+            min.y = min.y.min(v.y);
+            min.z = min.z.min(v.z);
+            max.x = max.x.max(v.x);
+            max.y = max.y.max(v.y);
+            max.z = max.z.max(v.z);
+        }
+    }
+
+    any.then(|| Aabb3::new(min, max))
 }
 
 impl ComponentRead<Layer> {

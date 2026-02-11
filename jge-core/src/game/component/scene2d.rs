@@ -19,12 +19,12 @@ use super::{
         ShaderLanguage,
     },
 };
-use crate::Aabb2;
 use crate::game::{
     component::{Component, ComponentDependencyError, ComponentStorage},
     entity::Entity,
 };
 use crate::resource::ResourcePath;
+use crate::{Aabb2, Aabb3};
 
 /// 二维场景组件。
 ///
@@ -293,16 +293,32 @@ impl Scene2D {
             ));
         };
 
-        let (layer, renderables) = tokio::task::block_in_place(|| {
+        let (layer, collection, view_bounds) = tokio::task::block_in_place(|| {
             let layer = handle
                 .block_on(entity.get_component::<Layer>())
                 .expect("Scene2D::visible_faces requires Layer component");
-            let renderables = handle
-                .block_on(layer.world_renderables())
+            let collection = handle
+                .block_on(layer.collect_renderables())
                 .map_err(Scene2DVisibilityError::from)?;
-            Ok::<_, Scene2DVisibilityError>((layer, renderables))
+            let view_bounds = self.visible_world_bounds();
+            Ok::<_, Scene2DVisibilityError>((layer, collection, view_bounds))
         })?;
-        self.visible_faces_with_renderables(&layer, &renderables)
+
+        let bundles: Vec<LayerRenderableBundle> = if let Some(bounds2) = view_bounds {
+            let query = Aabb3::new(
+                nalgebra::Vector3::new(bounds2.min.x, bounds2.min.y, 0.0),
+                nalgebra::Vector3::new(bounds2.max.x, bounds2.max.y, 1.0),
+            );
+            let indices = collection.query_aabb3_indices(&query);
+            indices
+                .into_iter()
+                .filter_map(|i| collection.bundles().get(i).cloned())
+                .collect()
+        } else {
+            collection.bundles().to_vec()
+        };
+
+        self.visible_faces_with_renderables(&layer, &bundles)
     }
 
     /// 与 [`visible_faces`](Self::visible_faces) 相同，但允许调用方复用已收集好的渲染数据。
