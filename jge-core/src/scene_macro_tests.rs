@@ -6,6 +6,7 @@ use crate::game::component::node::Node;
 use crate::game::component::renderable::Renderable;
 use crate::game::component::transform::Transform;
 use crate::game::entity::Entity;
+use crate::scenes::SceneBinding;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn scene_macro_allows_forward_reference_to_as_binding_and_preserves_child_order()
@@ -34,6 +35,12 @@ async fn scene_macro_allows_forward_reference_to_as_binding_and_preserves_child_
         .with_context(|| "root should have Node")?;
 
     assert_eq!(root_node.children(), &[bindings.a, bindings.b]);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn scene_macro_allows_empty_input_as_noop() -> anyhow::Result<()> {
+    crate::scene! {}.await?;
     Ok(())
 }
 
@@ -210,5 +217,96 @@ async fn scene_macro_external_entity_node_does_not_force_nested_destroy() -> any
         external.get_component::<Transform>().await.is_some(),
         "Entity passed to `<expr> node;` should not be force-destroyed"
     );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn scene_macro_bindings_can_be_passed_as_dyn_scene_binding() -> anyhow::Result<()> {
+    let bindings = crate::scene! {
+        node "root" {
+            node "child" as child {
+                + Transform::new();
+            }
+        }
+    }
+    .await?;
+
+    let boxed: Box<dyn SceneBinding> = Box::new(bindings);
+
+    assert!(boxed.binding_names().contains(&"root"));
+    assert!(boxed.binding_names().contains(&"child"));
+
+    let root = boxed.scene_root();
+    let child = boxed.binding("child").expect("child binding should exist");
+
+    assert!(root.get_component::<Node>().await.is_some());
+    assert!(child.get_component::<Transform>().await.is_some());
+
+    boxed.destroy_boxed().await;
+    assert!(child.get_component::<Transform>().await.is_none());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn scene_macro_with_requires_component() -> anyhow::Result<()> {
+    let result = crate::scene! {
+        node "root" {
+            // Transform 没有被注册，因此 with 绑定应失败。
+            with(_t: Transform) {
+                Ok(())
+            };
+        }
+    }
+    .await;
+
+    let err = match result {
+        Ok(_) => anyhow::bail!("with() should error if component is missing"),
+        Err(e) => e,
+    };
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("scene!: with 缺少组件"),
+        "error should mention missing component, got: {msg}"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn scene_macro_attach_happens_after_init() -> anyhow::Result<()> {
+    let bindings = crate::scene! {
+        node "root" as _root {
+            node "a" as a { }
+
+            // init 阶段执行：此时树关系尚未建立。
+            with(n: Node) {
+                assert!(n.children().is_empty(), "root should have no children during init");
+
+                let a_node = a
+                    .get_component::<Node>()
+                    .await
+                    .with_context(|| "a should have Node")?;
+                assert!(a_node.parent().is_none(), "a should have no parent during init");
+                Ok(())
+            };
+        }
+    }
+    .await?;
+
+    let root_node = bindings
+        .root
+        .get_component::<Node>()
+        .await
+        .with_context(|| "root should have Node")?;
+    assert_eq!(root_node.children(), &[bindings.a]);
+
+    let a_node = bindings
+        .a
+        .get_component::<Node>()
+        .await
+        .with_context(|| "a should have Node")?;
+    assert_eq!(a_node.parent(), Some(bindings.root));
+
+    // 避免遗留显式注册组件；这里没显式组件但仍保持 destroy 可用。
+    bindings.destroy().await;
     Ok(())
 }

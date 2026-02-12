@@ -553,6 +553,27 @@ mod scene_dsl {
                     })
                 }
             }
+
+            impl #core_crate::scenes::SceneBinding for SceneBindings {
+                fn binding(&self, name: &str) -> ::core::option::Option<#entity_ty> {
+                    match name {
+                        "root" => ::core::option::Option::Some(self.root),
+                        #(
+                            stringify!(#unique_binds) => ::core::option::Option::Some(self.#unique_binds),
+                        )*
+                        _ => ::core::option::Option::None,
+                    }
+                }
+
+                fn binding_names(&self) -> &'static [&'static str] {
+                    &[
+                        "root",
+                        #(
+                            stringify!(#unique_binds),
+                        )*
+                    ]
+                }
+            }
         };
 
         let progress_prelude = if let Some(tx_ident) = &scene.progress_tx {

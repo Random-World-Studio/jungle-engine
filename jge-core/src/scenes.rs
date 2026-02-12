@@ -3,6 +3,7 @@ pub mod file_selector;
 use crate::game::entity::Entity;
 use ::core::future::Future;
 use ::core::pin::Pin;
+use ::std::sync::Arc;
 
 /// 支持把“一个场景/子树值”转换成可挂载的根节点实体。
 ///
@@ -54,6 +55,56 @@ impl<T: SceneRoot + ?Sized> SceneRoot for &T {
 /// `scene!` 会为它生成的 `SceneBindings` 自动实现该 trait。
 pub trait SceneDestroy: Send + Sync {
     fn destroy_boxed<'a>(&'a self) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
+}
+
+/// `scene!` 的返回值应实现的 bindings trait。
+///
+/// 该 trait 是 object-safe 的，使得 `scene!` 的返回值可以用动态 trait 对象传递：
+///
+/// ```no_run
+/// use jge_core::scenes::SceneBinding;
+///
+/// # async fn demo() -> anyhow::Result<()> {
+/// let bindings = jge_core::scene! { node "root" { } }.await?;
+/// let boxed: Box<dyn SceneBinding> = Box::new(bindings);
+/// let _root = boxed.scene_root();
+/// boxed.destroy_boxed().await;
+/// Ok(())
+/// # }
+/// ```
+pub trait SceneBinding: SceneRoot + SceneDestroy {
+    /// 获取某个 `as name` 绑定对应的实体。
+    ///
+    /// - `name = "root"` 一定可用。
+    /// - 其他 name 由 `scene!` 展开生成。
+    fn binding(&self, name: &str) -> Option<Entity>;
+
+    /// 返回当前 bindings 支持的名字列表（包含 `"root"`）。
+    fn binding_names(&self) -> &'static [&'static str];
+}
+
+impl<T: SceneRoot + ?Sized> SceneRoot for Box<T> {
+    fn scene_root(&self) -> Entity {
+        (**self).scene_root()
+    }
+}
+
+impl<T: SceneDestroy + ?Sized> SceneDestroy for Box<T> {
+    fn destroy_boxed<'a>(&'a self) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+        (**self).destroy_boxed()
+    }
+}
+
+impl<T: SceneRoot + ?Sized> SceneRoot for Arc<T> {
+    fn scene_root(&self) -> Entity {
+        (**self).scene_root()
+    }
+}
+
+impl<T: SceneDestroy + ?Sized> SceneDestroy for Arc<T> {
+    fn destroy_boxed<'a>(&'a self) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+        (**self).destroy_boxed()
+    }
 }
 
 /// 把某个值转换为“可选的嵌套 destroy”。

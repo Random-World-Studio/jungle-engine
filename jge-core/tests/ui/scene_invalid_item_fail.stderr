@@ -1,0 +1,5 @@
+error: node 体内只允许：node ...、<expr> node;、with(...) {...}、+ Component ...;、* LogicExpr;
+ --> tests/ui/scene_invalid_item_fail.rs:6:13
+  |
+6 |             1 + 2;
+  |             ^^^^^
