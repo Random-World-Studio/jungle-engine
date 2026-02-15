@@ -225,32 +225,8 @@ impl Scene3D {
         &mut self,
         camera_entity: Entity,
     ) -> Result<(), Scene3DAttachError> {
-        let scene_entity = self.entity();
-
         if camera_entity.get_component::<Camera>().await.is_none() {
             return Err(Scene3DAttachError::MissingCamera(camera_entity));
-        }
-
-        let camera_transform_values = {
-            let transform = camera_entity
-                .get_component::<Transform>()
-                .await
-                .ok_or(Scene3DAttachError::MissingCameraTransform(camera_entity))?;
-            (
-                transform.position(),
-                transform.rotation(),
-                transform.scale(),
-            )
-        };
-
-        {
-            let mut scene_transform = scene_entity
-                .get_component_mut::<Transform>()
-                .await
-                .ok_or(Scene3DAttachError::MissingSceneTransform(scene_entity))?;
-            scene_transform.set_position(camera_transform_values.0);
-            scene_transform.set_rotation(camera_transform_values.1);
-            scene_transform.set_scale(camera_transform_values.2);
         }
 
         self.attached_camera = Some(camera_entity);
@@ -268,31 +244,13 @@ impl Scene3D {
             return Ok(());
         };
 
-        let scene_entity = self.entity();
-
         if camera_entity.get_component::<Camera>().await.is_none() {
             return Err(Scene3DAttachError::MissingCamera(camera_entity));
         }
 
-        let (position, rotation, scale) = {
-            let transform = camera_entity
-                .get_component::<Transform>()
-                .await
-                .ok_or(Scene3DAttachError::MissingCameraTransform(camera_entity))?;
-            (
-                transform.position(),
-                transform.rotation(),
-                transform.scale(),
-            )
-        };
-
-        let mut scene_transform = scene_entity
-            .get_component_mut::<Transform>()
-            .await
-            .ok_or(Scene3DAttachError::MissingSceneTransform(scene_entity))?;
-        scene_transform.set_position(position);
-        scene_transform.set_rotation(rotation);
-        scene_transform.set_scale(scale);
+        if camera_entity.get_component::<Transform>().await.is_none() {
+            return Err(Scene3DAttachError::MissingCameraTransform(camera_entity));
+        }
 
         Ok(())
     }
@@ -301,31 +259,13 @@ impl Scene3D {
         &self,
         camera_entity: Entity,
     ) -> Result<(), Scene3DAttachError> {
-        let scene_entity = self.entity();
-
         if camera_entity.get_component::<Camera>().await.is_none() {
             return Err(Scene3DAttachError::MissingCamera(camera_entity));
         }
 
-        let (position, rotation, scale) = {
-            let transform = camera_entity
-                .get_component::<Transform>()
-                .await
-                .ok_or(Scene3DAttachError::MissingCameraTransform(camera_entity))?;
-            (
-                transform.position(),
-                transform.rotation(),
-                transform.scale(),
-            )
-        };
-
-        let mut scene_transform = scene_entity
-            .get_component_mut::<Transform>()
-            .await
-            .ok_or(Scene3DAttachError::MissingSceneTransform(scene_entity))?;
-        scene_transform.set_position(position);
-        scene_transform.set_rotation(rotation);
-        scene_transform.set_scale(scale);
+        if camera_entity.get_component::<Transform>().await.is_none() {
+            return Err(Scene3DAttachError::MissingCameraTransform(camera_entity));
+        }
 
         Ok(())
     }
@@ -404,11 +344,11 @@ impl Scene3D {
 
         ensure_scene_transform(scene_entity).await?;
 
-        let camera_transform = camera_entity.get_component::<Transform>().await.ok_or(
-            Scene3DVisibilityError::MissingCameraTransform(camera_entity),
-        )?;
-        let camera_position = camera_transform.position();
-        let basis = Camera::orientation_basis(&camera_transform).normalize();
+        let camera_world = Transform::world_matrix(camera_entity)
+            .await
+            .ok_or(Scene3DVisibilityError::MissingCameraTransform(camera_entity))?;
+        let camera_position = Transform::translation_from_matrix(&camera_world);
+        let basis = Transform::basis_from_matrix(&camera_world).normalize();
 
         let layer = scene_entity.get_component::<Layer>().await.ok_or(
             Scene3DVisibilityError::LayerTraversal(LayerTraversalError::MissingLayer(scene_entity)),
@@ -468,15 +408,14 @@ impl Scene3D {
     /// 将摄像机绑定到该 3D 场景。
     ///
     /// 绑定后：
-    /// - 场景实体的 `Transform` 会被同步为摄像机的 `Transform`（用于渲染时以摄像机为视点）。
-    /// - 你可以在每帧渲染前调用 [`sync_camera_transform`](Self::sync_camera_transform) 刷新。
+    /// - `Scene3D` 会记住该摄像机实体，并在可见性查询/渲染时使用它的（层级）世界姿态。
     pub async fn bind_camera(&mut self, camera_entity: Entity) -> Result<(), Scene3DAttachError> {
         self.bind_camera_internal(camera_entity).await
     }
 
-    /// 将当前绑定摄像机的 `Transform` 同步到场景实体。
+    /// 校验当前绑定的摄像机仍然有效。
     ///
-    /// 当你在游戏逻辑里更新了摄像机实体的位置/旋转/缩放后，可在渲染前调用此方法。
+    /// 该函数不会修改场景实体的 `Transform`；渲染/可见性计算会直接读取摄像机的（层级）世界姿态。
     pub async fn sync_camera_transform(&self) -> Result<(), Scene3DAttachError> {
         self.sync_camera_transform_internal().await
     }
@@ -1153,8 +1092,8 @@ mod tests {
                 .get_component::<Transform>()
                 .await
                 .expect("场景应持有 Transform");
-            assert_eq!(transform.position(), Vector3::new(3.0, 2.0, -5.0));
-            assert_eq!(transform.rotation(), Vector3::new(0.1, 0.2, 0.0));
+            assert_eq!(transform.position(), Vector3::zeros());
+            assert_eq!(transform.rotation(), Vector3::zeros());
         }
 
         if let Some(mut transform) = camera.get_component_mut::<Transform>().await {
@@ -1178,8 +1117,8 @@ mod tests {
                 .get_component::<Transform>()
                 .await
                 .expect("场景应持有 Transform");
-            assert_eq!(transform.position(), Vector3::new(-2.0, 1.5, -3.0));
-            assert_eq!(transform.rotation(), Vector3::new(-0.1, 0.3, 0.2));
+            assert_eq!(transform.position(), Vector3::zeros());
+            assert_eq!(transform.rotation(), Vector3::zeros());
         }
 
         {

@@ -3,14 +3,13 @@ mod depth;
 mod material;
 mod pipeline;
 
-use nalgebra::{Matrix4, Perspective3, Point3, Rotation3, Vector3};
+use nalgebra::{Matrix4, Perspective3, Point3, Vector3};
 use tokio::runtime::Runtime;
 use tracing::{trace, warn};
 use wgpu::{self, util::DeviceExt};
 
 use crate::game::{
     component::{
-        ComponentRead,
         camera::Camera,
         layer::{Layer, LayerTraversalError, RenderPipelineStage},
         light::{Light, ParallelLight, PointLight},
@@ -40,13 +39,6 @@ pub(in crate::game::system::render) struct Scene3DDraw {
 }
 
 impl RenderSystem {
-    pub(in crate::game::system::render) fn try_get_transform(
-        runtime: &Runtime,
-        entity: Entity,
-    ) -> Option<ComponentRead<Transform>> {
-        camera::try_get_transform(runtime, entity)
-    }
-
     pub(in crate::game::system::render) fn select_scene3d_camera(
         runtime: &Runtime,
         root: Entity,
@@ -246,21 +238,20 @@ impl RenderSystem {
             }
         };
 
-        let transform_guard = match Self::try_get_transform(runtime, camera_entity) {
-            Some(transform) => transform,
+        let camera_world = match runtime.block_on(Transform::world_matrix(camera_entity)) {
+            Some(matrix) => matrix,
             None => {
                 warn!(
                     target: "jge-core",
                     layer_id = %entity.id(),
                     camera_id = %camera_entity.id(),
-                    "Scene3D camera missing Transform component"
+                    "Scene3D camera missing (hierarchical) Transform"
                 );
                 return;
             }
         };
-        let camera_position = transform_guard.position();
-        let basis = Camera::orientation_basis(&transform_guard).normalize();
-        drop(transform_guard);
+        let camera_position = Transform::translation_from_matrix(&camera_world);
+        let basis = Transform::basis_from_matrix(&camera_world).normalize();
 
         let point_light_entities = match runtime.block_on(Layer::point_light_entities(entity)) {
             Ok(lights) => lights,
@@ -305,11 +296,10 @@ impl RenderSystem {
             .filter_map(|light_entity| {
                 let light = runtime.block_on(light_entity.get_component::<Light>())?;
                 let point = runtime.block_on(light_entity.get_component::<PointLight>())?;
-                let transform = runtime.block_on(light_entity.get_component::<Transform>())?;
+                let world = runtime.block_on(Transform::world_matrix(light_entity))?;
                 let radius = point.distance();
                 let intensity = light.lightness();
-                let position = transform.position();
-                drop(transform);
+                let position = Transform::translation_from_matrix(&world);
                 drop(point);
                 drop(light);
                 if radius <= f32::EPSILON || intensity <= 0.0 {
@@ -328,17 +318,14 @@ impl RenderSystem {
             .filter_map(|light_entity| {
                 let light = runtime.block_on(light_entity.get_component::<Light>())?;
                 let parallel = runtime.block_on(light_entity.get_component::<ParallelLight>())?;
-                let transform = runtime.block_on(light_entity.get_component::<Transform>())?;
-                let rotation = transform.rotation();
+                let world = runtime.block_on(Transform::world_matrix(light_entity))?;
                 let intensity = light.lightness();
-                drop(transform);
                 drop(parallel);
                 drop(light);
                 if intensity <= 0.0 {
                     return None;
                 }
-                let rotation_matrix =
-                    Rotation3::from_euler_angles(rotation.x, rotation.y, rotation.z);
+                let rotation_matrix = world.fixed_view::<3, 3>(0, 0).into_owned();
                 let forward = rotation_matrix * Vector3::new(0.0, -1.0, 0.0);
                 let incoming = -forward;
                 incoming

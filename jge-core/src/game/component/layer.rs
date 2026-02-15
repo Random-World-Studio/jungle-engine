@@ -302,12 +302,9 @@ impl Layer {
                 continue;
             }
 
-            let transform_guard = match entity.get_component::<Transform>().await {
-                Some(transform) => transform,
-                None => continue,
+            let Some(matrix) = Transform::world_matrix(entity).await else {
+                continue;
             };
-            let matrix = transform_guard.matrix();
-            drop(transform_guard);
 
             let mut world_triangles = Vec::with_capacity(triangle_count);
             for (a, b, c) in shape_guard.triangles() {

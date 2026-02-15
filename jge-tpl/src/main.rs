@@ -7,7 +7,7 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{Context, anyhow};
+use anyhow::{Context, anyhow, ensure};
 use async_trait::async_trait;
 use nalgebra::{Vector2, Vector3};
 
@@ -348,14 +348,6 @@ async fn build_demo_scene() -> anyhow::Result<Entity> {
                     Ok(())
                 }
 
-                with(scene: Scene3D) {
-                    scene
-                        .sync_camera_transform()
-                        .await
-                        .context("同步 Scene3D 摄像机变换失败")?;
-                    Ok(())
-                }
-
                 node "ground" {
                     + Shape::from_triangles(ground_triangles());
                     with(mut transform: Transform) {
@@ -420,7 +412,19 @@ async fn build_demo_scene() -> anyhow::Result<Entity> {
                         Ok(())
                     };
 
-                    * CubeLogic;
+                    node "triangle_under_cube" as cube_child_triangle {
+                        + Shape::from_triangles(triangle_triangles());
+                        with(mut transform: Transform) {
+                            // 子节点 Transform 是 local（相对 cube）。
+                            // 运行时不更新该三角形的位置；它应当仅通过层级继承跟随 cube 移动。
+                            transform.set_position(Vector3::new(0.0, -1.25, 0.0));
+                            transform.set_rotation(Vector3::new(0.0, 0.0, 0.0));
+                            transform.set_scale(Vector3::new(1.0, 1.0, 1.0));
+                            Ok(())
+                        }
+                    }
+
+                    * CubeLogic::new(cube_child_triangle);
 
                     with(mut transform: Transform) {
                         transform.set_position(Vector3::new(-3.0, 0.5, 0.0));
@@ -861,11 +865,35 @@ fn compute_cube_uv_patches(
     Ok(patches)
 }
 
-struct CubeLogic;
+struct CubeLogic {
+    child_triangle: Entity,
+    child_local_pos: Option<Vector3<f32>>,
+    child_local_rot: Option<Vector3<f32>>,
+    child_local_scale: Option<Vector3<f32>>,
+}
+
+impl CubeLogic {
+    fn new(child_triangle: Entity) -> Self {
+        Self {
+            child_triangle,
+            child_local_pos: None,
+            child_local_rot: None,
+            child_local_scale: None,
+        }
+    }
+}
 
 #[async_trait]
 impl GameLogic for CubeLogic {
     async fn on_attach(&mut self, _entity: Entity) -> anyhow::Result<()> {
+        let child_transform = self
+            .child_triangle
+            .get_component::<Transform>()
+            .await
+            .ok_or_else(|| anyhow!("cube child triangle missing Transform"))?;
+        self.child_local_pos = Some(child_transform.position());
+        self.child_local_rot = Some(child_transform.rotation());
+        self.child_local_scale = Some(child_transform.scale());
         Ok(())
     }
 
@@ -874,6 +902,44 @@ impl GameLogic for CubeLogic {
             let new_pos = trans.position() + Vector3::new(1., 0., 0.) * 0.8 * delta.as_secs_f32();
             trans.set_position(new_pos);
         }
+
+        // 验证：运行时不修改子三角形 local Transform，但 world 会跟随 cube（父 * 子）。
+        let child_transform = self
+            .child_triangle
+            .get_component::<Transform>()
+            .await
+            .ok_or_else(|| anyhow!("cube child triangle missing Transform"))?;
+
+        if let Some(expected) = self.child_local_pos {
+            let got = child_transform.position();
+            ensure!((got - expected).norm() <= 1.0e-5, "child triangle local position was modified at runtime: got={:?} expected={:?}", got, expected);
+        }
+        if let Some(expected) = self.child_local_rot {
+            let got = child_transform.rotation();
+            ensure!((got - expected).norm() <= 1.0e-5, "child triangle local rotation was modified at runtime: got={:?} expected={:?}", got, expected);
+        }
+        if let Some(expected) = self.child_local_scale {
+            let got = child_transform.scale();
+            ensure!((got - expected).norm() <= 1.0e-5, "child triangle local scale was modified at runtime: got={:?} expected={:?}", got, expected);
+        }
+
+        let cube_world = Transform::world_matrix(entity)
+            .await
+            .ok_or_else(|| anyhow!("cube missing hierarchical Transform"))?;
+        let child_world = Transform::world_matrix(self.child_triangle)
+            .await
+            .ok_or_else(|| anyhow!("child triangle missing hierarchical Transform"))?;
+
+        let expected_child_world = cube_world * child_transform.matrix();
+        let expected_pos = Transform::translation_from_matrix(&expected_child_world);
+        let got_pos = Transform::translation_from_matrix(&child_world);
+        ensure!(
+            (got_pos - expected_pos).norm() <= 5.0e-4,
+            "hierarchical transform mismatch: child world pos={:?}, expected={:?}",
+            got_pos,
+            expected_pos
+        );
+
         Ok(())
     }
 

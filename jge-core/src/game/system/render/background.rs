@@ -17,7 +17,7 @@ use super::cache::LayerRenderContext;
 use super::resource_io;
 use super::snapshot::BackgroundSnapshot;
 use super::util;
-use crate::game::component::{camera::Camera, scene3d::Scene3D};
+use crate::game::component::{scene3d::Scene3D, transform::Transform};
 
 const BACKGROUND_VERTEX_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
     array_stride: (4 * std::mem::size_of::<f32>()) as wgpu::BufferAddress,
@@ -586,14 +586,13 @@ fn resolve_layer_camera(runtime: &Runtime, layer_entity: Entity) -> ([f32; 3], [
         Err(_) => return ([0.0, 0.0, 0.0], [0.0, 0.0, -1.0]),
     };
 
-    let transform_guard = match RenderSystem::try_get_transform(runtime, camera_entity) {
-        Some(transform) => transform,
+    let world = match runtime.block_on(Transform::world_matrix(camera_entity)) {
+        Some(matrix) => matrix,
         None => return ([0.0, 0.0, 0.0], [0.0, 0.0, -1.0]),
     };
 
-    let position = transform_guard.position();
-    let basis = Camera::orientation_basis(&transform_guard).normalize();
-    drop(transform_guard);
+    let position = Transform::translation_from_matrix(&world);
+    let basis = Transform::basis_from_matrix(&world).normalize();
 
     (
         [position.x, position.y, position.z],

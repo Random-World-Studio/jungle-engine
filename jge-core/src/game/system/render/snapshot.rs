@@ -23,7 +23,7 @@ use crate::resource::ResourceHandle;
 
 use super::{cache::LayerViewportPixels, util};
 
-use nalgebra::{Matrix4, Perspective3, Point3, Rotation3, Vector3};
+use nalgebra::{Matrix4, Perspective3, Point3, Vector3};
 use crate::{Aabb3};
 
 use crate::game::component::{
@@ -312,10 +312,10 @@ async fn build_layer_snapshot(
                     });
 
             if fov_ok
-                && let Some(transform_guard) = camera_entity.get_component::<Transform>().await
+                && let Some(world) = Transform::world_matrix(camera_entity).await
             {
-                let pos = transform_guard.position();
-                let basis = Camera::orientation_basis(&transform_guard).normalize();
+                let pos = Transform::translation_from_matrix(&world);
+                let basis = Transform::basis_from_matrix(&world).normalize();
                 camera_pose = Some((
                     [pos.x, pos.y, pos.z],
                     [basis.forward.x, basis.forward.y, basis.forward.z],
@@ -417,8 +417,8 @@ async fn build_scene2d_snapshot(
         }
 
         let point = entity.get_component::<PointLight>().await;
-        let transform = entity.get_component::<Transform>().await;
-        let (Some(point), Some(transform)) = (point, transform) else {
+        let world = Transform::world_matrix(*entity).await;
+        let (Some(point), Some(world)) = (point, world) else {
             continue;
         };
 
@@ -427,7 +427,7 @@ async fn build_scene2d_snapshot(
             continue;
         }
 
-        let position = transform.position();
+        let position = Transform::translation_from_matrix(&world);
         point_lights.push(Scene2DPointLightSnapshot {
             center: [position.x, position.y],
             radius,
@@ -497,10 +497,9 @@ async fn build_scene3d_snapshot(
         .ok()?;
     drop(scene_guard);
 
-    let transform_guard = camera_entity.get_component::<Transform>().await?;
-    let camera_position = transform_guard.position();
-    let basis = Camera::orientation_basis(&transform_guard).normalize();
-    drop(transform_guard);
+    let camera_world = Transform::world_matrix(camera_entity).await?;
+    let camera_position = Transform::translation_from_matrix(&camera_world);
+    let basis = Transform::basis_from_matrix(&camera_world).normalize();
 
     let camera_pose = (
         [camera_position.x, camera_position.y, camera_position.z],
@@ -538,8 +537,8 @@ async fn build_scene3d_snapshot(
 
         if entity.get_component::<PointLight>().await.is_some() {
             let point = entity.get_component::<PointLight>().await;
-            let transform = entity.get_component::<Transform>().await;
-            let (Some(point), Some(transform)) = (point, transform) else {
+            let world = Transform::world_matrix(*entity).await;
+            let (Some(point), Some(world)) = (point, world) else {
                 continue;
             };
 
@@ -548,7 +547,7 @@ async fn build_scene3d_snapshot(
                 continue;
             }
 
-            let position = transform.position();
+            let position = Transform::translation_from_matrix(&world);
             point_lights.push(Scene3DPointLightSnapshot {
                 position: [position.x, position.y, position.z],
                 radius,
@@ -562,13 +561,12 @@ async fn build_scene3d_snapshot(
             continue;
         }
 
-        let transform = entity.get_component::<Transform>().await;
-        let Some(transform) = transform else {
+        let world = Transform::world_matrix(*entity).await;
+        let Some(world) = world else {
             continue;
         };
 
-        let rotation = transform.rotation();
-        let rotation_matrix = Rotation3::from_euler_angles(rotation.x, rotation.y, rotation.z);
+        let rotation_matrix = world.fixed_view::<3, 3>(0, 0).into_owned();
         let forward = rotation_matrix * Vector3::new(0.0, -1.0, 0.0);
         let incoming = -forward;
         let Some(direction) = incoming.try_normalize(1.0e-6) else {

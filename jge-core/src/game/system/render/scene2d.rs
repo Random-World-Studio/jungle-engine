@@ -476,11 +476,10 @@ impl RenderSystem {
             .filter_map(|light_entity| {
                 let light = runtime.block_on(light_entity.get_component::<Light>())?;
                 let point = runtime.block_on(light_entity.get_component::<PointLight>())?;
-                let transform = runtime.block_on(light_entity.get_component::<Transform>())?;
+                let world = runtime.block_on(Transform::world_matrix(light_entity))?;
                 let radius = point.distance();
                 let lightness = light.lightness();
-                let position = transform.position();
-                drop(transform);
+                let position = Transform::translation_from_matrix(&world);
                 drop(point);
                 drop(light);
                 if radius <= f32::EPSILON || lightness <= 0.0 {

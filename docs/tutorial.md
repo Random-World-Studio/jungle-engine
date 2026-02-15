@@ -98,13 +98,7 @@ async fn build_scene(engine_root: Entity) -> anyhow::Result<()> {
                     scene.bind_camera(camera).await.context("绑定摄像机失败")?;
                     Ok(())
                 }
-                with(scene: Scene3D) {
-                    scene
-                        .sync_camera_transform()
-                        .await
-                        .context("同步摄像机变换失败")?;
-                    Ok(())
-                }
+                // `sync_camera_transform()` 现在只做“摄像机仍然有效”的校验；渲染/可见性会直接读取摄像机的层级世界姿态。
 
                 // 一个地面（两个三角形）
                 node "ground" {
