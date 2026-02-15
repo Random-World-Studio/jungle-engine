@@ -8,7 +8,7 @@
 //! - 支持从系统字体或资源字体文件（ttf/otf/ttc）加载
 //! - 支持按颜色与偏移绘制阴影
 
-use std::{io::Cursor, sync::Arc};
+use std::{collections::HashMap, io::Cursor, sync::Arc};
 
 use anyhow::{Context, anyhow};
 use image::{DynamicImage, ImageFormat, RgbaImage};
@@ -281,10 +281,7 @@ fn draw_layout_pass(
 
 fn load_fontdue_font(font: &Font) -> anyhow::Result<fontdue::Font> {
     let (bytes, collection_index): (Arc<[u8]>, u32) = match font {
-        Font::System(name) => {
-            let (bytes, index) = load_system_font_bytes(name)?;
-            (Arc::<[u8]>::from(bytes), index)
-        }
+        Font::System(name) => load_system_font_bytes(name)?,
         Font::Resource(handle, face_name) => {
             let bytes = load_bytes_from_resource(handle)?;
             let index = find_face_index_in_bytes(bytes.as_ref(), face_name)?;
@@ -316,30 +313,59 @@ fn load_bytes_from_resource(handle: &ResourceHandle) -> anyhow::Result<Arc<[u8]>
     Ok(bytes)
 }
 
-fn load_system_font_bytes(name: &str) -> anyhow::Result<(Vec<u8>, u32)> {
-    use fontdb::{Database, Family, Query};
+struct SystemFontCache {
+    db: fontdb::Database,
+    by_name: HashMap<String, (Arc<[u8]>, u32)>,
+}
 
-    let mut db = Database::new();
-    db.load_system_fonts();
+fn system_font_cache() -> &'static crate::sync::Mutex<SystemFontCache> {
+    use std::sync::OnceLock;
+
+    static CACHE: OnceLock<crate::sync::Mutex<SystemFontCache>> = OnceLock::new();
+    CACHE.get_or_init(|| {
+        let mut db = fontdb::Database::new();
+        db.load_system_fonts();
+        crate::sync::Mutex::new(SystemFontCache {
+            db,
+            by_name: HashMap::new(),
+        })
+    })
+}
+
+fn load_system_font_bytes(name: &str) -> anyhow::Result<(Arc<[u8]>, u32)> {
+    use fontdb::{Family, Query};
+
+    let cache_mutex = system_font_cache();
+    let mut cache = cache_mutex.lock();
+
+    if let Some((bytes, face_index)) = cache.by_name.get(name) {
+        return Ok((bytes.clone(), *face_index));
+    }
 
     let query = Query {
         families: &[Family::Name(name)],
         ..Query::default()
     };
 
-    let id = db
+    let id = cache
+        .db
         .query(&query)
         .ok_or_else(|| anyhow!("system font not found: {name}"))?;
 
-    let mut out_bytes: Option<Vec<u8>> = None;
+    let mut out_bytes: Option<Arc<[u8]>> = None;
     let mut out_index: u32 = 0;
 
-    db.with_face_data(id, |data, face_index| {
-        out_bytes = Some(data.to_vec());
+    cache.db.with_face_data(id, |data, face_index| {
+        out_bytes = Some(Arc::<[u8]>::from(data.to_vec()));
         out_index = face_index;
     });
 
     let bytes = out_bytes.ok_or_else(|| anyhow!("failed to read system font data: {name}"))?;
+
+    cache
+        .by_name
+        .insert(name.to_string(), (bytes.clone(), out_index));
+
     Ok((bytes, out_index))
 }
 

@@ -852,6 +852,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn visible_faces_no_longer_requires_lod_warmup() {
         let root = Entity::new().await.expect("应能创建根实体");
+        crate::game::reachability::register_engine_root(root);
         register_layer_scene(root).await;
 
         let child = Entity::new().await.expect("应能创建子实体");
@@ -879,6 +880,8 @@ mod tests {
         let _ = Scene2D::remove(root).await;
         let _ = Layer::remove(root).await;
         let _ = Renderable::remove(root).await;
+
+        crate::game::reachability::unregister_engine_root(root);
 
         let _ = Shape::remove(child).await;
         let _ = Transform::remove(child).await;
@@ -916,6 +919,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn visible_faces_excludes_fully_occluded_triangles() {
         let root = Entity::new().await.expect("应能创建根实体");
+        crate::game::reachability::register_engine_root(root);
         register_layer_scene(root).await;
 
         let back = Entity::new().await.expect("应能创建后景实体");
@@ -955,6 +959,8 @@ mod tests {
         let _ = Layer::remove(root).await;
         let _ = Renderable::remove(root).await;
 
+        crate::game::reachability::unregister_engine_root(root);
+
         let _ = Shape::remove(front).await;
         let _ = Transform::remove(front).await;
         let _ = Renderable::remove(front).await;
@@ -966,6 +972,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn visible_faces_keep_partially_occluded_triangles() {
         let root = Entity::new().await.expect("应能创建根实体");
+        crate::game::reachability::register_engine_root(root);
         register_layer_scene(root).await;
 
         let partial = Entity::new().await.expect("应能创建部分遮挡实体");
@@ -1007,6 +1014,8 @@ mod tests {
         let _ = Layer::remove(root).await;
         let _ = Renderable::remove(root).await;
 
+        crate::game::reachability::unregister_engine_root(root);
+
         let _ = Shape::remove(ground).await;
         let _ = Transform::remove(ground).await;
         let _ = Renderable::remove(ground).await;
@@ -1018,6 +1027,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn visible_faces_ignores_disabled_renderables() {
         let root = Entity::new().await.expect("应能创建根实体");
+        crate::game::reachability::register_engine_root(root);
         register_layer_scene(root).await;
 
         let visible_entity = Entity::new().await.expect("应能创建可见实体");
@@ -1064,6 +1074,8 @@ mod tests {
         let _ = Scene2D::remove(root).await;
         let _ = Layer::remove(root).await;
         let _ = Renderable::remove(root).await;
+
+        crate::game::reachability::unregister_engine_root(root);
 
         let _ = Shape::remove(hidden_entity).await;
         let _ = Transform::remove(hidden_entity).await;
