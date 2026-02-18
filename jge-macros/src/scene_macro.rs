@@ -20,6 +20,7 @@ fn is_rust_analyzer_env() -> bool {
 
 mod scene_dsl {
     use super::*;
+    use proc_macro2::{TokenStream as TokenStream2, TokenTree};
     use quote::quote_spanned;
     use syn::braced;
     use syn::spanned::Spanned;
@@ -57,8 +58,8 @@ mod scene_dsl {
     }
 
     pub struct ProgressDecl {
-        pub phase_i: usize,
-        pub phase_n: usize,
+        pub phase_i: Expr,
+        pub phase_n: Expr,
         pub sender: Expr,
     }
 
@@ -81,30 +82,72 @@ mod scene_dsl {
                 let (phase_i, phase_n) = if input.peek(syn::token::Paren) {
                     let content;
                     parenthesized!(content in input);
-                    let i_lit: syn::LitInt = content.parse()?;
-                    content.parse::<Token![/]>()?;
-                    let n_lit: syn::LitInt = content.parse()?;
-                    if !content.is_empty() {
-                        return Err(
-                            content.error("progress(i/n) 括号内只允许形如 `1/3` 的两个整数")
-                        );
+
+                    // 这里不能直接用 `Expr::parse`，因为它会把 `i / n` 解析成一个二元表达式。
+                    // 我们需要把 `progress(i/n)` 的 `/` 当作“分隔符”，因此先按顶层 `/` 拆分 token，再分别 parse 成 Expr。
+                    let mut left = TokenStream2::new();
+                    let mut right = TokenStream2::new();
+                    let mut seen_slash = false;
+
+                    while !content.is_empty() {
+                        if !seen_slash && content.peek(Token![/]) {
+                            let _ = content.parse::<Token![/]>()?;
+                            seen_slash = true;
+                            continue;
+                        }
+
+                        let tt: TokenTree = content.parse()?;
+                        if seen_slash {
+                            right.extend([tt]);
+                        } else {
+                            left.extend([tt]);
+                        }
                     }
 
-                    let i: usize = i_lit.base10_parse().map_err(|e| {
-                        syn::Error::new_spanned(&i_lit, format!("progress 阶段 i 解析失败：{e}"))
-                    })?;
-                    let n: usize = n_lit.base10_parse().map_err(|e| {
-                        syn::Error::new_spanned(&n_lit, format!("progress 阶段 n 解析失败：{e}"))
-                    })?;
-                    if n == 0 {
-                        return Err(syn::Error::new_spanned(
-                            &n_lit,
-                            "progress 阶段总数 n 必须 > 0",
+                    if !seen_slash {
+                        return Err(syn::Error::new(
+                            input.span(),
+                            "progress(i/n) 必须包含一个 `/` 分隔符（例如 `progress(0/1) tx;`）",
                         ));
                     }
-                    (i, n)
+                    if left.is_empty() || right.is_empty() {
+                        return Err(syn::Error::new(
+                            input.span(),
+                            "progress(i/n) 的 i 和 n 不能为空；请写成 `progress(<usize_expr>/<usize_expr>) tx;`",
+                        ));
+                    }
+
+                    let phase_i: Expr = syn::parse2(left).map_err(|e| {
+                        syn::Error::new(
+                            input.span(),
+                            format!("progress(i/n) 中 i 解析为表达式失败：{e}"),
+                        )
+                    })?;
+                    let phase_n: Expr = syn::parse2(right).map_err(|e| {
+                        syn::Error::new(
+                            input.span(),
+                            format!("progress(i/n) 中 n 解析为表达式失败：{e}"),
+                        )
+                    })?;
+
+                    // 如果 n 是整数字面量：仍然在编译期做 n>0 校验，给出更友好的错误。
+                    if let Expr::Lit(expr_lit) = &phase_n
+                        && let syn::Lit::Int(n_lit) = &expr_lit.lit
+                    {
+                        let n: usize = n_lit.base10_parse().map_err(|e| {
+                            syn::Error::new_spanned(n_lit, format!("progress 阶段 n 解析失败：{e}"))
+                        })?;
+                        if n == 0 {
+                            return Err(syn::Error::new_spanned(
+                                n_lit,
+                                "progress 阶段总数 n 必须 > 0",
+                            ));
+                        }
+                    }
+
+                    (phase_i, phase_n)
                 } else {
-                    (0, 1)
+                    (syn::parse_quote!(0usize), syn::parse_quote!(1usize))
                 };
 
                 let sender: Expr = input.parse()?;
@@ -465,6 +508,8 @@ mod scene_dsl {
         let progress_tx_ident = format_ident!("__jge_scene_progress_tx");
         let progress_step_ident = format_ident!("__jge_scene_progress_step");
         let progress_total_ident = format_ident!("__jge_scene_progress_total");
+        let progress_phase_i_ident = format_ident!("__jge_scene_progress_phase_i");
+        let progress_phase_n_ident = format_ident!("__jge_scene_progress_phase_n");
 
         let progress_frame_ty = quote!(#core_crate::ProgressFrame);
         let progress_ctx = scene.progress.as_ref().map(|_| ProgressCtx {
@@ -625,18 +670,26 @@ mod scene_dsl {
 
         let progress_prelude = if let Some(progress_decl) = &scene.progress {
             let sender_expr = &progress_decl.sender;
-            let phase_i = progress_decl.phase_i;
-            let phase_n = progress_decl.phase_n;
+            let phase_i_expr = &progress_decl.phase_i;
+            let phase_n_expr = &progress_decl.phase_n;
             let frame_ty = &progress_frame_ty;
             quote! {
                 let #progress_total_ident: usize = #progress_total_steps;
                 let mut #progress_step_ident: usize = 0;
+
+                let #progress_phase_i_ident: usize = (#phase_i_expr);
+                let #progress_phase_n_ident: usize = (#phase_n_expr);
+                ::core::assert!(
+                    #progress_phase_n_ident > 0,
+                    "progress 阶段总数 n 必须 > 0"
+                );
+
                 let __jge_scene_progress_sender: ::tokio::sync::mpsc::Sender<#frame_ty> = #sender_expr;
                 let #progress_tx_ident: ::core::option::Option<::tokio::sync::mpsc::Sender<#frame_ty>> =
                     ::core::option::Option::Some(__jge_scene_progress_sender);
 
                 if let ::core::option::Option::Some(__tx) = &#progress_tx_ident {
-                    let _ = __tx.send(#frame_ty::Phase(#phase_i, #phase_n)).await;
+                    let _ = __tx.send(#frame_ty::Phase(#progress_phase_i_ident, #progress_phase_n_ident)).await;
                     let _ = __tx.send(#frame_ty::Progress(0.0)).await;
                 }
             }
@@ -644,19 +697,17 @@ mod scene_dsl {
             quote! {}
         };
 
-        let progress_epilogue = if let Some(progress_decl) = &scene.progress {
-            let phase_i = progress_decl.phase_i;
-            let phase_n = progress_decl.phase_n;
+        let progress_epilogue = if scene.progress.is_some() {
             let frame_ty = &progress_frame_ty;
 
-            if phase_n > 0 && phase_i + 1 == phase_n {
-                quote! {
+            quote! {
+                if #progress_phase_i_ident + 1 == #progress_phase_n_ident {
                     if let ::core::option::Option::Some(__tx) = &#progress_tx_ident {
-                        let _ = __tx.send(#frame_ty::Phase(#phase_n, #phase_n)).await;
+                        let _ = __tx
+                            .send(#frame_ty::Phase(#progress_phase_n_ident, #progress_phase_n_ident))
+                            .await;
                     }
                 }
-            } else {
-                quote! {}
             }
         } else {
             quote! {}

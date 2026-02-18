@@ -61,7 +61,7 @@ pub enum ProgressFrame {
 /// - （可选）在最外层声明 `progress(i/n) sender_expr;`，用于汇报构造进度。
 ///   - 语法有两种：
 ///     - `progress sender_expr;`（缺省阶段为 `0/1`）
-///     - `progress(i/n) sender_expr;`（显式阶段；`i` 从 `0` 开始计数；`n > 0`）
+///     - `progress(i/n) sender_expr;`（显式阶段；`i`/`n` 都是 `usize` 表达式；整数字面量会在上下文中推导为 `usize`；`i` 从 `0` 开始计数；`n > 0`）
 ///   - `sender_expr` 类型为 `tokio::sync::mpsc::Sender<ProgressFrame>`（会被 move 进宏生成的 future；如需复用请传 `sender.clone()`）
 ///   - 宏会发送：`ProgressFrame::Phase(i, n)` + 若干 `ProgressFrame::Progress(p)`（开始时会尽力先发 `Progress(0.0)`；结束时会尽力发到 `Progress(1.0)`）
 ///   - 若 `i == n - 1`（最后阶段）：宏会在成功返回前额外发送 `ProgressFrame::Phase(n, n)` 作为“阶段完成”标记（当前实现会在最后一次进度 tick 之后发送）

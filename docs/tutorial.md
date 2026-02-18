@@ -237,6 +237,9 @@ progress sender_expr;
 progress(1/3) sender_expr;
 ```
 
+`progress(i/n)` 中的 `i` / `n` 都是 `usize` 表达式：你可以传 `const`、变量、函数返回值等；
+整数字面量也会在这里的类型上下文中自动推导为 `usize`。
+
 其中 `sender_expr` 类型为 `tokio::sync::mpsc::Sender<jge_core::ProgressFrame>`（会被 move 进宏生成的 future；如需复用请传 `sender_expr.clone()`）。
 宏会在构造流程推进时发送 `ProgressFrame`：
 

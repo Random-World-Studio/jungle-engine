@@ -1,0 +1,5 @@
+error: progress 阶段总数 n 必须 > 0
+ --> tests/ui/scene_progress_n_zero_literal_fail.rs:7:20
+  |
+7 |         progress(0/0) tx;
+  |                    ^

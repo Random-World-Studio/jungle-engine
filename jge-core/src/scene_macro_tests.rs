@@ -120,6 +120,27 @@ async fn scene_macro_progress_can_specify_phase() -> anyhow::Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn scene_macro_progress_can_use_usize_expr() -> anyhow::Result<()> {
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<ProgressFrame>(64);
+    let progress_tx = tx.clone();
+
+    let i: usize = 2;
+    let n: usize = 5;
+
+    let _bindings = crate::scene! {
+        progress(i/n) progress_tx;
+        node "root" { }
+    }
+    .await?;
+
+    drop(tx);
+
+    let first = rx.recv().await.expect("should receive at least one frame");
+    assert_eq!(first, ProgressFrame::Phase(2, 5));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn scene_macro_progress_last_phase_sends_terminal_phase() -> anyhow::Result<()> {
     let (tx, mut rx) = tokio::sync::mpsc::channel::<ProgressFrame>(64);
     let progress_tx = tx.clone();
@@ -147,6 +168,30 @@ async fn scene_macro_progress_last_phase_sends_terminal_phase() -> anyhow::Resul
         "Phase(5,5) 应为最后一帧"
     );
     Ok(())
+}
+
+#[test]
+fn scene_macro_progress_runtime_n_zero_panics() {
+    let rt = tokio::runtime::Runtime::new().expect("create tokio runtime");
+
+    let result = std::panic::catch_unwind(|| {
+        rt.block_on(async {
+            let (tx, _rx) = tokio::sync::mpsc::channel::<ProgressFrame>(1);
+            let progress_tx = tx.clone();
+
+            let i: usize = 0;
+            let n: usize = 0;
+
+            // n 不是字面量时，宏会在运行期 assert!(n>0)。
+            let _ = crate::scene! {
+                progress(i/n) progress_tx;
+                node "root" { }
+            }
+            .await;
+        })
+    });
+
+    assert!(result.is_err(), "n==0 时应 panic");
 }
 
 #[tokio::test(flavor = "multi_thread")]
