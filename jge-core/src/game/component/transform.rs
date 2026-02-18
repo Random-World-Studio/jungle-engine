@@ -187,17 +187,15 @@ impl Transform {
             .try_normalize(1.0e-6)
             .unwrap_or(Vector3::new(0.0, 0.0, -1.0));
 
-        crate::game::component::camera::CameraBasis {
-            forward,
-            up,
-            right,
-        }
+        crate::game::component::camera::CameraBasis { forward, up, right }
     }
 
     /// 将 world matrix 分解为 (position, euler_rotation_xyz, scale)。
     ///
     /// 仅支持无剪切（shear）的 TRS 矩阵；若缩放分量接近 0，会返回 `None`。
-    pub fn decompose_trs(matrix: &Matrix4<f32>) -> Option<(Vector3<f32>, Vector3<f32>, Vector3<f32>)> {
+    pub fn decompose_trs(
+        matrix: &Matrix4<f32>,
+    ) -> Option<(Vector3<f32>, Vector3<f32>, Vector3<f32>)> {
         let position = Self::translation_from_matrix(matrix);
 
         let m3: Matrix3<f32> = matrix.fixed_view::<3, 3>(0, 0).into_owned();
@@ -216,7 +214,8 @@ impl Transform {
         let r0 = col0 / sx;
         let r1 = col1 / sy;
         let r2 = col2 / sz;
-        let rot_matrix = Matrix3::from_columns(&[r0.into_owned(), r1.into_owned(), r2.into_owned()]);
+        let rot_matrix =
+            Matrix3::from_columns(&[r0.into_owned(), r1.into_owned(), r2.into_owned()]);
         let rotation = Rotation3::from_matrix_unchecked(rot_matrix);
         let (rx, ry, rz) = rotation.euler_angles();
         let euler = Vector3::new(rx, ry, rz);

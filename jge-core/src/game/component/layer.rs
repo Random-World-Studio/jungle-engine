@@ -869,6 +869,11 @@ mod tests {
         attach_node(nested_root, child_b, "应能挂载 nested_root").await;
         attach_node(nested_child, nested_root, "应能挂载 nested_child").await;
 
+        // Renderable 的实际可见性由“从引擎根可达”驱动。
+        // 测试套件可能并行运行且其它测试会创建 Game（ENGINE_ROOTS 非空），
+        // 因此这里显式注册根，避免依赖“ENGINE_ROOTS 为空 => 全部可达”的隐式前提。
+        crate::game::reachability::register_engine_root(root);
+
         // 注册可渲染组件
         let _ = root
             .register_component(Renderable::new())
@@ -912,6 +917,7 @@ mod tests {
         assert!(nested_renderables.is_empty());
 
         // 清理（按照叶 -> 根顺序）
+        crate::game::reachability::unregister_engine_root(root);
         cleanup(&nested_child).await;
         cleanup(&nested_root).await;
         cleanup(&child_b).await;
@@ -934,6 +940,9 @@ mod tests {
         attach_node(light_a, root, "应能挂载光源 A 到根").await;
         attach_node(nested_root, root, "应能挂载 nested_root").await;
         attach_node(light_b, nested_root, "应能挂载光源 B 到嵌套 Layer").await;
+
+        // Renderable 的实际可见性由“从引擎根可达”驱动；显式注册根避免并行测试 flake。
+        crate::game::reachability::register_engine_root(root);
 
         let _ = root
             .register_component(Renderable::new())
@@ -1021,6 +1030,7 @@ mod tests {
             "嵌套 Layer 的光源应由自身渲染时处理"
         );
 
+        crate::game::reachability::unregister_engine_root(root);
         cleanup(&light_b).await;
         cleanup(&nested_root).await;
         cleanup(&light_a).await;
@@ -1042,6 +1052,9 @@ mod tests {
         attach_node(light_a, root, "应能挂载平行光 A").await;
         attach_node(nested_root, root, "应能挂载 nested_root").await;
         attach_node(light_b, nested_root, "应能挂载平行光 B 到嵌套 Layer").await;
+
+        // Renderable 的实际可见性由“从引擎根可达”驱动；显式注册根避免并行测试 flake。
+        crate::game::reachability::register_engine_root(root);
 
         let _ = root
             .register_component(Renderable::new())
@@ -1114,6 +1127,7 @@ mod tests {
             "嵌套 Layer 的平行光应由其自身处理"
         );
 
+        crate::game::reachability::unregister_engine_root(root);
         cleanup(&light_b).await;
         cleanup(&nested_root).await;
         cleanup(&light_a).await;

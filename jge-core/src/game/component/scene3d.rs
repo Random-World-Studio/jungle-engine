@@ -344,9 +344,9 @@ impl Scene3D {
 
         ensure_scene_transform(scene_entity).await?;
 
-        let camera_world = Transform::world_matrix(camera_entity)
-            .await
-            .ok_or(Scene3DVisibilityError::MissingCameraTransform(camera_entity))?;
+        let camera_world = Transform::world_matrix(camera_entity).await.ok_or(
+            Scene3DVisibilityError::MissingCameraTransform(camera_entity),
+        )?;
         let camera_position = Transform::translation_from_matrix(&camera_world);
         let basis = Transform::basis_from_matrix(&camera_world).normalize();
 

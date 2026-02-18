@@ -39,23 +39,31 @@ mod scene_dsl {
         tx: Ident,
         step: Ident,
         total: Ident,
+        frame_ty: proc_macro2::TokenStream,
     }
 
     fn progress_tick(ctx: &ProgressCtx, span: proc_macro2::Span) -> proc_macro2::TokenStream {
         let tx = &ctx.tx;
         let step = &ctx.step;
         let total = &ctx.total;
+        let frame_ty = &ctx.frame_ty;
         quote_spanned! {span=>
             #step += 1;
             if let Some(__tx) = &#tx {
                 let __p = (#step as f64) / (#total as f64);
-                let _ = __tx.send(__p).await;
+                let _ = __tx.send(#frame_ty::Progress(__p)).await;
             }
         }
     }
 
+    pub struct ProgressDecl {
+        pub phase_i: usize,
+        pub phase_n: usize,
+        pub sender: Expr,
+    }
+
     pub struct SceneInput {
-        pub progress_tx: Option<Ident>,
+        pub progress: Option<ProgressDecl>,
         pub root: NodeDecl,
     }
 
@@ -65,21 +73,58 @@ mod scene_dsl {
                 return Err(input.error("scene! 需要且仅需要一个根 node {...}"));
             }
 
-            // 可选：顶层进度汇报 `progress tx;`
-            let progress_tx = if input.peek(progress) {
+            // 可选：顶层进度汇报 `progress[(i/n)] <sender_expr>;`
+            // 语法：progress(1/3) tx; 或 progress tx;
+            let progress = if input.peek(progress) {
                 let _: progress = input.parse()?;
-                let tx: Ident = input.parse()?;
+
+                let (phase_i, phase_n) = if input.peek(syn::token::Paren) {
+                    let content;
+                    parenthesized!(content in input);
+                    let i_lit: syn::LitInt = content.parse()?;
+                    content.parse::<Token![/]>()?;
+                    let n_lit: syn::LitInt = content.parse()?;
+                    if !content.is_empty() {
+                        return Err(
+                            content.error("progress(i/n) 括号内只允许形如 `1/3` 的两个整数")
+                        );
+                    }
+
+                    let i: usize = i_lit.base10_parse().map_err(|e| {
+                        syn::Error::new_spanned(&i_lit, format!("progress 阶段 i 解析失败：{e}"))
+                    })?;
+                    let n: usize = n_lit.base10_parse().map_err(|e| {
+                        syn::Error::new_spanned(&n_lit, format!("progress 阶段 n 解析失败：{e}"))
+                    })?;
+                    if n == 0 {
+                        return Err(syn::Error::new_spanned(
+                            &n_lit,
+                            "progress 阶段总数 n 必须 > 0",
+                        ));
+                    }
+                    (i, n)
+                } else {
+                    (0, 1)
+                };
+
+                let sender: Expr = input.parse()?;
                 input.parse::<Token![;]>()?;
-                Some(tx)
+                Some(ProgressDecl {
+                    phase_i,
+                    phase_n,
+                    sender,
+                })
             } else {
                 None
             };
 
             let root: NodeDecl = input.parse()?;
             if !input.is_empty() {
-                return Err(input.error("scene! 顶层只允许：可选的 `progress tx;` + 一个根 node"));
+                return Err(input.error(
+                    "scene! 顶层只允许：可选的 `progress[(i/n)] sender_expr;` + 一个根 node",
+                ));
             }
-            Ok(Self { progress_tx, root })
+            Ok(Self { progress, root })
         }
     }
 
@@ -421,10 +466,12 @@ mod scene_dsl {
         let progress_step_ident = format_ident!("__jge_scene_progress_step");
         let progress_total_ident = format_ident!("__jge_scene_progress_total");
 
-        let progress_ctx = scene.progress_tx.as_ref().map(|_| ProgressCtx {
+        let progress_frame_ty = quote!(#core_crate::ProgressFrame);
+        let progress_ctx = scene.progress.as_ref().map(|_| ProgressCtx {
             tx: progress_tx_ident.clone(),
             step: progress_step_ident.clone(),
             total: progress_total_ident.clone(),
+            frame_ty: progress_frame_ty.clone(),
         });
 
         let mut create_stmts: Vec<proc_macro2::TokenStream> = Vec::new();
@@ -576,17 +623,40 @@ mod scene_dsl {
             }
         };
 
-        let progress_prelude = if let Some(tx_ident) = &scene.progress_tx {
+        let progress_prelude = if let Some(progress_decl) = &scene.progress {
+            let sender_expr = &progress_decl.sender;
+            let phase_i = progress_decl.phase_i;
+            let phase_n = progress_decl.phase_n;
+            let frame_ty = &progress_frame_ty;
             quote! {
-                let _: ::tokio::sync::mpsc::Sender<f64> = #tx_ident.clone();
                 let #progress_total_ident: usize = #progress_total_steps;
                 let mut #progress_step_ident: usize = 0;
-                let #progress_tx_ident: ::core::option::Option<::tokio::sync::mpsc::Sender<f64>> =
-                    ::core::option::Option::Some(#tx_ident.clone());
+                let __jge_scene_progress_sender: ::tokio::sync::mpsc::Sender<#frame_ty> = #sender_expr;
+                let #progress_tx_ident: ::core::option::Option<::tokio::sync::mpsc::Sender<#frame_ty>> =
+                    ::core::option::Option::Some(__jge_scene_progress_sender);
 
                 if let ::core::option::Option::Some(__tx) = &#progress_tx_ident {
-                    let _ = __tx.send(0.0).await;
+                    let _ = __tx.send(#frame_ty::Phase(#phase_i, #phase_n)).await;
+                    let _ = __tx.send(#frame_ty::Progress(0.0)).await;
                 }
+            }
+        } else {
+            quote! {}
+        };
+
+        let progress_epilogue = if let Some(progress_decl) = &scene.progress {
+            let phase_i = progress_decl.phase_i;
+            let phase_n = progress_decl.phase_n;
+            let frame_ty = &progress_frame_ty;
+
+            if phase_n > 0 && phase_i + 1 == phase_n {
+                quote! {
+                    if let ::core::option::Option::Some(__tx) = &#progress_tx_ident {
+                        let _ = __tx.send(#frame_ty::Phase(#phase_n, #phase_n)).await;
+                    }
+                }
+            } else {
+                quote! {}
             }
         } else {
             quote! {}
@@ -688,6 +758,8 @@ mod scene_dsl {
                 > = ::std::vec::Vec::new();
 
                 #attach_stmts
+
+                #progress_epilogue
 
                 ::core::result::Result::<SceneBindings, ::anyhow::Error>::Ok(SceneBindings {
                     root: #root_var,

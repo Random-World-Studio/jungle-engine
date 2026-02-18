@@ -1,4 +1,4 @@
-error: scene! 顶层只允许：可选的 `progress tx;` + 一个根 node
+error: scene! 顶层只允许：可选的 `progress[(i/n)] sender_expr;` + 一个根 node
  --> tests/ui/scene_two_roots_fail.rs:6:9
   |
 6 |         node "b" { }

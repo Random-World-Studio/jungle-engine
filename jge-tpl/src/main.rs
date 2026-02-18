@@ -280,10 +280,17 @@ fn map_key_event_to_camera_action(event: &KeyEvent) -> Option<CameraAction> {
 }
 
 async fn build_demo_scene() -> anyhow::Result<Entity> {
-    let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel::<f64>(64);
+    let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel::<jge_core::ProgressFrame>(64);
     let progress_handle = tokio::spawn(async move {
-        while let Some(p) = progress_rx.recv().await {
-            info!(target: "jge-demo", progress = p, "scene build progress");
+        while let Some(frame) = progress_rx.recv().await {
+            match frame {
+                jge_core::ProgressFrame::Phase(i, n) => {
+                    info!(target: "jge-demo", phase_i = i, phase_n = n, "scene build phase");
+                }
+                jge_core::ProgressFrame::Progress(p) => {
+                    info!(target: "jge-demo", progress = p, "scene build progress");
+                }
+            }
         }
     });
 
@@ -912,15 +919,30 @@ impl GameLogic for CubeLogic {
 
         if let Some(expected) = self.child_local_pos {
             let got = child_transform.position();
-            ensure!((got - expected).norm() <= 1.0e-5, "child triangle local position was modified at runtime: got={:?} expected={:?}", got, expected);
+            ensure!(
+                (got - expected).norm() <= 1.0e-5,
+                "child triangle local position was modified at runtime: got={:?} expected={:?}",
+                got,
+                expected
+            );
         }
         if let Some(expected) = self.child_local_rot {
             let got = child_transform.rotation();
-            ensure!((got - expected).norm() <= 1.0e-5, "child triangle local rotation was modified at runtime: got={:?} expected={:?}", got, expected);
+            ensure!(
+                (got - expected).norm() <= 1.0e-5,
+                "child triangle local rotation was modified at runtime: got={:?} expected={:?}",
+                got,
+                expected
+            );
         }
         if let Some(expected) = self.child_local_scale {
             let got = child_transform.scale();
-            ensure!((got - expected).norm() <= 1.0e-5, "child triangle local scale was modified at runtime: got={:?} expected={:?}", got, expected);
+            ensure!(
+                (got - expected).norm() <= 1.0e-5,
+                "child triangle local scale was modified at runtime: got={:?} expected={:?}",
+                got,
+                expected
+            );
         }
 
         let cube_world = Transform::world_matrix(entity)

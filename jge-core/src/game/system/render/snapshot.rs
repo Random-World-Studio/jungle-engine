@@ -23,8 +23,8 @@ use crate::resource::ResourceHandle;
 
 use super::{cache::LayerViewportPixels, util};
 
+use crate::Aabb3;
 use nalgebra::{Matrix4, Perspective3, Point3, Vector3};
-use crate::{Aabb3};
 
 use crate::game::component::{
     layer::LayerRenderableCollection,
@@ -311,9 +311,7 @@ async fn build_layer_snapshot(
                             .is_ok()
                     });
 
-            if fov_ok
-                && let Some(world) = Transform::world_matrix(camera_entity).await
-            {
+            if fov_ok && let Some(world) = Transform::world_matrix(camera_entity).await {
                 let pos = Transform::translation_from_matrix(&world);
                 let basis = Transform::basis_from_matrix(&world).normalize();
                 camera_pose = Some((
@@ -373,9 +371,8 @@ async fn build_scene2d_snapshot(
             renderables.bundles().to_vec()
         };
 
-    let face_groups = match scene_guard
-        .visible_faces_with_renderables(&layer_guard, &culled_for_visibility)
-    {
+    let face_groups =
+        match scene_guard.visible_faces_with_renderables(&layer_guard, &culled_for_visibility) {
             Ok(faces) => faces,
             Err(error) => {
                 warn!(

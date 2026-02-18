@@ -2,6 +2,7 @@
 
 use anyhow::Context as _;
 
+use crate::ProgressFrame;
 use crate::game::component::node::Node;
 use crate::game::component::renderable::Renderable;
 use crate::game::component::transform::Transform;
@@ -46,7 +47,7 @@ async fn scene_macro_allows_empty_input_as_noop() -> anyhow::Result<()> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn scene_macro_can_report_progress() -> anyhow::Result<()> {
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<f64>(64);
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<ProgressFrame>(64);
     let progress_tx = tx.clone();
 
     let _bindings = crate::scene! {
@@ -61,12 +62,25 @@ async fn scene_macro_can_report_progress() -> anyhow::Result<()> {
     // 关闭发送端，确保 receiver 能 drain 完成。
     drop(tx);
 
-    let mut values = Vec::new();
-    while let Some(v) = rx.recv().await {
-        values.push(v);
+    let mut frames = Vec::new();
+    while let Some(frame) = rx.recv().await {
+        frames.push(frame);
     }
 
-    assert!(!values.is_empty(), "progress 应至少发送一次");
+    assert!(!frames.is_empty(), "progress 应至少发送一次");
+
+    // 第一帧应为阶段声明（默认 0/1）。
+    assert_eq!(frames[0], ProgressFrame::Phase(0, 1));
+
+    // Progress 值序列：应从 0.0 单调不减到 1.0。
+    let values: Vec<f64> = frames
+        .iter()
+        .filter_map(|f| match f {
+            ProgressFrame::Progress(p) => Some(*p),
+            _ => None,
+        })
+        .collect();
+
     assert!(
         (values[0] - 0.0).abs() <= f64::EPSILON,
         "progress 第一个值应为 0.0"
@@ -82,6 +96,55 @@ async fn scene_macro_can_report_progress() -> anyhow::Result<()> {
     assert!(
         values.windows(2).all(|w| w[0] <= w[1]),
         "progress 必须单调不减"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn scene_macro_progress_can_specify_phase() -> anyhow::Result<()> {
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<ProgressFrame>(64);
+
+    let progress_tx = tx.clone();
+
+    let _bindings = crate::scene! {
+        progress(2/5) progress_tx;
+        node "root" { }
+    }
+    .await?;
+
+    drop(tx);
+
+    let first = rx.recv().await.expect("should receive at least one frame");
+    assert_eq!(first, ProgressFrame::Phase(2, 5));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn scene_macro_progress_last_phase_sends_terminal_phase() -> anyhow::Result<()> {
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<ProgressFrame>(64);
+    let progress_tx = tx.clone();
+
+    let _bindings = crate::scene! {
+        progress(4/5) progress_tx;
+        node "root" { }
+    }
+    .await?;
+
+    drop(tx);
+
+    let mut frames = Vec::new();
+    while let Some(frame) = rx.recv().await {
+        frames.push(frame);
+    }
+
+    assert!(
+        frames.iter().any(|f| *f == ProgressFrame::Phase(5, 5)),
+        "最后阶段应在结尾发送 Phase(5,5)"
+    );
+    assert_eq!(
+        frames.last().copied(),
+        Some(ProgressFrame::Phase(5, 5)),
+        "Phase(5,5) 应为最后一帧"
     );
     Ok(())
 }

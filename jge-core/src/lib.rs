@@ -31,6 +31,16 @@ pub mod sync {
 pub use aabb::{Aabb2, Aabb3};
 pub use game::Game;
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ProgressFrame {
+    /// 表示接下来进入第 i 阶段（共 n 阶段）。
+    ///
+    /// 约定：i 从 0 开始计数；n > 0。
+    Phase(usize, usize),
+    /// 当前阶段进度（范围建议为 0.0 到 1.0，单调不减）。
+    Progress(f64),
+}
+
 /// 场景 DSL 宏：用声明式语法构建一棵 `Node` 树，并返回绑定集。
 ///
 /// 这个宏由 `jge-core` 重导出，因此游戏项目只需要依赖 `jge-core` 即可使用。
@@ -48,9 +58,13 @@ pub use game::Game;
 ///
 /// # 基本结构（概览）
 ///
-/// - （可选）在最外层声明 `progress tx;`，其中 `tx` 为 `tokio::sync::mpsc::Sender<f64>`，用于汇报构造进度。
-///   - 进度值范围：`0.0` 到 `1.0`
-///   - 语义：单调不减；宏会尽力在开始时发送 `0.0`，结束时发送 `1.0`
+/// - （可选）在最外层声明 `progress(i/n) sender_expr;`，用于汇报构造进度。
+///   - 语法有两种：
+///     - `progress sender_expr;`（缺省阶段为 `0/1`）
+///     - `progress(i/n) sender_expr;`（显式阶段；`i` 从 `0` 开始计数；`n > 0`）
+///   - `sender_expr` 类型为 `tokio::sync::mpsc::Sender<ProgressFrame>`（会被 move 进宏生成的 future；如需复用请传 `sender.clone()`）
+///   - 宏会发送：`ProgressFrame::Phase(i, n)` + 若干 `ProgressFrame::Progress(p)`（开始时会尽力先发 `Progress(0.0)`；结束时会尽力发到 `Progress(1.0)`）
+///   - 若 `i == n - 1`（最后阶段）：宏会在成功返回前额外发送 `ProgressFrame::Phase(n, n)` 作为“阶段完成”标记（当前实现会在最后一次进度 tick 之后发送）
 ///   - 可靠性：best-effort（接收端关闭/队列满等导致发送失败会被忽略，不会让场景构造失败）
 /// - 你可以写空输入 `scene! {}` / `scene!()` 作为 no-op（返回 `Ok(())`），用于“可选场景”。
 /// - 若不是空输入：根必须且仅能有一个 `node { ... }`。
@@ -81,18 +95,22 @@ pub use game::Game;
 /// ## 示例：进度接收端打印日志
 ///
 /// ```no_run
+/// use jge_core::ProgressFrame;
 /// use tracing::info;
 ///
 /// # async fn demo() -> anyhow::Result<()> {
-/// let (tx, mut rx) = tokio::sync::mpsc::channel::<f64>(64);
+/// let (tx, mut rx) = tokio::sync::mpsc::channel::<ProgressFrame>(64);
 /// tokio::spawn(async move {
-///     while let Some(p) = rx.recv().await {
-///         info!(progress = p, "scene build progress");
+///     while let Some(frame) = rx.recv().await {
+///         match frame {
+///             ProgressFrame::Phase(i, n) => info!(phase_i = i, phase_n = n, "scene build phase"),
+///             ProgressFrame::Progress(p) => info!(progress = p, "scene build progress"),
+///         }
 ///     }
 /// });
 ///
 /// let _bindings = jge_core::scene! {
-///     progress tx;
+///     progress(0/1) tx;
 ///     node "root" {
 ///         node "a" { }
 ///         node "b" { }

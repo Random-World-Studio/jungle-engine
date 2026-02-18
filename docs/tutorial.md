@@ -224,19 +224,25 @@ async fn build_composed() -> anyhow::Result<()> {
 }
 ```
 
-### （可选）构造进度上报：`progress tx;`
+### （可选）构造进度上报：`progress(i/n) sender_expr;`
 
 当场景比较大时，你可能希望在构造期间汇报进度（例如加载关卡、生成复杂几何、批量注册组件）。
 `scene!` 支持在最外层可选地声明：
 
 ```rust
-progress tx;
+// 缺省阶段为 (0/1)，且阶段 i 从 0 开始计数
+progress sender_expr;
+
+// 或者显式声明当前阶段（例如第 1/3 阶段；i 从 0 开始，所以这里 i=1 表示第 2 阶段）：
+progress(1/3) sender_expr;
 ```
 
-其中 `tx` 是一个 `tokio::sync::mpsc::Sender<f64>` 变量。宏会在构造流程推进时发送进度值：
+其中 `sender_expr` 类型为 `tokio::sync::mpsc::Sender<jge_core::ProgressFrame>`（会被 move 进宏生成的 future；如需复用请传 `sender_expr.clone()`）。
+宏会在构造流程推进时发送 `ProgressFrame`：
 
-- 范围：`0.0` 到 `1.0`
-- 语义：单调不减，最后会尽力发送 `1.0`
+- `ProgressFrame::Phase(i, n)`：声明“接下来是第 i 阶段，共 n 阶段”
+- `ProgressFrame::Progress(p)`：当前阶段进度（范围建议为 `0.0` 到 `1.0`，语义单调不减；开始时会尽力先发 `Progress(0.0)`，结束时会尽力发到 `Progress(1.0)`）
+- 若 `i == n - 1`（最后阶段）：宏会在成功返回前额外发送 `ProgressFrame::Phase(n, n)` 作为“阶段完成”标记（当前实现会在最后一次进度 tick 之后发送）
 - 可靠性：发送是 best-effort（接收端关闭时会被忽略，不会导致构造失败）
 
 示例：接收端打印日志
@@ -244,10 +250,13 @@ progress tx;
 ```rust
 use tracing::info;
 
-let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel::<f64>(64);
+let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel::<jge_core::ProgressFrame>(64);
 tokio::spawn(async move {
-    while let Some(p) = progress_rx.recv().await {
-        info!(progress = p, "scene build progress");
+    while let Some(frame) = progress_rx.recv().await {
+        match frame {
+            jge_core::ProgressFrame::Phase(i, n) => info!(phase_i = i, phase_n = n, "scene build phase"),
+            jge_core::ProgressFrame::Progress(p) => info!(progress = p, "scene build progress"),
+        }
     }
 });
 
