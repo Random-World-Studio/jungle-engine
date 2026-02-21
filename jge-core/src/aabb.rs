@@ -11,6 +11,16 @@ pub struct Aabb2 {
     pub max: Vector2<f32>,
 }
 
+impl Default for Aabb2 {
+    fn default() -> Self {
+        let origin = Vector2::new(0.0, 0.0);
+        Self {
+            min: origin,
+            max: origin,
+        }
+    }
+}
+
 impl Aabb2 {
     /// Creates an AABB from two points.
     ///
@@ -69,6 +79,16 @@ impl Aabb2 {
 pub struct Aabb3 {
     pub min: Vector3<f32>,
     pub max: Vector3<f32>,
+}
+
+impl Default for Aabb3 {
+    fn default() -> Self {
+        let origin = Vector3::new(0.0, 0.0, 0.0);
+        Self {
+            min: origin,
+            max: origin,
+        }
+    }
 }
 
 impl Aabb3 {

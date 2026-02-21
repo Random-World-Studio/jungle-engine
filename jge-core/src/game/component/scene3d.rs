@@ -947,6 +947,10 @@ mod tests {
             .await
             .expect("应能插入 Scene3D");
 
+        // 可见性依赖“从引擎根可达”。并行测试时全局 ENGINE_ROOTS 可能非空，
+        // 因此这里显式注册根并刷新子树可达性，避免测试顺序导致的 flake。
+        crate::game::reachability::register_engine_root(scene);
+
         let inside = Entity::new().await.expect("应能创建实体");
         prepare_child(&inside, "inside", scene).await;
         inside
@@ -970,6 +974,8 @@ mod tests {
             ]]))
             .await
             .expect("应能插入 Shape");
+
+        crate::game::reachability::set_subtree_reachable(scene, true).await;
 
         let scene_component = scene
             .get_component::<Scene3D>()
@@ -1014,6 +1020,8 @@ mod tests {
         let bundles = visible.into_bundles();
         assert_eq!(bundles.len(), 1);
         assert_eq!(bundles[0].entity(), inside);
+
+        crate::game::reachability::unregister_engine_root(scene);
 
         let _ = camera.unregister_component::<Camera>().await;
         let _ = camera.unregister_component::<Scene3D>().await;
