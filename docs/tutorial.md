@@ -181,6 +181,56 @@ cargo run
 > - `as ident` 绑定是“先收集并填充”的，因此你可以在任意位置引用同一个 `scene!` 块里导出的实体名（包括前向引用）。
 > - 节点树的 `attach` 会在宏的最后阶段集中完成：在 `with(...) { ... }` 等初始化块内，`Node::parent/children` 关系尚未建立。
 
+### （可选）裁剪盒：`AabbBorder`（对子树做像素级裁剪）
+
+`AabbBorder` 是一个“裁剪边界”组件：挂载它的节点会在渲染时形成一个裁剪盒，该节点**以及其整棵子树**的渲染结果都会被裁剪到该边界内。
+
+核心语义：
+
+- **作用范围**：对“当前节点及其整棵子树”生效。
+- **嵌套裁剪**：如果子树里又出现新的 `AabbBorder`，最终裁剪盒取 **intersection（相交区域）**。
+- **裁剪方式**：通过 fragment shader `discard` 实现，是“按像素丢弃”，不是“整三角形剔除”；因此不会生成几何意义上的“切面”。
+- **坐标与 Transform**：`AabbBorder` 的 `local_bounds: Aabb3` 定义在该实体的局部空间。
+  渲染时会用实体的 world matrix（包含父链叠乘、平移/旋转/缩放）变换 8 个角点，再取 min/max 得到 **world-space 的轴对齐 AABB**。
+  因此：旋转会影响裁剪范围，但裁剪体仍然是“轴对齐 AABB”（不会得到旋转的裁剪平面/OBB）。
+
+一个最小示例（在 3D layer 下创建一个裁剪盒，并放一个故意超出边界的网格以便观察效果）：
+
+```rust
+use nalgebra::Vector3;
+use jge_core::Aabb3;
+use jge_core::game::component::{aabb_border::AabbBorder, shape::Shape, transform::Transform};
+
+// 片段示意：放在 `Scene3D` 的 node "layer" { ... } 里
+node "clip_demo" {
+    + AabbBorder::new(Aabb3::new(
+        // 这是 local AABB；注意裁剪是 discard，不会生成“切面”。
+        Vector3::new(-2.0, -2.0, -0.4),
+        Vector3::new(2.0, 2.0, 0.4),
+    ));
+
+    with(mut transform: Transform) {
+        transform.set_position(Vector3::new(1.6, 1.2, 0.0));
+        // 旋转会参与 world_bounds 计算，但最终仍会变成 world-space 的轴对齐 AABB。
+        // transform.set_rotation(Vector3::new(0.0, std::f32::consts::FRAC_PI_4, 0.0));
+        Ok(())
+    }
+
+    node "clip_mesh" {
+        + Shape::from_triangles(/* 你的几何 */ vec![]);
+        with(mut transform: Transform) {
+            // 故意让几何跨越边界，才能看到被裁掉一部分。
+            transform.set_scale(Vector3::new(2.4, 2.4, 2.4));
+            Ok(())
+        }
+    }
+}
+```
+
+> 观察提示：如果你发现“裁剪没效果 / 一整张面直接消失”，通常不是 bug，而是 discard 的几何效果。
+> - 裁剪不会自动生成切面；一个面如果整张都在边界外，会被完全丢弃。
+> - 想稳定看到“被裁掉一部分”，通常需要让裁剪盒与面有部分重叠（例如做一个沿某轴的薄片 slab 裁剪），并让被裁物体确实跨越该边界。
+
 ### （可选）销毁场景：`SceneBindings::destroy().await`
 
 `scene!` 返回的 `SceneBindings` 绑定集会额外提供一个 `destroy()` 方法（async），用于销毁本次构建出来的场景：调用时需要 `destroy().await`。

@@ -46,6 +46,7 @@ pub(in crate::game::system::render) struct Scene3DPipeline {
     pub(in crate::game::system::render) pipeline: wgpu::RenderPipeline,
     pub(in crate::game::system::render) uniform_layout: wgpu::BindGroupLayout,
     pub(in crate::game::system::render) material_layout: wgpu::BindGroupLayout,
+    pub(in crate::game::system::render) clip_layout: wgpu::BindGroupLayout,
     pub(in crate::game::system::render) vertex_shader: Scene3DShaderKey,
     pub(in crate::game::system::render) fragment_shader: Scene3DShaderKey,
 }
@@ -109,9 +110,23 @@ impl Scene3DPipeline {
             ],
         });
 
+        let clip_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Scene3D Clip Layout"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: true,
+                    min_binding_size: wgpu::BufferSize::new(std::mem::size_of::<[f32; 8]>() as u64),
+                },
+                count: None,
+            }],
+        });
+
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Scene3D Pipeline Layout"),
-            bind_group_layouts: &[&uniform_layout, &material_layout],
+            bind_group_layouts: &[&uniform_layout, &material_layout, &clip_layout],
             push_constant_ranges: &[],
         });
 
@@ -163,6 +178,7 @@ impl Scene3DPipeline {
             pipeline,
             uniform_layout,
             material_layout,
+            clip_layout,
             vertex_shader: vertex_key,
             fragment_shader: fragment_key,
         })
@@ -178,6 +194,10 @@ impl Scene3DPipeline {
 
     pub(in crate::game::system::render) fn material_layout(&self) -> &wgpu::BindGroupLayout {
         &self.material_layout
+    }
+
+    pub(in crate::game::system::render) fn clip_layout(&self) -> &wgpu::BindGroupLayout {
+        &self.clip_layout
     }
 
     pub(in crate::game::system::render) fn pipeline(&self) -> &wgpu::RenderPipeline {

@@ -13,7 +13,7 @@ use nalgebra::{Vector2, Vector3};
 
 use jge_core::sync::Mutex;
 use jge_core::{
-    Game,
+    Aabb3, Game,
     config::GameConfig,
     event::{
         DeviceEvent, ElementState, Event, Key, KeyCode, KeyEvent, NamedKey, PhysicalKey,
@@ -21,6 +21,7 @@ use jge_core::{
     },
     game::{
         component::{
+            aabb_border::AabbBorder,
             background::Background,
             camera::Camera,
             layer::{Layer, LayerShader, LayerViewport, ShaderLanguage},
@@ -406,6 +407,47 @@ async fn build_demo_scene() -> anyhow::Result<Entity> {
                         transform.set_rotation(Vector3::new(0.2, -0.3, 0.1));
                         transform.set_scale(Vector3::new(1.2, 1.2, 1.2));
                         Ok(())
+                    }
+                }
+
+                // AabbBorder 示例：父节点提供裁剪盒，子节点的几何体跨越边界时会被“按像素”裁剪。
+                node "clip_demo" {
+                    + AabbBorder::new(Aabb3::new(
+                        // 注意：裁剪是通过 fragment discard 实现的，不会生成“切面”。
+                        // 如果把 X/Y 收得过小（小于 cube 的半径），X/Y 对应的四个面会因为“整张面都在边界外”而被完全丢弃，
+                        // 你就只会看到一个（或两个）面。
+                        // 这里改成：X/Y 覆盖 cube 的整体范围，主要沿 Z 做“薄片裁剪”，能稳定看到多个面被裁出一条带状区域。
+                        Vector3::new(-2.0, -2.0, -0.4),
+                        Vector3::new(2.0, 2.0, 0.4),
+                    ));
+
+                    with(mut transform: Transform) {
+                        // 放在默认摄像机（朝向原点、俯视）视野里更容易第一眼看到的位置。
+                        transform.set_position(Vector3::new(1.6, 1.2, 0.0));
+                        // 旋转会参与 AabbBorder 的 world_bounds 计算：local AABB 的 8 个角点会被 world matrix 变换，
+                        // 最终得到一个 world-space 的“轴对齐”AABB（因此不会得到“旋转的裁剪平面”，但裁剪范围会变化）。
+                        transform.set_rotation(Vector3::new(0.0, FRAC_PI_4, 0.0));
+                        Ok(())
+                    }
+
+                    node "clip_cube" {
+                        + Shape::from_triangles(cube_triangles());
+
+                        + Material::new(bamboo, Vec::new()) => resource(bamboo = "textures/bamboo.png") |_, mut mat| -> anyhow::Result<()> {
+                            let triangles = cube_triangles();
+                            let patches = compute_cube_uv_patches(&triangles).context("计算立方体 UV patches 失败")?;
+                            mat.set_regions(patches);
+                            Ok(())
+                        };
+
+                        with(mut transform: Transform) {
+                            // 故意比裁剪盒大，便于观察裁剪效果。
+                            // 另外：clip_demo 旋转后裁剪盒会变成更大的 world-space 轴对齐 AABB，
+                            // 这里把 cube 往父节点的 local +Z 推一点，确保仍有一部分会超出边界从而触发裁剪。
+                            transform.set_position(Vector3::new(0.0, 0.0, 1.0));
+                            transform.set_scale(Vector3::new(2.4, 2.4, 2.4));
+                            Ok(())
+                        }
                     }
                 }
 

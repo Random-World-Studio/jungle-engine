@@ -36,6 +36,7 @@ pub(in crate::game::system::render) struct Scene3DDraw {
     pub(in crate::game::system::render) vertex_buffer: wgpu::Buffer,
     pub(in crate::game::system::render) vertex_count: u32,
     pub(in crate::game::system::render) bind_group: wgpu::BindGroup,
+    pub(in crate::game::system::render) clip_offset: u32,
 }
 
 impl RenderSystem {
@@ -360,14 +361,37 @@ impl RenderSystem {
         }
 
         let material_layout = pipeline.material_layout();
+        let clip_layout = pipeline.clip_layout();
         let mut draws = Vec::new();
         let mut total_vertices = 0u32;
+
+        let clip_uniform_size = std::mem::size_of::<[f32; 8]>();
+        let min_alignment = context
+            .device
+            .limits()
+            .min_uniform_buffer_offset_alignment as usize;
+        let clip_stride = clip_uniform_size.div_ceil(min_alignment) * min_alignment;
+        let mut clip_data: Vec<u8> = Vec::new();
 
         for bundle in visible.iter() {
             let triangles = bundle.triangles();
             if triangles.is_empty() {
                 continue;
             }
+
+            let clip_uniform: [f32; 8] = match bundle.clip_aabb() {
+                Some(clip) => [
+                    clip.min.x,
+                    clip.min.y,
+                    clip.min.z,
+                    1.0,
+                    clip.max.x,
+                    clip.max.y,
+                    clip.max.z,
+                    0.0,
+                ],
+                None => [0.0; 8],
+            };
 
             let _profile_scope = context
                 .caches
@@ -413,6 +437,10 @@ impl RenderSystem {
             if vertex_data.is_empty() {
                 continue;
             }
+
+            let clip_offset = clip_data.len() as u32;
+            clip_data.extend_from_slice(util::cast_slice_f32(&clip_uniform));
+            clip_data.resize(clip_offset as usize + clip_stride, 0);
 
             let vertex_buffer =
                 context
@@ -460,6 +488,7 @@ impl RenderSystem {
                 vertex_buffer,
                 vertex_count,
                 bind_group: material_instance.bind_group.clone(),
+                clip_offset,
             });
         }
 
@@ -471,6 +500,27 @@ impl RenderSystem {
             );
             return;
         }
+
+        let clip_buffer = context.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Scene3D Clip Buffer"),
+            size: clip_data.len() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        context.queue.write_buffer(&clip_buffer, 0, &clip_data);
+
+        let clip_bind_group = context.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Scene3D Clip Bind Group"),
+            layout: clip_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: &clip_buffer,
+                    offset: 0,
+                    size: wgpu::BufferSize::new(clip_uniform_size as u64),
+                }),
+            }],
+        });
 
         // 坐标系约定（世界/物理意义）：右手系，+X 向右，+Y 向上，-Z 为“前”。
         // nalgebra 的 look_at_rh + Perspective3 组合会生成 OpenGL 风格的裁剪空间：NDC Z 范围为 [-1, 1]。
@@ -609,6 +659,7 @@ impl RenderSystem {
         pass.set_bind_group(0, &scene_bind_group, &[]);
         for draw in &draws {
             pass.set_bind_group(1, &draw.bind_group, &[]);
+            pass.set_bind_group(2, &clip_bind_group, &[draw.clip_offset]);
             pass.set_vertex_buffer(0, draw.vertex_buffer.slice(..));
             pass.draw(0..draw.vertex_count, 0..1);
         }
@@ -691,14 +742,37 @@ impl RenderSystem {
         }
 
         let material_layout = pipeline.material_layout();
+        let clip_layout = pipeline.clip_layout();
         let mut draws = Vec::new();
         let mut total_vertices = 0u32;
+
+        let clip_uniform_size = std::mem::size_of::<[f32; 8]>();
+        let min_alignment = context
+            .device
+            .limits()
+            .min_uniform_buffer_offset_alignment as usize;
+        let clip_stride = clip_uniform_size.div_ceil(min_alignment) * min_alignment;
+        let mut clip_data: Vec<u8> = Vec::new();
 
         for bundle in visible.iter() {
             let triangles = bundle.triangles();
             if triangles.is_empty() {
                 continue;
             }
+
+            let clip_uniform: [f32; 8] = match bundle.clip_aabb() {
+                Some(clip) => [
+                    clip.min.x,
+                    clip.min.y,
+                    clip.min.z,
+                    1.0,
+                    clip.max.x,
+                    clip.max.y,
+                    clip.max.z,
+                    0.0,
+                ],
+                None => [0.0; 8],
+            };
 
             let _profile_scope = context
                 .caches
@@ -744,6 +818,10 @@ impl RenderSystem {
             if vertex_data.is_empty() {
                 continue;
             }
+
+            let clip_offset = clip_data.len() as u32;
+            clip_data.extend_from_slice(util::cast_slice_f32(&clip_uniform));
+            clip_data.resize(clip_offset as usize + clip_stride, 0);
 
             let vertex_buffer =
                 context
@@ -791,6 +869,7 @@ impl RenderSystem {
                 vertex_buffer,
                 vertex_count,
                 bind_group: material_instance.bind_group.clone(),
+                clip_offset,
             });
         }
 
@@ -802,6 +881,27 @@ impl RenderSystem {
             );
             return;
         }
+
+        let clip_buffer = context.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Scene3D Clip Buffer"),
+            size: clip_data.len() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        context.queue.write_buffer(&clip_buffer, 0, &clip_data);
+
+        let clip_bind_group = context.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Scene3D Clip Bind Group"),
+            layout: clip_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: &clip_buffer,
+                    offset: 0,
+                    size: wgpu::BufferSize::new(clip_uniform_size as u64),
+                }),
+            }],
+        });
 
         let mut uniform_data = Vec::with_capacity(
             16 + 4 + MAX_SCENE3D_POINT_LIGHTS * 8 + MAX_SCENE3D_PARALLEL_LIGHTS * 8,
@@ -925,6 +1025,7 @@ impl RenderSystem {
         pass.set_bind_group(0, &scene_bind_group, &[]);
         for draw in &draws {
             pass.set_bind_group(1, &draw.bind_group, &[]);
+            pass.set_bind_group(2, &clip_bind_group, &[draw.clip_offset]);
             pass.set_vertex_buffer(0, draw.vertex_buffer.slice(..));
             pass.draw(0..draw.vertex_count, 0..1);
         }

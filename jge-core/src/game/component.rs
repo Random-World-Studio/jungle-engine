@@ -54,6 +54,7 @@
 //! }
 //! ```
 
+pub mod aabb_border;
 pub mod background;
 pub mod camera;
 pub mod layer;

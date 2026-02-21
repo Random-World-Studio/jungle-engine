@@ -42,6 +42,7 @@
 
 use std::{collections::HashMap, fmt, sync::Arc};
 
+use super::aabb_border::AabbBorder;
 use super::light::{Light, ParallelLight, PointLight};
 use super::material::{Material, MaterialPatch};
 use super::node::Node;
@@ -284,7 +285,70 @@ impl Layer {
     async fn gather_renderables_from_entities(entities: &[Entity]) -> Vec<LayerRenderableBundle> {
         let mut bundles = Vec::new();
 
+        #[derive(Clone, Copy, Debug, PartialEq)]
+        enum ClipRegion {
+            Unbounded,
+            Empty,
+            Bounded(Aabb3),
+        }
+
+        impl ClipRegion {
+            fn as_aabb(self) -> Option<Aabb3> {
+                match self {
+                    ClipRegion::Bounded(aabb) => Some(aabb),
+                    ClipRegion::Unbounded | ClipRegion::Empty => None,
+                }
+            }
+        }
+
+        // 与先序遍历顺序匹配的“裁剪栈”：对每个实体保存其子树的有效裁剪区域。
+        let mut clip_stack: Vec<(Entity, ClipRegion)> = Vec::new();
+
         for &entity in entities {
+            // 对齐栈到当前实体的父节点。
+            let parent = entity
+                .get_component::<Node>()
+                .await
+                .and_then(|node_guard| node_guard.parent());
+            while let Some((top, _)) = clip_stack.last() {
+                if Some(*top) == parent {
+                    break;
+                }
+                clip_stack.pop();
+            }
+
+            let inherited = clip_stack
+                .last()
+                .map(|(_, region)| *region)
+                .unwrap_or(ClipRegion::Unbounded);
+
+            let mut effective = inherited;
+            if inherited != ClipRegion::Empty {
+                if let Some(border_guard) = entity.get_component::<AabbBorder>().await {
+                    let local = border_guard.local_bounds();
+                    drop(border_guard);
+
+                    if let Some(world) = Transform::world_matrix(entity).await {
+                        let border_world = transform_aabb3_to_world(&world, &local);
+                        effective = match inherited {
+                            ClipRegion::Unbounded => ClipRegion::Bounded(border_world),
+                            ClipRegion::Bounded(prev) => match prev.intersection(&border_world) {
+                                Some(next) => ClipRegion::Bounded(next),
+                                None => ClipRegion::Empty,
+                            },
+                            ClipRegion::Empty => ClipRegion::Empty,
+                        };
+                    }
+                }
+            }
+
+            clip_stack.push((entity, effective));
+
+            // 子树裁剪到空集 => 该实体及其子树都不可见。
+            if effective == ClipRegion::Empty {
+                continue;
+            }
+
             let enabled = match entity.get_component::<Renderable>().await {
                 Some(renderable) => renderable.is_enabled(),
                 None => false,
@@ -329,6 +393,7 @@ impl Layer {
                 entity,
                 world_triangles,
                 material,
+                effective.as_aabb(),
             ));
         }
 
@@ -443,6 +508,7 @@ pub struct LayerRenderableBundle {
     entity: Entity,
     triangles: Vec<[Vector3<f32>; 3]>,
     material: Option<LayerMaterialDescriptor>,
+    clip_aabb: Option<Aabb3>,
 }
 
 impl LayerRenderableBundle {
@@ -450,11 +516,13 @@ impl LayerRenderableBundle {
         entity: Entity,
         triangles: Vec<[Vector3<f32>; 3]>,
         material: Option<LayerMaterialDescriptor>,
+        clip_aabb: Option<Aabb3>,
     ) -> Self {
         Self {
             entity,
             triangles,
             material,
+            clip_aabb,
         }
     }
 
@@ -470,6 +538,10 @@ impl LayerRenderableBundle {
         self.material.as_ref()
     }
 
+    pub fn clip_aabb(&self) -> Option<Aabb3> {
+        self.clip_aabb
+    }
+
     pub fn into_material(self) -> Option<LayerMaterialDescriptor> {
         self.material
     }
@@ -480,8 +552,9 @@ impl LayerRenderableBundle {
         Entity,
         Vec<[Vector3<f32>; 3]>,
         Option<LayerMaterialDescriptor>,
+        Option<Aabb3>,
     ) {
-        (self.entity, self.triangles, self.material)
+        (self.entity, self.triangles, self.material, self.clip_aabb)
     }
 
     fn into_layer_triangles(self) -> Vec<LayerTriangle> {
@@ -539,6 +612,10 @@ impl LayerRenderableCollection {
 
     pub fn material(&self, entity: Entity) -> Option<&LayerMaterialDescriptor> {
         self.get(entity).and_then(|bundle| bundle.material())
+    }
+
+    pub fn clip_aabb(&self, entity: Entity) -> Option<Aabb3> {
+        self.get(entity).and_then(|bundle| bundle.clip_aabb())
     }
 
     pub fn into_bundles(self) -> Vec<LayerRenderableBundle> {
@@ -668,6 +745,34 @@ impl LayerTriangle {
 fn transform_vertex_to_world(matrix: &Matrix4<f32>, local: &Vector3<f32>) -> Vector3<f32> {
     let vector = matrix * Vector4::new(local.x, local.y, local.z, 1.0);
     Vector3::new(vector.x, vector.y, vector.z)
+}
+
+fn transform_aabb3_to_world(matrix: &Matrix4<f32>, local: &Aabb3) -> Aabb3 {
+    let corners = [
+        Vector3::new(local.min.x, local.min.y, local.min.z),
+        Vector3::new(local.min.x, local.min.y, local.max.z),
+        Vector3::new(local.min.x, local.max.y, local.min.z),
+        Vector3::new(local.min.x, local.max.y, local.max.z),
+        Vector3::new(local.max.x, local.min.y, local.min.z),
+        Vector3::new(local.max.x, local.min.y, local.max.z),
+        Vector3::new(local.max.x, local.max.y, local.min.z),
+        Vector3::new(local.max.x, local.max.y, local.max.z),
+    ];
+
+    let mut min = Vector3::new(f32::INFINITY, f32::INFINITY, f32::INFINITY);
+    let mut max = Vector3::new(f32::NEG_INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
+
+    for corner in corners {
+        let w = transform_vertex_to_world(matrix, &corner);
+        min.x = min.x.min(w.x);
+        min.y = min.y.min(w.y);
+        min.z = min.z.min(w.z);
+        max.x = max.x.max(w.x);
+        max.y = max.y.max(w.y);
+        max.z = max.z.max(w.z);
+    }
+
+    Aabb3::new(min, max)
 }
 
 /// 层（Layer）遍历过程中可能出现的错误。
@@ -922,6 +1027,264 @@ mod tests {
         cleanup(&nested_root).await;
         cleanup(&child_b).await;
         cleanup(&child_a).await;
+        cleanup(&root).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn aabb_border_clip_propagates_and_intersects() {
+        let root = Entity::new().await.expect("应能创建 root 实体");
+        let border_a = Entity::new().await.expect("应能创建 border_a 实体");
+        let border_b = Entity::new().await.expect("应能创建 border_b 实体");
+        let target = Entity::new().await.expect("应能创建 target 实体");
+
+        prepare_node(&root, "root").await;
+        prepare_node(&border_a, "border_a").await;
+        prepare_node(&border_b, "border_b").await;
+        prepare_node(&target, "target").await;
+
+        attach_node(border_a, root, "应能挂载 border_a").await;
+        attach_node(border_b, border_a, "应能挂载 border_b").await;
+        attach_node(target, border_b, "应能挂载 target").await;
+
+        crate::game::reachability::register_engine_root(root);
+
+        let _ = root
+            .register_component(Layer::new())
+            .await
+            .expect("应能插入 root Layer");
+
+        let _ = border_a
+            .register_component(Transform::new())
+            .await
+            .expect("应能插入 border_a Transform");
+        let _ = border_a
+            .register_component(AabbBorder::new(Aabb3::new(
+                Vector3::new(-1.0, -1.0, -1.0),
+                Vector3::new(1.0, 1.0, 1.0),
+            )))
+            .await
+            .expect("应能插入 border_a AabbBorder");
+
+        let _ = border_b
+            .register_component(Transform::new())
+            .await
+            .expect("应能插入 border_b Transform");
+        let _ = border_b
+            .register_component(AabbBorder::new(Aabb3::new(
+                Vector3::new(0.0, 0.0, 0.0),
+                Vector3::new(2.0, 2.0, 2.0),
+            )))
+            .await
+            .expect("应能插入 border_b AabbBorder");
+
+        let _ = target
+            .register_component(Renderable::new())
+            .await
+            .expect("应能插入 target Renderable");
+        let _ = target
+            .register_component(Transform::new())
+            .await
+            .expect("应能插入 target Transform");
+        let shape = Shape::from_triangles(vec![[
+            Vector3::new(0.0, 0.0, 0.0),
+            Vector3::new(1.0, 0.0, 0.0),
+            Vector3::new(0.0, 1.0, 0.0),
+        ]]);
+        let _ = target
+            .register_component(shape)
+            .await
+            .expect("应能插入 target Shape");
+
+        let collection = Layer::collect_renderables(root)
+            .await
+            .expect("应能收集渲染集合");
+
+        let clip = collection
+            .clip_aabb(target)
+            .expect("嵌套 AabbBorder 应产生有效 clip");
+        assert_eq!(
+            clip,
+            Aabb3::new(Vector3::new(0.0, 0.0, 0.0), Vector3::new(1.0, 1.0, 1.0))
+        );
+
+        let _ = target.unregister_component::<Shape>().await;
+        let _ = target.unregister_component::<Transform>().await;
+        let _ = target.unregister_component::<Renderable>().await;
+        let _ = border_b.unregister_component::<AabbBorder>().await;
+        let _ = border_b.unregister_component::<Transform>().await;
+        let _ = border_a.unregister_component::<AabbBorder>().await;
+        let _ = border_a.unregister_component::<Transform>().await;
+        crate::game::reachability::unregister_engine_root(root);
+        cleanup(&target).await;
+        cleanup(&border_b).await;
+        cleanup(&border_a).await;
+        cleanup(&root).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn aabb_border_empty_intersection_hides_subtree() {
+        let root = Entity::new().await.expect("应能创建 root 实体");
+        let border_a = Entity::new().await.expect("应能创建 border_a 实体");
+        let border_b = Entity::new().await.expect("应能创建 border_b 实体");
+        let target = Entity::new().await.expect("应能创建 target 实体");
+
+        prepare_node(&root, "root").await;
+        prepare_node(&border_a, "border_a").await;
+        prepare_node(&border_b, "border_b").await;
+        prepare_node(&target, "target").await;
+
+        attach_node(border_a, root, "应能挂载 border_a").await;
+        attach_node(border_b, border_a, "应能挂载 border_b").await;
+        attach_node(target, border_b, "应能挂载 target").await;
+
+        crate::game::reachability::register_engine_root(root);
+
+        let _ = root
+            .register_component(Layer::new())
+            .await
+            .expect("应能插入 root Layer");
+
+        let _ = border_a
+            .register_component(Transform::new())
+            .await
+            .expect("应能插入 border_a Transform");
+        let _ = border_a
+            .register_component(AabbBorder::new(Aabb3::new(
+                Vector3::new(-1.0, -1.0, -1.0),
+                Vector3::new(1.0, 1.0, 1.0),
+            )))
+            .await
+            .expect("应能插入 border_a AabbBorder");
+
+        let _ = border_b
+            .register_component(Transform::new())
+            .await
+            .expect("应能插入 border_b Transform");
+        let _ = border_b
+            .register_component(AabbBorder::new(Aabb3::new(
+                Vector3::new(5.0, 5.0, 5.0),
+                Vector3::new(6.0, 6.0, 6.0),
+            )))
+            .await
+            .expect("应能插入 border_b AabbBorder");
+
+        let _ = target
+            .register_component(Renderable::new())
+            .await
+            .expect("应能插入 target Renderable");
+        let _ = target
+            .register_component(Transform::new())
+            .await
+            .expect("应能插入 target Transform");
+        let shape = Shape::from_triangles(vec![[
+            Vector3::new(0.0, 0.0, 0.0),
+            Vector3::new(1.0, 0.0, 0.0),
+            Vector3::new(0.0, 1.0, 0.0),
+        ]]);
+        let _ = target
+            .register_component(shape)
+            .await
+            .expect("应能插入 target Shape");
+
+        let collection = Layer::collect_renderables(root)
+            .await
+            .expect("应能收集渲染集合");
+
+        assert!(
+            collection.get(target).is_none(),
+            "裁剪盒 intersection 为空时应隐藏整棵子树"
+        );
+
+        let _ = target.unregister_component::<Shape>().await;
+        let _ = target.unregister_component::<Transform>().await;
+        let _ = target.unregister_component::<Renderable>().await;
+        let _ = border_b.unregister_component::<AabbBorder>().await;
+        let _ = border_b.unregister_component::<Transform>().await;
+        let _ = border_a.unregister_component::<AabbBorder>().await;
+        let _ = border_a.unregister_component::<Transform>().await;
+        crate::game::reachability::unregister_engine_root(root);
+        cleanup(&target).await;
+        cleanup(&border_b).await;
+        cleanup(&border_a).await;
+        cleanup(&root).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn aabb_border_clip_uses_world_space_bounds_from_transform() {
+        let root = Entity::new().await.expect("应能创建 root 实体");
+        let border = Entity::new().await.expect("应能创建 border 实体");
+        let target = Entity::new().await.expect("应能创建 target 实体");
+
+        prepare_node(&root, "root").await;
+        prepare_node(&border, "border").await;
+        prepare_node(&target, "target").await;
+
+        attach_node(border, root, "应能挂载 border").await;
+        attach_node(target, border, "应能挂载 target").await;
+
+        crate::game::reachability::register_engine_root(root);
+
+        let _ = root
+            .register_component(Layer::new())
+            .await
+            .expect("应能插入 root Layer");
+
+        let local = Aabb3::new(Vector3::new(-1.0, -2.0, -3.0), Vector3::new(4.0, 5.0, 6.0));
+        let _ = border
+            .register_component(Transform::new())
+            .await
+            .expect("应能插入 border Transform");
+        let _ = border
+            .register_component(AabbBorder::new(local))
+            .await
+            .expect("应能插入 border AabbBorder");
+
+        // border 有平移 => clip 必须是 world-space
+        let offset = Vector3::new(10.0, -1.5, 2.25);
+        if let Some(mut t) = border.get_component_mut::<Transform>().await {
+            t.set_position(offset);
+        }
+
+        let _ = target
+            .register_component(Renderable::new())
+            .await
+            .expect("应能插入 target Renderable");
+        let _ = target
+            .register_component(Transform::new())
+            .await
+            .expect("应能插入 target Transform");
+        let shape = Shape::from_triangles(vec![[
+            Vector3::new(0.0, 0.0, 0.0),
+            Vector3::new(1.0, 0.0, 0.0),
+            Vector3::new(0.0, 1.0, 0.0),
+        ]]);
+        let _ = target
+            .register_component(shape)
+            .await
+            .expect("应能插入 target Shape");
+
+        let collection = Layer::collect_renderables(root)
+            .await
+            .expect("应能收集渲染集合");
+
+        let clip = collection
+            .clip_aabb(target)
+            .expect("应能从 border 继承裁剪盒");
+
+        assert_eq!(
+            clip,
+            Aabb3::new(local.min + offset, local.max + offset),
+            "clip AABB 应被转换到 world-space"
+        );
+
+        let _ = target.unregister_component::<Shape>().await;
+        let _ = target.unregister_component::<Transform>().await;
+        let _ = target.unregister_component::<Renderable>().await;
+        let _ = border.unregister_component::<AabbBorder>().await;
+        let _ = border.unregister_component::<Transform>().await;
+        crate::game::reachability::unregister_engine_root(root);
+        cleanup(&target).await;
+        cleanup(&border).await;
         cleanup(&root).await;
     }
 

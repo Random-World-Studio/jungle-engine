@@ -89,7 +89,7 @@ impl RenderSystem {
             .map(|viewport| (viewport.width, viewport.height))
             .unwrap_or(context.framebuffer_size);
 
-        let (render_pipeline, bind_group_layout, pipeline_generation) =
+        let (render_pipeline, bind_group_layout, clip_layout, pipeline_generation) =
             match context.caches.scene2d.ensure(
                 context.device,
                 context.surface_format,
@@ -99,6 +99,7 @@ impl RenderSystem {
                 Ok((pipeline, generation)) => (
                     pipeline.pipeline.clone(),
                     pipeline.bind_group_layout().clone(),
+                    pipeline.clip_layout().clone(),
                     generation,
                 ),
                 Err(error) => {
@@ -151,6 +152,14 @@ impl RenderSystem {
 
         let mut draws = Vec::new();
         let mut total_vertices = 0usize;
+
+        let clip_uniform_size = std::mem::size_of::<[f32; 8]>();
+        let min_alignment = context
+            .device
+            .limits()
+            .min_uniform_buffer_offset_alignment as usize;
+        let clip_stride = clip_uniform_size.div_ceil(min_alignment) * min_alignment;
+        let mut clip_data: Vec<u8> = Vec::new();
 
         for group in face_groups {
             let faces = group.faces();
@@ -212,7 +221,23 @@ impl RenderSystem {
                 }
             };
 
-            let mut vertex_data = Vec::with_capacity(faces.len() * 18);
+            let clip_aabb = renderables.clip_aabb(group.entity());
+            let clip_uniform: [f32; 8] = if let Some(aabb) = clip_aabb {
+                [
+                    aabb.min.x,
+                    aabb.min.y,
+                    aabb.min.z,
+                    1.0,
+                    aabb.max.x,
+                    aabb.max.y,
+                    aabb.max.z,
+                    0.0,
+                ]
+            } else {
+                [0.0; 8]
+            };
+
+            let mut vertex_data = Vec::with_capacity(faces.len() * 27);
 
             for (triangle_index, triangle) in faces.iter().enumerate() {
                 if triangle
@@ -243,12 +268,19 @@ impl RenderSystem {
                     vertex_data.push(uv.x);
                     vertex_data.push(uv.y);
                     vertex_data.push(brightness);
+                    vertex_data.push(vertex.x);
+                    vertex_data.push(vertex.y);
+                    vertex_data.push(vertex.z);
                 }
             }
 
             if vertex_data.is_empty() {
                 continue;
             }
+
+            let clip_offset = clip_data.len() as u32;
+            clip_data.extend_from_slice(util::cast_slice_f32(&clip_uniform));
+            clip_data.resize(clip_offset as usize + clip_stride, 0);
 
             let vertex_buffer =
                 context
@@ -258,12 +290,13 @@ impl RenderSystem {
                         contents: util::cast_slice_f32(&vertex_data),
                         usage: wgpu::BufferUsages::VERTEX,
                     });
-            let vertex_count = (vertex_data.len() / 6) as u32;
+            let vertex_count = (vertex_data.len() / 9) as u32;
             total_vertices += vertex_count as usize;
             draws.push(Scene2DDraw {
                 vertex_buffer,
                 vertex_count,
                 bind_group,
+                clip_offset,
             });
         }
 
@@ -275,6 +308,27 @@ impl RenderSystem {
             );
             return;
         }
+
+        let clip_buffer = context.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Scene2D Clip Buffer"),
+            size: clip_data.len() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        context.queue.write_buffer(&clip_buffer, 0, &clip_data);
+
+        let clip_bind_group = context.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Scene2D Clip Bind Group"),
+            layout: &clip_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: &clip_buffer,
+                    offset: 0,
+                    size: wgpu::BufferSize::new(clip_uniform_size as u64),
+                }),
+            }],
+        });
 
         let label = format!("Layer {}", entity.id());
         let ops = wgpu::Operations {
@@ -328,6 +382,7 @@ impl RenderSystem {
         pass.set_pipeline(&render_pipeline);
         for draw in &draws {
             pass.set_bind_group(0, &draw.bind_group, &[]);
+            pass.set_bind_group(1, &clip_bind_group, &[draw.clip_offset]);
             pass.set_vertex_buffer(0, draw.vertex_buffer.slice(..));
             pass.draw(0..draw.vertex_count, 0..1);
         }
@@ -405,7 +460,7 @@ impl RenderSystem {
         };
         drop(layer_guard);
 
-        let (render_pipeline, bind_group_layout, pipeline_generation) =
+        let (render_pipeline, bind_group_layout, clip_layout, pipeline_generation) =
             match context.caches.scene2d.ensure(
                 context.device,
                 context.surface_format,
@@ -415,6 +470,7 @@ impl RenderSystem {
                 Ok((pipeline, generation)) => (
                     pipeline.pipeline.clone(),
                     pipeline.bind_group_layout().clone(),
+                    pipeline.clip_layout().clone(),
                     generation,
                 ),
                 Err(error) => {
@@ -569,6 +625,14 @@ impl RenderSystem {
         let mut draws = Vec::new();
         let mut total_vertices = 0usize;
 
+        let clip_uniform_size = std::mem::size_of::<[f32; 8]>();
+        let min_alignment = context
+            .device
+            .limits()
+            .min_uniform_buffer_offset_alignment as usize;
+        let clip_stride = clip_uniform_size.div_ceil(min_alignment) * min_alignment;
+        let mut clip_data: Vec<u8> = Vec::new();
+
         const MAX_POINT_LIGHT_BRIGHTNESS: f32 = 1.0;
         const MAX_DIRECTIONAL_BRIGHTNESS: f32 = 4.0;
         const MAX_TOTAL_BRIGHTNESS: f32 = 6.0;
@@ -636,7 +700,22 @@ impl RenderSystem {
                 }
             };
 
-            let mut vertex_data = Vec::with_capacity(faces.len() * 18);
+            let clip_aabb = renderables.clip_aabb(group.entity());
+            let clip_uniform: [f32; 8] = match clip_aabb {
+                Some(clip) => [
+                    clip.min.x,
+                    clip.min.y,
+                    clip.min.z,
+                    1.0,
+                    clip.max.x,
+                    clip.max.y,
+                    clip.max.z,
+                    0.0,
+                ],
+                None => [0.0; 8],
+            };
+
+            let mut vertex_data = Vec::with_capacity(faces.len() * 27);
 
             for (triangle_index, triangle) in faces.iter().enumerate() {
                 // Scene2D 约定：z 必须在 [0,1]，否则该三角形直接丢弃。
@@ -667,12 +746,19 @@ impl RenderSystem {
                     vertex_data.push(uv.x);
                     vertex_data.push(uv.y);
                     vertex_data.push(brightness);
+                    vertex_data.push(vertex.x);
+                    vertex_data.push(vertex.y);
+                    vertex_data.push(vertex.z);
                 }
             }
 
             if vertex_data.is_empty() {
                 continue;
             }
+
+            let clip_offset = clip_data.len() as u32;
+            clip_data.extend_from_slice(util::cast_slice_f32(&clip_uniform));
+            clip_data.resize(clip_offset as usize + clip_stride, 0);
 
             let vertex_buffer =
                 context
@@ -682,12 +768,13 @@ impl RenderSystem {
                         contents: util::cast_slice_f32(&vertex_data),
                         usage: wgpu::BufferUsages::VERTEX,
                     });
-            let vertex_count = (vertex_data.len() / 6) as u32;
+            let vertex_count = (vertex_data.len() / 9) as u32;
             total_vertices += vertex_count as usize;
             draws.push(Scene2DDraw {
                 vertex_buffer,
                 vertex_count,
                 bind_group,
+                clip_offset,
             });
         }
 
@@ -699,6 +786,27 @@ impl RenderSystem {
             );
             return;
         }
+
+        let clip_buffer = context.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Scene2D Clip Buffer"),
+            size: clip_data.len() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        context.queue.write_buffer(&clip_buffer, 0, &clip_data);
+
+        let clip_bind_group = context.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Scene2D Clip Bind Group"),
+            layout: &clip_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: &clip_buffer,
+                    offset: 0,
+                    size: wgpu::BufferSize::new(clip_uniform_size as u64),
+                }),
+            }],
+        });
 
         let label = format!("Layer {}", entity.id());
         let ops = wgpu::Operations {
@@ -753,6 +861,7 @@ impl RenderSystem {
         pass.set_pipeline(&render_pipeline);
         for draw in &draws {
             pass.set_bind_group(0, &draw.bind_group, &[]);
+            pass.set_bind_group(1, &clip_bind_group, &[draw.clip_offset]);
             pass.set_vertex_buffer(0, draw.vertex_buffer.slice(..));
             pass.draw(0..draw.vertex_count, 0..1);
         }
@@ -771,6 +880,7 @@ pub(in crate::game::system::render) struct Scene2DDraw {
     vertex_buffer: wgpu::Buffer,
     vertex_count: u32,
     bind_group: wgpu::BindGroup,
+    clip_offset: u32,
 }
 
 pub(in crate::game::system::render) struct Scene2DPipeline {
@@ -778,6 +888,7 @@ pub(in crate::game::system::render) struct Scene2DPipeline {
     vertex_shader: ResourceHandle,
     fragment_shader: ResourceHandle,
     bind_group_layout: wgpu::BindGroupLayout,
+    clip_layout: wgpu::BindGroupLayout,
 }
 
 impl Scene2DPipeline {
@@ -822,9 +933,23 @@ impl Scene2DPipeline {
             ],
         });
 
+        let clip_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Scene2D Clip Bind Group Layout"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: true,
+                    min_binding_size: wgpu::BufferSize::new(std::mem::size_of::<[f32; 8]>() as u64),
+                },
+                count: None,
+            }],
+        });
+
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Scene2D Pipeline Layout"),
-            bind_group_layouts: &[&bind_group_layout],
+            bind_group_layouts: &[&bind_group_layout, &clip_layout],
             push_constant_ranges: &[],
         });
 
@@ -878,6 +1003,7 @@ impl Scene2DPipeline {
             vertex_shader,
             fragment_shader,
             bind_group_layout,
+            clip_layout,
         })
     }
 
@@ -887,6 +1013,10 @@ impl Scene2DPipeline {
 
     pub(in crate::game::system::render) fn bind_group_layout(&self) -> &wgpu::BindGroupLayout {
         &self.bind_group_layout
+    }
+
+    pub(in crate::game::system::render) fn clip_layout(&self) -> &wgpu::BindGroupLayout {
+        &self.clip_layout
     }
 
     fn load_shader_source(handle: &ResourceHandle) -> anyhow::Result<String> {
@@ -1145,7 +1275,7 @@ impl Scene2DMaterialCache {
     }
 }
 
-const SCENE2D_VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 3] = [
+const SCENE2D_VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 4] = [
     wgpu::VertexAttribute {
         offset: 0,
         shader_location: 0,
@@ -1161,10 +1291,15 @@ const SCENE2D_VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 3] = [
         shader_location: 2,
         format: wgpu::VertexFormat::Float32,
     },
+    wgpu::VertexAttribute {
+        offset: (std::mem::size_of::<f32>() * 6) as u64,
+        shader_location: 3,
+        format: wgpu::VertexFormat::Float32x3,
+    },
 ];
 
 const SCENE2D_VERTEX_LAYOUT: wgpu::VertexBufferLayout = wgpu::VertexBufferLayout {
-    array_stride: (std::mem::size_of::<f32>() * 6) as u64,
+    array_stride: (std::mem::size_of::<f32>() * 9) as u64,
     step_mode: wgpu::VertexStepMode::Vertex,
     attributes: &SCENE2D_VERTEX_ATTRIBUTES,
 };

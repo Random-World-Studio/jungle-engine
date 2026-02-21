@@ -64,6 +64,13 @@ impl Aabb2 {
         }
     }
 
+    /// Returns the intersection box of two AABBs, or `None` if they are disjoint.
+    pub fn intersection(&self, other: &Self) -> Option<Self> {
+        let min = Vector2::new(self.min.x.max(other.min.x), self.min.y.max(other.min.y));
+        let max = Vector2::new(self.max.x.min(other.max.x), self.max.y.min(other.max.y));
+        (min.x <= max.x && min.y <= max.y).then(|| Self { min, max })
+    }
+
     /// Returns a box expanded by `amount` on all sides.
     pub fn expanded(&self, amount: f32) -> Self {
         let delta = Vector2::new(amount, amount);
@@ -149,6 +156,21 @@ impl Aabb3 {
                 self.max.z.max(other.max.z),
             ),
         }
+    }
+
+    /// Returns the intersection box of two AABBs, or `None` if they are disjoint.
+    pub fn intersection(&self, other: &Self) -> Option<Self> {
+        let min = Vector3::new(
+            self.min.x.max(other.min.x),
+            self.min.y.max(other.min.y),
+            self.min.z.max(other.min.z),
+        );
+        let max = Vector3::new(
+            self.max.x.min(other.max.x),
+            self.max.y.min(other.max.y),
+            self.max.z.min(other.max.z),
+        );
+        (min.x <= max.x && min.y <= max.y && min.z <= max.z).then(|| Self { min, max })
     }
 
     /// Returns a box expanded by `amount` on all sides.

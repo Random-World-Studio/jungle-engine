@@ -27,6 +27,16 @@ var scene_texture : texture_2d<f32>;
 @group(1) @binding(1)
 var scene_sampler : sampler;
 
+struct ClipAabbUniform {
+    // xyz = min, w = enabled (1.0 / 0.0)
+    min_enabled : vec4<f32>,
+    // xyz = max
+    max_pad : vec4<f32>,
+};
+
+@group(2) @binding(0)
+var<uniform> clip : ClipAabbUniform;
+
 struct FragmentInput {
     @location(0) world_position : vec3<f32>,
     @location(1) world_normal : vec3<f32>,
@@ -77,6 +87,14 @@ fn evaluate_parallel_light(light : ParallelLightUniform, normal : vec3<f32>) -> 
 
 @fragment
 fn fs_main(input : FragmentInput) -> @location(0) vec4<f32> {
+    if clip.min_enabled.w > 0.5 {
+        let p = input.world_position;
+        if p.x < clip.min_enabled.x || p.y < clip.min_enabled.y || p.z < clip.min_enabled.z ||
+            p.x > clip.max_pad.x || p.y > clip.max_pad.y || p.z > clip.max_pad.z {
+            discard;
+        }
+    }
+
     let normalized_normal = normalize_or_default(input.world_normal);
     let use_texture = input.uv_enabled > 0.5;
 

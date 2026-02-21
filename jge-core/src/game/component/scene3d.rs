@@ -398,6 +398,7 @@ impl Scene3D {
                     bundle.entity(),
                     triangles,
                     bundle.material().cloned(),
+                    bundle.clip_aabb(),
                 ));
             }
         }
