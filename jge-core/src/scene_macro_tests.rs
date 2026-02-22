@@ -271,6 +271,46 @@ async fn scene_macro_bindings_destroy_is_send_and_spawnable() -> anyhow::Result<
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn scene_macro_destroy_hooks_are_executed() -> anyhow::Result<()> {
+    use crate::scenes::SceneBinding as _;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let bindings = crate::scene! {
+        node "root" {
+            + Transform::new();
+        }
+    }
+    .await?;
+
+    let hits = Arc::new(AtomicUsize::new(0));
+    let hits2 = hits.clone();
+    bindings.register_destroy_hook(crate::scenes::destroy_hook(move |b| {
+        let hits = hits2.clone();
+        Box::pin(async move {
+            assert!(b.binding("root").is_some());
+            hits.fetch_add(1, Ordering::SeqCst);
+        })
+    }));
+
+    bindings.destroy().await;
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        1,
+        "destroy hook should run once"
+    );
+
+    // destroy() 允许重复调用；hook 列表应被 drain，避免重复执行。
+    bindings.destroy().await;
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        1,
+        "destroy hook should not rerun"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn scene_macro_external_scene_bindings_node_can_attach_and_destroy_cascades()
 -> anyhow::Result<()> {
     let bindings = crate::scene! {

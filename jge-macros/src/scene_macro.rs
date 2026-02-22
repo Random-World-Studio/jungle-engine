@@ -585,6 +585,10 @@ mod scene_dsl {
                         ::std::boxed::Box<dyn #core_crate::scenes::SceneDestroy>,
                     >,
                     #[doc(hidden)]
+                    pub __jge_scene_extra_destroy: #core_crate::sync::Mutex<
+                        ::std::vec::Vec<::std::sync::Arc<dyn #core_crate::scenes::SceneDestroyHook>>,
+                    >,
+                    #[doc(hidden)]
                     pub __jge_scene_destroy: ::std::vec::Vec<(
                         #entity_ty,
                         ::std::vec::Vec<
@@ -619,6 +623,15 @@ mod scene_dsl {
                 pub async fn destroy(&self) {
                     for nested in &self.__jge_scene_nested_destroy {
                         nested.destroy_boxed().await;
+                    }
+                    // 额外销毁钩子：用于清理由逻辑代码动态创建/挂载的实体、任务等。
+                    // 注意：不要在持锁状态下 await。
+                    let extra_hooks = {
+                        let mut __hooks = self.__jge_scene_extra_destroy.lock();
+                        ::core::mem::take(&mut *__hooks)
+                    };
+                    for hook in extra_hooks {
+                        hook.destroy_boxed(self).await;
                     }
                     for (e, ops) in &self.__jge_scene_destroy {
                         for op in ops {
@@ -664,6 +677,15 @@ mod scene_dsl {
                             stringify!(#unique_binds),
                         )*
                     ]
+                }
+
+                fn register_destroy_hook(
+                    &self,
+                    hook: ::std::boxed::Box<dyn #core_crate::scenes::SceneDestroyHook>,
+                ) {
+                    self.__jge_scene_extra_destroy
+                        .lock()
+                        .push(::std::sync::Arc::from(hook));
                 }
             }
         };
@@ -816,6 +838,7 @@ mod scene_dsl {
                     root: #root_var,
                     #(#bindings_ctor_fields,)*
                     __jge_scene_nested_destroy: #nested_destroy_var,
+                    __jge_scene_extra_destroy: #core_crate::sync::Mutex::new(::std::vec::Vec::new()),
                     __jge_scene_destroy: ::std::vec![#(#destroy_ctor_items),*],
                 })
             }
@@ -1551,6 +1574,12 @@ pub fn expand_scene(input: TokenStream) -> TokenStream {
                                 ::std::boxed::Box<dyn ::jge_core::scenes::SceneDestroy>,
                             >,
                             #[doc(hidden)]
+                            pub __jge_scene_extra_destroy: ::jge_core::sync::Mutex<
+                                ::std::vec::Vec<
+                                    ::std::sync::Arc<dyn ::jge_core::scenes::SceneDestroyHook>,
+                                >,
+                            >,
+                            #[doc(hidden)]
                             pub __jge_scene_destroy: ::std::vec::Vec<(
                                 ::jge_core::game::entity::Entity,
                                 ::std::vec::Vec<
@@ -1590,11 +1619,37 @@ pub fn expand_scene(input: TokenStream) -> TokenStream {
                                 })
                             }
                         }
+                        impl ::jge_core::scenes::SceneBinding for SceneBindings {
+                            fn binding(
+                                &self,
+                                name: &str,
+                            ) -> ::core::option::Option<::jge_core::game::entity::Entity> {
+                                match name {
+                                    "root" => ::core::option::Option::Some(self.root),
+                                    _ => ::core::option::Option::None,
+                                }
+                            }
+
+                            fn binding_names(&self) -> &'static [&'static str] {
+                                &["root"]
+                            }
+
+                            fn register_destroy_hook(
+                                &self,
+                                hook: ::std::boxed::Box<dyn ::jge_core::scenes::SceneDestroyHook>,
+                            ) {
+                                self.__jge_scene_extra_destroy
+                                    .lock()
+                                    .push(::std::sync::Arc::from(hook));
+                            }
+                        }
                         SceneBindings {
                             root: ::jge_core::game::entity::Entity::new()
                                 .await
                                 .expect("rust-analyzer placeholder should create entity"),
                             __jge_scene_nested_destroy: ::std::vec::Vec::new(),
+                            __jge_scene_extra_destroy:
+                                ::jge_core::sync::Mutex::new(::std::vec::Vec::new()),
                             __jge_scene_destroy: ::std::vec::Vec::new(),
                         }
                     })

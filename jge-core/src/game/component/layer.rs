@@ -1329,8 +1329,12 @@ mod tests {
             .register_component(Renderable::new())
             .await
             .expect("应能为光源 A 注册 Renderable");
-        if let Some(mut renderable) = light_a.get_component_mut::<Renderable>().await {
-            renderable.set_enabled(false);
+        if let Some(set_future) = light_a
+            .get_component_mut::<Renderable>()
+            .await
+            .map(|mut renderable| renderable.set_enabled(false))
+        {
+            set_future.await;
         }
         let _ = light_a
             .register_component(Transform::new())
@@ -1352,8 +1356,12 @@ mod tests {
             .register_component(Renderable::new())
             .await
             .expect("应能为光源 B 注册 Renderable");
-        if let Some(mut renderable) = light_b.get_component_mut::<Renderable>().await {
-            renderable.set_enabled(false);
+        if let Some(set_future) = light_b
+            .get_component_mut::<Renderable>()
+            .await
+            .map(|mut renderable| renderable.set_enabled(false))
+        {
+            set_future.await;
         }
         let _ = light_b
             .register_component(Transform::new())
@@ -1441,8 +1449,12 @@ mod tests {
             .register_component(Renderable::new())
             .await
             .expect("应能为平行光 A 注册 Renderable");
-        if let Some(mut renderable) = light_a.get_component_mut::<Renderable>().await {
-            renderable.set_enabled(false);
+        if let Some(set_future) = light_a
+            .get_component_mut::<Renderable>()
+            .await
+            .map(|mut renderable| renderable.set_enabled(false))
+        {
+            set_future.await;
         }
         let _ = light_a
             .register_component(Transform::new())
@@ -1461,8 +1473,12 @@ mod tests {
             .register_component(Renderable::new())
             .await
             .expect("应能为平行光 B 注册 Renderable");
-        if let Some(mut renderable) = light_b.get_component_mut::<Renderable>().await {
-            renderable.set_enabled(false);
+        if let Some(set_future) = light_b
+            .get_component_mut::<Renderable>()
+            .await
+            .map(|mut renderable| renderable.set_enabled(false))
+        {
+            set_future.await;
         }
         let _ = light_b
             .register_component(Transform::new())

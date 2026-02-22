@@ -369,8 +369,12 @@ async fn build_demo_scene() -> anyhow::Result<Entity> {
                 node {
                     + PointLight::new(15.0);
                     with(mut transform: Transform, mut light: Light) {
-                        if let Some(mut renderable) = e.get_component_mut::<Renderable>().await {
-                            renderable.set_enabled(false);
+                        if let Some(set_future) = e
+                            .get_component_mut::<Renderable>()
+                            .await
+                            .map(|mut renderable| renderable.set_enabled(false))
+                        {
+                            set_future.await;
                         }
                         transform.set_position(Vector3::new(6.0, 1.0, 6.0));
                         light.set_lightness(1.0);
@@ -381,8 +385,12 @@ async fn build_demo_scene() -> anyhow::Result<Entity> {
                 node {
                     + ParallelLight::new();
                     with(mut transform: Transform, mut light: Light) {
-                        if let Some(mut renderable) = e.get_component_mut::<Renderable>().await {
-                            renderable.set_enabled(false);
+                        if let Some(set_future) = e
+                            .get_component_mut::<Renderable>()
+                            .await
+                            .map(|mut renderable| renderable.set_enabled(false))
+                        {
+                            set_future.await;
                         }
                         transform.set_rotation(Vector3::new(-0.3, -std::f32::consts::PI, 0.0));
                         light.set_lightness(0.7);
@@ -495,8 +503,12 @@ async fn build_demo_scene() -> anyhow::Result<Entity> {
                 node {
                     + ParallelLight::new();
                     with(mut transform: Transform, mut light: Light) {
-                        if let Some(mut renderable) = e.get_component_mut::<Renderable>().await {
-                            renderable.set_enabled(false);
+                        if let Some(set_future) = e
+                            .get_component_mut::<Renderable>()
+                            .await
+                            .map(|mut renderable| renderable.set_enabled(false))
+                        {
+                            set_future.await;
                         }
                         // 方向：绕 Y 轴转 180°，并略微向下俯（与 3D 示例一致的方向习惯）。
                         transform.set_rotation(Vector3::new(0., -std::f32::consts::PI, 0.0));

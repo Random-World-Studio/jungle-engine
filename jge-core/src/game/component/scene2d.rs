@@ -1050,13 +1050,14 @@ mod tests {
         attach_node(visible_entity, root, "应能挂载可见实体").await;
         attach_node(hidden_entity, root, "应能挂载隐藏实体").await;
 
-        {
+        let hide_future = {
             let mut hidden_renderable = hidden_entity
                 .get_component_mut::<Renderable>()
                 .await
                 .expect("隐藏实体应有 Renderable");
-            hidden_renderable.set_enabled(false);
-        }
+            hidden_renderable.set_enabled(false)
+        };
+        hide_future.await;
 
         let visible = {
             let scene = root

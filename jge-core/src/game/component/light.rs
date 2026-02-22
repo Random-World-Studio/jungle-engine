@@ -145,8 +145,12 @@ mod tests {
             .register_component(Renderable::new())
             .await
             .expect("应能插入 Renderable");
-        if let Some(mut renderable) = entity.get_component_mut::<Renderable>().await {
-            renderable.set_enabled(false);
+        if let Some(set_future) = entity
+            .get_component_mut::<Renderable>()
+            .await
+            .map(|mut renderable| renderable.set_enabled(false))
+        {
+            set_future.await;
         }
         let _ = entity
             .register_component(Transform::new())
@@ -180,8 +184,12 @@ mod tests {
             .register_component(Renderable::new())
             .await
             .expect("应能插入 Renderable");
-        if let Some(mut renderable) = entity.get_component_mut::<Renderable>().await {
-            renderable.set_enabled(false);
+        if let Some(set_future) = entity
+            .get_component_mut::<Renderable>()
+            .await
+            .map(|mut renderable| renderable.set_enabled(false))
+        {
+            set_future.await;
         }
         let _ = entity
             .register_component(Transform::new())
@@ -228,8 +236,12 @@ mod tests {
             .register_component(Renderable::new())
             .await
             .expect("应能插入 Renderable");
-        if let Some(mut renderable) = entity.get_component_mut::<Renderable>().await {
-            renderable.set_enabled(false);
+        if let Some(set_future) = entity
+            .get_component_mut::<Renderable>()
+            .await
+            .map(|mut renderable| renderable.set_enabled(false))
+        {
+            set_future.await;
         }
         let _ = entity
             .register_component(Transform::new())

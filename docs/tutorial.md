@@ -239,6 +239,26 @@ node "clip_demo" {
 - 依赖关系：`Entity::unregister_component` 会调用组件的 `unregister_dependencies` 钩子。
 - 幂等：重复调用 `destroy().await` 不会报错。
 
+如果你的游戏逻辑会在运行时**动态创建/挂载**额外实体（这些实体不在 `scene!` DSL 里显式出现），你可以在 bindings 上注册“销毁钩子”，让 `destroy().await` 顺带执行你的清理逻辑：
+
+```rust
+use jge_core::scenes::SceneBinding as _;
+
+let bindings = jge_core::scene! { node "root" { } }.await?;
+
+// 例如：动态生成一个临时实体并挂载（这里只演示销毁钩子写法）
+let extra = jge_core::game::entity::Entity::new().await?;
+
+bindings.register_destroy_hook(jge_core::scenes::destroy_hook(move |_bindings| {
+    Box::pin(async move {
+        // 在这里手写清理逻辑：卸载 extra 上的组件 / detach / 关闭任务等。
+        let _ = extra;
+    })
+}));
+
+bindings.destroy().await;
+```
+
 ### （可选）复用/组合子场景：`<expr> node;`
 
 当你希望把一段可复用的“子节点树”拆成函数/模块时，可以先在外部构造子场景（拿到 `SceneBindings`），再在父场景里用 `<expr> node;` 把它挂进来。
@@ -655,6 +675,8 @@ if let Some(mut health) = entity.get_component_mut::<Health>().await {
     - 深度（z）约定：开启深度测试并使用 `z` 作为深度值，且 **`z` 必须在 `[0,1]`**；`z` 越大越靠前。
 - 常用组合：
     - `Renderable + Transform + Shape (+ Material)`：让实体“能被绘制”。
+        - `Renderable::set_enabled(false)` 会把当前节点及其整棵子树临时隐藏（返回 Future，需要 `.await`）。
+        - `Renderable::set_enabled(true)` 会按“可见性缓存栈”恢复子树节点之前的设置；缓存栈为空时会继承最近 Renderable 父节点的可见性。
     - `Camera + Transform`：摄像机实体。
     - `Light + PointLight/ParallelLight (+ Transform)`：光源实体。
 

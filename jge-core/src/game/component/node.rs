@@ -1,6 +1,9 @@
 use std::{collections::HashSet, fmt};
 
 use super::layer::Layer;
+use super::renderable::{
+    force_subtree_hidden_without_cache, nearest_renderable_ancestor_configured_enabled,
+};
 use super::{Component, ComponentWrite, component, component_impl};
 use crate::game::reachability::{is_reachable_from_engine_root, set_subtree_reachable};
 use crate::game::system::logic::GameLogic;
@@ -263,6 +266,17 @@ impl Node {
         // 这会直接影响 Renderable 的实际可见性。
         let reachable = is_reachable_from_engine_root(parent_entity).await;
         set_subtree_reachable(child, reachable).await;
+
+        // Renderable 可见性：若当前挂载点处于“最近 Renderable 祖先不可见”的子树内，
+        // 则新挂载的子树也应被强制隐藏。
+        //
+        // 这里不做缓存 push：缓存语义只由 `Renderable::set_enabled(false)` 驱动。
+        let inherited_visible = nearest_renderable_ancestor_configured_enabled(parent_entity)
+            .await
+            .unwrap_or(true);
+        if !inherited_visible {
+            force_subtree_hidden_without_cache(child).await;
+        }
 
         if previous_parent.is_some() {
             Self::notify_logic(child, child_logic.clone(), NodeLogicEvent::Detach).await;
